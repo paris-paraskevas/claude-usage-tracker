@@ -68,6 +68,7 @@ CREDS_PATH = Path(os.path.expanduser("~")) / ".claude" / ".credentials.json"
 CONFIG_PATH = APP_DIR / "config.json"
 STATE_PATH = APP_DIR / "state.json"
 HISTORY_PATH = APP_DIR / "history.json"
+SNAPSHOT_PATH = APP_DIR / "last_snapshot.json"
 LOG_PATH = APP_DIR / "claude_usage_tracker.log"
 ICON_PATH = APP_DIR / "app_icon.png"
 ICO_PATH = APP_DIR / "app.ico"
@@ -778,7 +779,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="sub" id="updated">connecting…</div>
     </div>
     <div class="badge" id="tier">—</div>
-    <div class="live"><span class="dot"></span><span>live</span></div>
+    <div class="live"><span class="dot" id="livedot"></span><span id="livetxt">live</span></div>
   </header>
 
   <div class="err" id="err"></div>
@@ -940,16 +941,24 @@ function renderScoped(wins){
 }
 async function refresh(){
   try{
-    const r=await fetch("/api/usage",{cache:"no-store"});
-    const d=await r.json();
+    const d=await (await fetch("/api/usage",{cache:"no-store"})).json();
+    const wins=d.windows||[];
+    const authBad=d.token_state==="expired"||d.token_state==="missing";
     const err=$("err");
-    if(!d.ok){
+    // Big banner only when there's nothing to show (or login needs refreshing);
+    // otherwise keep the last data and show a subtle "stale" state.
+    if(!d.ok && (authBad || !wins.length)){
       err.className="err show";
-      err.textContent="⚠ "+(d.error||"unavailable")+(d.token_state==="expired"||d.token_state==="missing"?" — run any Claude Code command to refresh your login.":"");
+      err.textContent="⚠ "+(d.error||"waiting for data")+(authBad?" — run any Claude Code command to refresh your login.":" — retrying…");
     }else{ err.className="err"; }
     $("tier").textContent=d.subscription||"plan";
-    $("updated").textContent=d.ok?("updated "+new Date(d.updated_at*1000).toLocaleTimeString()):"—";
-    const wins=d.windows||[];
+    if(d.ok){
+      $("livedot").style.background="#3fb950"; $("livetxt").textContent="live";
+      $("updated").textContent="updated "+new Date(d.updated_at*1000).toLocaleTimeString();
+    }else{
+      $("livedot").style.background="#e3893a"; $("livetxt").textContent=wins.length?"stale":"offline";
+      $("updated").textContent=wins.length?"reconnecting… (rate limited)":"—";
+    }
     wins.filter(w=>w.key==="five_hour"||w.key==="seven_day").forEach(renderGauge);
     LASTH=d.history; renderSpark(LASTH);
     renderExtra(d.extra);
@@ -1323,6 +1332,14 @@ class TrayApp:
         import pystray
         ensure_app_icon()
         httpd, self.port = start_server(self.port)
+        # Preload the last-known snapshot so the UI shows data immediately, even if
+        # the first poll is rate-limited (marked stale until the first good poll).
+        prev = load_json(SNAPSHOT_PATH, None)
+        if isinstance(prev, dict) and prev.get("windows"):
+            prev["ok"] = False
+            prev["error"] = None
+            with STORE_LOCK:
+                STORE["snapshot"] = prev
         self.icon = pystray.Icon(APP_NAME, icon=make_icon_image({}),
                                  title=f"{APP_NAME}\nstarting…", menu=self.build_menu())
         self._job = make_kill_on_close_job()
@@ -1434,6 +1451,7 @@ class TrayApp:
                         warned_token = True
                 if r.ok:
                     snap = build_snapshot(r, self.history, self.cfg)
+                    save_json(SNAPSHOT_PATH, snap)   # so a restart shows last data, not an error
                 else:
                     # Keep the last good reading; just flag the error + timestamp.
                     with STORE_LOCK:
