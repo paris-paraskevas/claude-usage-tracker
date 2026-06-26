@@ -80,6 +80,9 @@ Download **`ClaudeUsageTracker-Setup.exe`** from the
 and run it. A standard Windows wizard: accept the license, then tick the shortcuts
 you want — **Desktop / Start Menu / start at sign-in**.
 
+> **Windows SmartScreen** ("Windows protected your PC") appears because the installer
+> isn't code-signed — normal for small open-source apps. Click **More info → Run anyway**.
+
 ### Option B — pipx (updatable from the command line)
 
 ```bash

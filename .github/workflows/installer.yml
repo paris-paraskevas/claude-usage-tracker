@@ -11,7 +11,8 @@ jobs:
   installer:
     runs-on: windows-latest
     permissions:
-      contents: write          # to upload the release asset
+      contents: write          # upload the release asset
+      actions: read            # SignPath reads the unsigned build artifact
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -44,8 +45,36 @@ jobs:
           choco install innosetup -y --no-progress
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ steps.ver.outputs.v }} installer.iss
 
-      - name: Attach installer to the release
+      # --- Code signing via SignPath (free for open source). ---
+      # Inert until you set the repo variable SIGNPATH_ORGANIZATION_ID + secret
+      # SIGNPATH_API_TOKEN (and install the SignPath GitHub App). Docs:
+      # https://about.signpath.io/product/open-source
+      - name: Upload unsigned installer (for SignPath)
+        id: unsigned
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-unsigned
+          path: dist/ClaudeUsageTracker-Setup.exe
+
+      - name: Sign installer (SignPath)
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: claude-usage-tracker
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: dist-signed
+
+      - name: Attach installer to the release (signed if available)
         shell: bash
-        run: gh release upload "${GITHUB_REF_NAME}" dist/ClaudeUsageTracker-Setup.exe --clobber
+        run: |
+          SETUP=dist/ClaudeUsageTracker-Setup.exe
+          [ -f dist-signed/ClaudeUsageTracker-Setup.exe ] && SETUP=dist-signed/ClaudeUsageTracker-Setup.exe
+          echo "uploading: $SETUP"
+          gh release upload "${GITHUB_REF_NAME}" "$SETUP" --clobber
         env:
           GH_TOKEN: ${{ github.token }}
