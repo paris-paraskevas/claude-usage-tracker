@@ -575,27 +575,40 @@ def make_icon_image(windows: dict, error: bool = False):
 
 
 def make_app_icon(size: int = 256):
-    """Claude-style coral tile with a cream sunburst — the app/window/toast icon."""
+    """Claude-style coral tile with a cream sunburst — the app/window/toast icon.
+
+    Rendered at 4x and downscaled (LANCZOS) for crisp, anti-aliased edges, with
+    a subtle vertical gradient on the tile for depth.
+    """
     from PIL import Image, ImageDraw
 
-    S = size
+    ss = 4
+    S = size * ss
     img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    pad, radius = int(S * 0.05), int(S * 0.23)
-    d.rounded_rectangle([pad, pad, S - pad, S - pad], radius=radius, fill=(217, 119, 87, 255))
 
-    # Sunburst: tall thin cream ellipses through the centre, rotated into a 12-point star.
+    # Rounded-rect tile filled with a soft coral gradient.
+    pad, radius = int(S * 0.045), int(S * 0.225)
+    top, bot = (228, 138, 105), (196, 101, 72)
+    grad = Image.new("RGB", (1, S))
+    for y in range(S):
+        t = y / (S - 1)
+        grad.putpixel((0, y), tuple(int(top[i] + (bot[i] - top[i]) * t) for i in range(3)))
+    grad = grad.resize((S, S))
+    mask = Image.new("L", (S, S), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([pad, pad, S - pad, S - pad], radius=radius, fill=255)
+    img.paste(grad, (0, 0), mask)
+
+    # 12-point sunburst from 6 rotated cream ellipses + a solid centre.
     cx = cy = S / 2.0
-    half_w, reach = S * 0.052, S * 0.30
-    cream = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    half_w, reach, cream = S * 0.049, S * 0.31, (245, 243, 236, 255)
+    burst = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     for k in range(6):
         petal = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-        ImageDraw.Draw(petal).ellipse(
-            [cx - half_w, cy - reach, cx + half_w, cy + reach], fill=(240, 238, 230, 255))
-        cream = Image.alpha_composite(cream, petal.rotate(k * 30.0, resample=Image.BICUBIC, center=(cx, cy)))
-    d2 = ImageDraw.Draw(cream)
-    d2.ellipse([cx - S * 0.07, cy - S * 0.07, cx + S * 0.07, cy + S * 0.07], fill=(240, 238, 230, 255))
-    return Image.alpha_composite(img, cream)
+        ImageDraw.Draw(petal).ellipse([cx - half_w, cy - reach, cx + half_w, cy + reach], fill=cream)
+        burst = Image.alpha_composite(burst, petal.rotate(k * 30.0, resample=Image.BICUBIC, center=(cx, cy)))
+    ImageDraw.Draw(burst).ellipse([cx - S * 0.08, cy - S * 0.08, cx + S * 0.08, cy + S * 0.08], fill=cream)
+
+    return Image.alpha_composite(img, burst).resize((size, size), Image.LANCZOS)
 
 
 def ensure_app_icon() -> None:
@@ -707,24 +720,30 @@ DASHBOARD_HTML = r"""<!doctype html>
     box-shadow:0 12px 40px rgba(0,0,0,.35)}
   .gauges{display:grid;grid-template-columns:1fr 1fr;gap:clamp(10px,1.6vw,16px);margin-bottom:clamp(10px,1.6vw,16px)}
   @media(max-width:340px){.gauges{grid-template-columns:1fr}}
-  .gauge{padding:clamp(14px,2.4vw,24px) clamp(10px,2vw,20px);display:flex;flex-direction:column;align-items:center;text-align:center;transition:box-shadow .4s}
+  .gauge{container-type:inline-size;padding:clamp(16px,2vw,22px);transition:box-shadow .4s}
   .gauge.warn{box-shadow:0 12px 40px rgba(0,0,0,.35),0 0 26px rgba(227,137,58,.20)}
   .gauge.high{box-shadow:0 12px 40px rgba(0,0,0,.35),0 0 30px rgba(248,81,73,.32)}
   .gauge.crit{box-shadow:0 12px 40px rgba(0,0,0,.35),0 0 38px rgba(248,81,73,.55)}
   .gauge.max{box-shadow:0 12px 40px rgba(0,0,0,.35),0 0 40px rgba(255,214,10,.55)}
-  .ring{position:relative;width:clamp(116px,29vw,228px);aspect-ratio:1;border-radius:50%;display:grid;place-items:center;
+  .gwrap{display:flex;flex-direction:column;align-items:center;gap:clamp(12px,3cqi,18px)}
+  .ring{position:relative;width:clamp(112px,40cqi,172px);aspect-ratio:1;border-radius:50%;display:grid;place-items:center;flex:none;
     background:conic-gradient(var(--c,#3fb950) calc(var(--p)*1%), var(--track) 0)}
   .ring#r-five_hour{--p:var(--p5)} .ring#r-seven_day{--p:var(--p7)}
   .ring::after{content:"";position:absolute;inset:7.5%;border-radius:50%;
     background:linear-gradient(180deg,#0e1420,#0a0f18);border:1px solid rgba(255,255,255,.05)}
   .ring .val{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;gap:2px}
-  .pct{font-size:clamp(26px,7.4vw,46px);font-weight:720;letter-spacing:-1.5px;line-height:.92}
-  .pct small{font-size:clamp(12px,2.6vw,18px);font-weight:600;color:var(--dim);margin-left:1px;letter-spacing:0}
-  .glabel{color:var(--dim);font-size:clamp(9px,1.5vw,11px);text-transform:uppercase;letter-spacing:1.4px}
-  .reset{margin-top:clamp(10px,1.8vw,16px);font-size:clamp(11px,1.7vw,13px)}
+  .pct{font-size:clamp(22px,9cqi,40px);font-weight:720;letter-spacing:-1.5px;line-height:.92}
+  .pct small{font-size:clamp(11px,3.4cqi,16px);font-weight:600;color:var(--dim);margin-left:1px;letter-spacing:0}
+  .glabel{color:var(--dim);font-size:clamp(8px,2.3cqi,11px);text-transform:uppercase;letter-spacing:1.2px}
+  .ginfo{display:flex;flex-direction:column;align-items:center;text-align:center;gap:6px;min-width:0}
+  .reset{font-size:clamp(12px,3cqi,14px)}
   .reset b{font-variant-numeric:tabular-nums}
-  .reset .abs{color:var(--dim);font-size:clamp(10px,1.5vw,11.5px);margin-top:2px}
-  .burn{margin-top:clamp(8px,1.4vw,11px);font-size:clamp(10px,1.5vw,12px);color:var(--dim);min-height:16px}
+  .reset .abs{color:var(--dim);font-size:clamp(10px,2.4cqi,12px);margin-top:2px}
+  .burn{font-size:clamp(10px,2.4cqi,12px);color:var(--dim);min-height:16px}
+  @container (min-width:380px){
+    .gwrap{flex-direction:row;align-items:center;justify-content:center;gap:clamp(18px,5cqi,34px)}
+    .ginfo{align-items:flex-start;text-align:left}
+  }
   .burn .hot{color:#e3893a;font-weight:600} .burn .ok{color:#3fb950}
   .row{display:grid;grid-template-columns:1fr 1fr;gap:clamp(10px,1.6vw,16px)}
   @media(max-width:600px){.row{grid-template-columns:1fr}}
@@ -766,24 +785,32 @@ DASHBOARD_HTML = r"""<!doctype html>
 
   <div class="gauges">
     <div class="card gauge" id="g-five_hour">
-      <div class="ring" id="r-five_hour" style="--c:#3fb950">
-        <div class="val">
-          <div class="pct" id="p-five_hour">–<small>%</small></div>
-          <div class="glabel">5-hour</div>
+      <div class="gwrap">
+        <div class="ring" id="r-five_hour" style="--c:#3fb950">
+          <div class="val">
+            <div class="pct" id="p-five_hour">–<small>%</small></div>
+            <div class="glabel">5-hour</div>
+          </div>
+        </div>
+        <div class="ginfo">
+          <div class="reset"><b id="cd-five_hour">—</b><div class="abs" id="ab-five_hour"></div></div>
+          <div class="burn" id="bn-five_hour"></div>
         </div>
       </div>
-      <div class="reset"><b id="cd-five_hour">—</b><div class="abs" id="ab-five_hour"></div></div>
-      <div class="burn" id="bn-five_hour"></div>
     </div>
     <div class="card gauge" id="g-seven_day">
-      <div class="ring" id="r-seven_day" style="--c:#3fb950">
-        <div class="val">
-          <div class="pct" id="p-seven_day">–<small>%</small></div>
-          <div class="glabel">Weekly</div>
+      <div class="gwrap">
+        <div class="ring" id="r-seven_day" style="--c:#3fb950">
+          <div class="val">
+            <div class="pct" id="p-seven_day">–<small>%</small></div>
+            <div class="glabel">Weekly</div>
+          </div>
+        </div>
+        <div class="ginfo">
+          <div class="reset"><b id="cd-seven_day">—</b><div class="abs" id="ab-seven_day"></div></div>
+          <div class="burn" id="bn-seven_day"></div>
         </div>
       </div>
-      <div class="reset"><b id="cd-seven_day">—</b><div class="abs" id="ab-seven_day"></div></div>
-      <div class="burn" id="bn-seven_day"></div>
     </div>
   </div>
 
@@ -1076,40 +1103,74 @@ def open_dashboard(port: int, prefer_window: bool) -> None:
     webbrowser.open(url)
 
 
-def set_window_icon(ico_path) -> None:
-    """Replace the default pythonw window/taskbar icon on this process's windows."""
+def set_app_user_model_id(appid: str = "ClaudeUsageTracker") -> None:
+    """Distinct taskbar identity so Windows uses our window icon, not pythonw's."""
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(appid)
+    except Exception:
+        pass
+
+
+def set_window_icon(ico_path) -> bool:
+    """Set this process's top-level window icon (titlebar + taskbar). Returns True
+    once a visible top-level window was found and updated."""
     try:
         import ctypes
         from ctypes import wintypes
         u32 = ctypes.windll.user32
         k32 = ctypes.windll.kernel32
-        IMAGE_ICON, LR_LOADFROMFILE = 1, 0x10
-        big = u32.LoadImageW(None, str(ico_path), IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
+        # Correct restypes — handles are pointer-sized; default c_int truncates on 64-bit.
+        u32.LoadImageW.restype = ctypes.c_void_p
+        u32.LoadImageW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR, ctypes.c_uint,
+                                   ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+        u32.SendMessageW.restype = ctypes.c_void_p
+        u32.SendMessageW.argtypes = [wintypes.HWND, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
+        setclass = getattr(u32, "SetClassLongPtrW", None) or u32.SetClassLongW
+        setclass.restype = ctypes.c_void_p
+        setclass.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+
+        IMAGE_ICON, LR_LOADFROMFILE, LR_DEFAULTSIZE = 1, 0x10, 0x40
+        big = u32.LoadImageW(None, str(ico_path), IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE)
         small = u32.LoadImageW(None, str(ico_path), IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
-        if not (big or small):
-            return
+        if not big and not small:
+            log("window icon: LoadImage failed")
+            return False
+
         pid = k32.GetCurrentProcessId()
-        WM_SETICON = 0x80
+        WM_SETICON, GW_OWNER, GCLP_HICON, GCLP_HICONSM = 0x80, 4, -14, -34
+        found = []
         proto = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
 
         def cb(hwnd, _):
             wpid = wintypes.DWORD()
             u32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
-            if wpid.value == pid and u32.IsWindowVisible(hwnd):
+            if wpid.value == pid and u32.IsWindowVisible(hwnd) and not u32.GetWindow(hwnd, GW_OWNER):
                 if big:
-                    u32.SendMessageW(hwnd, WM_SETICON, 1, big)   # ICON_BIG
+                    u32.SendMessageW(hwnd, WM_SETICON, 1, big)    # ICON_BIG
+                    setclass(hwnd, GCLP_HICON, big)
                 if small:
                     u32.SendMessageW(hwnd, WM_SETICON, 0, small)  # ICON_SMALL
+                    setclass(hwnd, GCLP_HICONSM, small)
+                found.append(hwnd)
             return True
 
         u32.EnumWindows(proto(cb), 0)
+        if found:
+            log(f"window icon set on {len(found)} window(s)")
+            return True
+        return False
     except Exception as exc:
         log(f"set window icon failed: {exc}")
+        return False
 
 
 def _apply_window_icon() -> None:
-    time.sleep(0.8)   # let the webview window appear first
-    set_window_icon(ICO_PATH)
+    for _ in range(25):               # the webview window can take a moment to appear
+        time.sleep(0.4)
+        if set_window_icon(ICO_PATH):
+            return
+    log("window icon: no top-level window found")
 
 
 def run_window(port: int) -> int:
@@ -1122,9 +1183,11 @@ def run_window(port: int) -> int:
     try:
         import webview
         ensure_app_icon()
+        set_app_user_model_id()
         webview.create_window(APP_NAME, url, width=820, height=640,
                               min_size=(300, 360), background_color="#070a10")
-        webview.start(_apply_window_icon)
+        threading.Thread(target=_apply_window_icon, daemon=True).start()
+        webview.start(icon=str(ICO_PATH))
     except Exception as exc:
         log(f"window mode failed, opening browser: {exc}")
         webbrowser.open(url)
@@ -1143,6 +1206,7 @@ def run_widget(port: int) -> int:
     try:
         import webview
         ensure_app_icon()
+        set_app_user_model_id()
 
         w = int(cfg.get("widget_width", 392))
         h = int(cfg.get("widget_height", 150))
@@ -1165,7 +1229,8 @@ def run_widget(port: int) -> int:
         webview.create_window(APP_NAME, url, width=w, height=h, resizable=False,
                               frameless=True, easy_drag=True, on_top=True,
                               background_color="#0e1422", js_api=Api(), **pos)
-        webview.start(_apply_window_icon)
+        threading.Thread(target=_apply_window_icon, daemon=True).start()
+        webview.start(icon=str(ICO_PATH))
     except Exception as exc:
         log(f"widget mode failed: {exc}")
     return 0
