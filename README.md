@@ -37,6 +37,10 @@ talks to nothing but that one Anthropic endpoint.
   read from your local Claude Code logs (token counts only, never content), with
   **Context % / Tokens** tabs and active indicators — see which terminal is burning
   your usage.
+- **Proactive alerts + traffic-light verdict** — toasts when a window is on track to
+  run out *before* it resets, when the active context hits 90% (time to `/compact`),
+  or when overage credits near the cap; plus a one-glance **green / amber / red**
+  verdict in the widget and dashboard, and a heads-up when a new version is on PyPI.
 - **Live tray icon** — two bars (left = 5h, right = weekly) that fill and change
   colour with usage.
 - **20% notifications** — a Windows toast each time the 5h or weekly window crosses

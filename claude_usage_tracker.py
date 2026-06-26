@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.7"
+__version__ = "0.1.8"
 
 
 def _data_dir() -> Path:
@@ -95,6 +95,8 @@ DEFAULT_CONFIG = {
     "api_fallback_interval_seconds": 300,# min gap between API polls when no statusline data
     "sessions_interval_seconds": 45,     # how often to rescan local session logs
     "sessions_top_n": 8,
+    "predictive_alerts": True,           # burn-rate / context-full / overage toasts
+    "update_check": True,                # daily check for a newer version on PyPI
     "threshold_step": 20,            # ping every N percent
     "windows": ["five_hour", "seven_day"],
     "notify_at_100": True,
@@ -650,6 +652,55 @@ def read_statusline_snapshot():
             "cwd": d.get("cwd"), "model": d.get("model"), "ts": float(ts)}
 
 
+def fmt_secs(s) -> str:
+    s = max(0, int(s or 0))
+    d, h, m = s // 86400, s % 86400 // 3600, s % 3600 // 60
+    if d:
+        return f"{d}d {h}h"
+    if h:
+        return f"{h}h {m:02d}m"
+    return f"{m}m"
+
+
+VERDICTS = {
+    "ok": ("#3fb950", "All clear"),
+    "caution": ("#e3893a", "Ease up"),
+    "stop": ("#f85149", "Near limit"),
+}
+
+
+def compute_verdict(windows) -> dict:
+    """One traffic-light status from the 5h + weekly windows (pct + burn-rate ETA)."""
+    level = "ok"
+    for w in windows:
+        if w.get("key") not in ("five_hour", "seven_day"):
+            continue
+        pct, eta = w.get("pct", 0), w.get("eta_seconds")
+        if pct >= 95:
+            level = "stop"
+        elif (pct >= 80 or eta is not None) and level != "stop":
+            level = "caution"
+    color, text = VERDICTS[level]
+    return {"level": level, "color": color, "text": text}
+
+
+def _vtuple(v):
+    try:
+        return tuple(int(x) for x in str(v).split(".")[:3])
+    except Exception:
+        return (0,)
+
+
+def check_pypi_latest():
+    """Latest published version on PyPI (or None). Hits pypi.org, not the rate-limited
+    Anthropic endpoint — safe to call ~daily."""
+    try:
+        with urllib.request.urlopen("https://pypi.org/pypi/claude-usage-tracker/json", timeout=10) as resp:
+            return json.load(resp).get("info", {}).get("version")
+    except Exception:
+        return None
+
+
 def build_snapshot(r: FetchResult, hist: dict, cfg: dict) -> dict:
     now_s = time.time()
     oauth = read_oauth()
@@ -688,6 +739,7 @@ def build_snapshot(r: FetchResult, hist: dict, cfg: dict) -> dict:
             "five_hour": hist["five_hour"][-n:],
             "seven_day": hist["seven_day"][-n:],
         }
+    snap["verdict"] = compute_verdict(snap["windows"])
     return snap
 
 
@@ -825,6 +877,51 @@ def check_thresholds(windows: dict, state: dict, cfg: dict) -> None:
             state[key]["resets_at"] = reset_iso
 
 
+def check_alerts(snap: dict, state: dict, cfg: dict) -> None:
+    """Proactive toasts beyond the 20% marks: projected burnout, context-full,
+    and overage-credit warnings. Deduped so each fires once per episode."""
+    if not cfg.get("predictive_alerts", True):
+        return
+    al = state.setdefault("_alerts", {})
+
+    # Burn-rate: projected to hit 100% before the window resets (once per reset-period).
+    for w in snap.get("windows", []):
+        key = w.get("key")
+        if key not in ("five_hour", "seven_day"):
+            continue
+        eta, reset_ms = w.get("eta_seconds"), w.get("resets_at")
+        akey = "burn_" + key
+        if eta is not None and eta > 0 and w.get("pct", 0) < 95:
+            if al.get(akey) != reset_ms:
+                notify(f"Claude {LABELS.get(key, key)} on track to run out",
+                       f"~{fmt_secs(eta)} to 100% at this pace — before it resets")
+                al[akey] = reset_ms
+
+    # Active session's context window almost full (hysteresis: re-arm under 80%).
+    ctx = (snap.get("context") or {}).get("used_percentage")
+    if isinstance(ctx, (int, float)) and not isinstance(ctx, bool):
+        if ctx >= 90 and not al.get("context"):
+            cwd = snap.get("cwd") or ""
+            name = os.path.basename(cwd.rstrip("/\\")) if cwd else "session"
+            notify("Context almost full", f"{name} at {ctx:.0f}% — consider /compact")
+            al["context"] = True
+        elif ctx < 80:
+            al["context"] = False
+
+    # Overage credits almost gone (hysteresis: re-arm under 85%).
+    ex = snap.get("extra")
+    if isinstance(ex, dict) and ex.get("enabled"):
+        p = ex.get("pct", 0)
+        if p >= 90 and not al.get("overage"):
+            cur = ex.get("currency", "")
+            tail = (f" ({cur} {ex['used']:.2f}/{ex['limit']:.2f})"
+                    if ex.get("used") is not None and ex.get("limit") is not None else "")
+            notify("Overage credits almost gone", f"{p:.0f}% used{tail}")
+            al["overage"] = True
+        elif p < 85:
+            al["overage"] = False
+
+
 # ---------------------------------------------------------------------------
 # Dashboard (served at http://127.0.0.1:<port>/)
 # ---------------------------------------------------------------------------
@@ -863,7 +960,8 @@ DASHBOARD_HTML = r"""<!doctype html>
   h1{font-size:18px;font-weight:650;letter-spacing:.2px}
   .sub{color:var(--dim);font-size:12px}
   .badge{font-size:11px;color:var(--dim);border:1px solid var(--line);padding:3px 9px;border-radius:999px;text-transform:capitalize}
-  .live{margin-left:auto;display:flex;align-items:center;gap:7px;color:var(--dim);font-size:12px}
+  .vpill{margin-left:auto;font-size:12px;font-weight:650;padding:4px 12px;border-radius:999px;border:1px solid transparent}
+  .live{margin-left:14px;display:flex;align-items:center;gap:7px;color:var(--dim);font-size:12px}
   .dot{width:8px;height:8px;border-radius:50%;background:#3fb950;box-shadow:0 0 0 0 rgba(63,185,80,.6);animation:pulse 2.4s infinite}
   @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(63,185,80,.55)}70%{box-shadow:0 0 0 9px rgba(63,185,80,0)}100%{box-shadow:0 0 0 0 rgba(63,185,80,0)}}
   .card{background:var(--card);border:1px solid var(--line);border-radius:18px;backdrop-filter:blur(14px);
@@ -941,6 +1039,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="sub" id="updated">connecting…</div>
     </div>
     <div class="badge" id="tier">—</div>
+    <div class="vpill" id="vpill"></div>
     <div class="live"><span class="dot" id="livedot"></span><span id="livetxt">live</span></div>
   </header>
 
@@ -1147,6 +1246,9 @@ async function refresh(){
       err.textContent="⚠ "+(d.error||"waiting for data")+(authBad?" — run any Claude Code command to refresh your login.":" — retrying…");
     }else{ err.className="err"; }
     $("tier").textContent=d.subscription||"plan";
+    const vp=$("vpill"), v=d.verdict;
+    if(v && v.text){ vp.style.display=""; vp.textContent=v.text; vp.style.color=v.color; vp.style.borderColor=v.color+"66"; vp.style.background=v.color+"1f"; }
+    else { vp.style.display="none"; }
     if(d.ok){
       $("livedot").style.background="#3fb950"; $("livetxt").textContent="live";
       $("updated").textContent="updated "+new Date(d.updated_at*1000).toLocaleTimeString();
@@ -1192,7 +1294,8 @@ WIDGET_HTML = r"""<!doctype html>
   .top .dot{width:6px;height:6px;border-radius:50%;background:#3fb950}
   .top .ttl{text-transform:uppercase;letter-spacing:1.3px}
   .top .tier{color:#e8eef6;font-size:13.5px;font-weight:700;text-transform:none;letter-spacing:.2px}
-  .top .x{margin-left:auto;cursor:pointer;color:#6b7686;font-size:15px;line-height:1;padding:0 2px}
+  .top .verdict{margin-left:auto;font-weight:700;font-size:11px;padding-right:8px;white-space:nowrap}
+  .top .x{cursor:pointer;color:#6b7686;font-size:15px;line-height:1;padding:0 2px}
   .top .x:hover{color:#e8eef6}
   .row{display:flex;align-items:center;gap:10px;margin:8px 0}
   .lab{width:32px;color:#aeb8c6;font-weight:650;font-size:11.5px}
@@ -1206,7 +1309,7 @@ WIDGET_HTML = r"""<!doctype html>
 <body>
   <div class="top">
     <span class="dot" id="dot"></span><span class="ttl">Claude usage</span>
-    <span class="tier" id="tier"></span><span class="x" onclick="closeWidget()" title="Hide">×</span>
+    <span class="tier" id="tier"></span><span class="verdict" id="verdict"></span><span class="x" onclick="closeWidget()" title="Hide">×</span>
   </div>
   <div id="body">
     <div class="row"><span class="lab">5h</span><div class="bar"><i id="b5"></i></div><span class="pc" id="pc5">–</span><span class="cd" id="cd5"></span></div>
@@ -1234,6 +1337,9 @@ async function refresh(){ try{
   const wins=d.windows||[];
   if(!d.ok && !wins.length){ $("dot").style.background="#f85149"; $("tier").textContent=(d.error||"unavailable"); return; }
   $("dot").style.background=d.ok?"#3fb950":"#e3893a";
+  const v=d.verdict;
+  if(v && v.text){ $("verdict").textContent=v.text; $("verdict").style.color=v.color; if(d.ok)$("dot").style.background=v.color; }
+  else { $("verdict").textContent=""; }
   const dir=(d.cwd||"").replace(/[\\\/]+$/,"").split(/[\\\/]/).pop();
   $("tier").textContent = dir || d.subscription || "";
   $("tier").title = d.cwd || "";
@@ -1585,6 +1691,8 @@ class TrayApp:
         self.icon = None
         self.port = int(cfg.get("dashboard_port", 8787))
         self.widget_proc = None
+        self._update_available = None
+        self._verdict = ""
         self._job = None
         self._children = []
         self._stop = threading.Event()
@@ -1594,6 +1702,8 @@ class TrayApp:
     def build_menu(self):
         import pystray
         return pystray.Menu(
+            pystray.MenuItem(lambda i: f"⬆ Update to v{self._update_available}", self._on_update,
+                             visible=lambda i: bool(self._update_available)),
             pystray.MenuItem(lambda i: "Hide widget" if self._widget_alive() else "Show widget",
                              self._on_toggle_widget),
             pystray.MenuItem("Open dashboard", self._on_open, default=True),
@@ -1664,6 +1774,10 @@ class TrayApp:
     def _on_browser(self, icon, item):
         webbrowser.open(f"http://127.0.0.1:{self.port}/")
 
+    def _on_update(self, icon, item):
+        webbrowser.open("https://github.com/paris-paraskevas/claude-usage-tracker/releases/latest")
+        notify("Update", "Run:  pipx upgrade claude-usage-tracker   (then Quit and relaunch)")
+
     def _on_refresh(self, icon, item):
         self._wake.set()
 
@@ -1693,7 +1807,8 @@ class TrayApp:
         try:
             if r.ok:
                 self.icon.icon = make_icon_image(r.windows)
-                self.icon.title = f"{APP_NAME}\n{status_line(r.windows)}"[:127]
+                head = f"{APP_NAME} · {self._verdict}" if self._verdict else APP_NAME
+                self.icon.title = f"{head}\n{status_line(r.windows)}"[:127]
             elif r.token_state in (TokenState.EXPIRED, TokenState.MISSING):
                 self.icon.icon = make_icon_image({}, error=True)
                 self.icon.title = f"{APP_NAME}\n{r.error}"[:127]
@@ -1715,10 +1830,13 @@ class TrayApp:
         self._sessions_cache = getattr(self, "_sessions_cache", {})
         self._context = getattr(self, "_context", None)
         self._cwd = getattr(self, "_cwd", None)
+        self._verdict = getattr(self, "_verdict", "")
+        self._update_available = getattr(self, "_update_available", None)
         sessions_iv = int(self.cfg.get("sessions_interval_seconds", 45))
         sessions_top = int(self.cfg.get("sessions_top_n", 8))
         last_api = 0.0
         last_sessions = 0.0
+        last_update = 0.0
         warned_token = False
         while not self._stop.is_set():
             try:
@@ -1729,6 +1847,14 @@ class TrayApp:
                     except Exception:
                         log("sessions scan error:\n" + traceback.format_exc())
                     last_sessions = now
+                if self.cfg.get("update_check", True) and (now - last_update >= 86400):
+                    last_update = now
+                    latest = check_pypi_latest()
+                    if latest and _vtuple(latest) > _vtuple(__version__):
+                        self._update_available = latest
+                        if not getattr(self, "_update_notified", False):
+                            notify("Update available", f"v{latest} is out — run: pipx upgrade claude-usage-tracker")
+                            self._update_notified = True
                 sl = read_statusline_snapshot()
                 fresh = bool(sl and (now - sl["ts"]) <= stale_secs)
                 # Prefer the statusline file (no API). Hit /api/oauth/usage only to
@@ -1766,6 +1892,8 @@ class TrayApp:
                         notify(f"{APP_NAME} started", status_line(r.windows))
                         self._started_notified = True
                     snap = build_snapshot(r, self.history, self.cfg)
+                    check_alerts(snap, self.state, self.cfg)
+                    save_json(STATE_PATH, self.state)
                     save_json(SNAPSHOT_PATH, snap)
                 else:
                     if r.token_state in (TokenState.EXPIRED, TokenState.MISSING) and not warned_token:
@@ -1781,6 +1909,7 @@ class TrayApp:
                 snap["sessions"] = self._sessions
                 snap["context"] = self._context
                 snap["cwd"] = self._cwd
+                self._verdict = (snap.get("verdict") or {}).get("text", "")
                 with STORE_LOCK:
                     STORE["snapshot"] = snap
                 self._refresh_visual(r)
