@@ -70,6 +70,7 @@ STATE_PATH = APP_DIR / "state.json"
 HISTORY_PATH = APP_DIR / "history.json"
 LOG_PATH = APP_DIR / "claude_usage_tracker.log"
 ICON_PATH = APP_DIR / "app_icon.png"
+ICO_PATH = APP_DIR / "app.ico"
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
@@ -573,12 +574,37 @@ def make_icon_image(windows: dict, error: bool = False):
     return img
 
 
+def make_app_icon(size: int = 256):
+    """Claude-style coral tile with a cream sunburst — the app/window/toast icon."""
+    from PIL import Image, ImageDraw
+
+    S = size
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    pad, radius = int(S * 0.05), int(S * 0.23)
+    d.rounded_rectangle([pad, pad, S - pad, S - pad], radius=radius, fill=(217, 119, 87, 255))
+
+    # Sunburst: tall thin cream ellipses through the centre, rotated into a 12-point star.
+    cx = cy = S / 2.0
+    half_w, reach = S * 0.052, S * 0.30
+    cream = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    for k in range(6):
+        petal = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+        ImageDraw.Draw(petal).ellipse(
+            [cx - half_w, cy - reach, cx + half_w, cy + reach], fill=(240, 238, 230, 255))
+        cream = Image.alpha_composite(cream, petal.rotate(k * 30.0, resample=Image.BICUBIC, center=(cx, cy)))
+    d2 = ImageDraw.Draw(cream)
+    d2.ellipse([cx - S * 0.07, cy - S * 0.07, cx + S * 0.07, cy + S * 0.07], fill=(240, 238, 230, 255))
+    return Image.alpha_composite(img, cream)
+
+
 def ensure_app_icon() -> None:
-    if ICON_PATH.exists():
-        return
     try:
-        img = make_icon_image({"five_hour": {"pct": 66}, "seven_day": {"pct": 40}})
-        img.save(ICON_PATH)
+        if ICON_PATH.exists() and ICO_PATH.exists():
+            return
+        base = make_app_icon(256)
+        base.save(ICON_PATH)
+        base.save(ICO_PATH, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
     except Exception as exc:
         log(f"icon generation failed: {exc}")
 
@@ -646,7 +672,8 @@ DASHBOARD_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <title>Claude Usage</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><circle cx='32' cy='32' r='26' fill='none' stroke='%233fb950' stroke-width='8'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect x='5' y='5' width='54' height='54' rx='14' fill='%23D97757'/><circle cx='32' cy='32' r='11' fill='%23F0EEE6'/></svg>">
+
 <style>
   @property --p5 { syntax:'<number>'; initial-value:0; inherits:false; }
   @property --p7 { syntax:'<number>'; initial-value:0; inherits:false; }
@@ -1049,6 +1076,42 @@ def open_dashboard(port: int, prefer_window: bool) -> None:
     webbrowser.open(url)
 
 
+def set_window_icon(ico_path) -> None:
+    """Replace the default pythonw window/taskbar icon on this process's windows."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u32 = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+        IMAGE_ICON, LR_LOADFROMFILE = 1, 0x10
+        big = u32.LoadImageW(None, str(ico_path), IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
+        small = u32.LoadImageW(None, str(ico_path), IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
+        if not (big or small):
+            return
+        pid = k32.GetCurrentProcessId()
+        WM_SETICON = 0x80
+        proto = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+        def cb(hwnd, _):
+            wpid = wintypes.DWORD()
+            u32.GetWindowThreadProcessId(hwnd, ctypes.byref(wpid))
+            if wpid.value == pid and u32.IsWindowVisible(hwnd):
+                if big:
+                    u32.SendMessageW(hwnd, WM_SETICON, 1, big)   # ICON_BIG
+                if small:
+                    u32.SendMessageW(hwnd, WM_SETICON, 0, small)  # ICON_SMALL
+            return True
+
+        u32.EnumWindows(proto(cb), 0)
+    except Exception as exc:
+        log(f"set window icon failed: {exc}")
+
+
+def _apply_window_icon() -> None:
+    time.sleep(0.8)   # let the webview window appear first
+    set_window_icon(ICO_PATH)
+
+
 def run_window(port: int) -> int:
     global _instance_guard
     url = f"http://127.0.0.1:{port}/"
@@ -1058,9 +1121,10 @@ def run_window(port: int) -> int:
         return 0
     try:
         import webview
+        ensure_app_icon()
         webview.create_window(APP_NAME, url, width=820, height=640,
                               min_size=(300, 360), background_color="#070a10")
-        webview.start()
+        webview.start(_apply_window_icon)
     except Exception as exc:
         log(f"window mode failed, opening browser: {exc}")
         webbrowser.open(url)
@@ -1078,6 +1142,7 @@ def run_widget(port: int) -> int:
         return 0
     try:
         import webview
+        ensure_app_icon()
 
         w = int(cfg.get("widget_width", 392))
         h = int(cfg.get("widget_height", 150))
@@ -1100,7 +1165,7 @@ def run_widget(port: int) -> int:
         webview.create_window(APP_NAME, url, width=w, height=h, resizable=False,
                               frameless=True, easy_drag=True, on_top=True,
                               background_color="#0e1422", js_api=Api(), **pos)
-        webview.start()
+        webview.start(_apply_window_icon)
     except Exception as exc:
         log(f"widget mode failed: {exc}")
     return 0

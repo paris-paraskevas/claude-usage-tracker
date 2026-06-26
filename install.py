@@ -31,11 +31,9 @@ def ensure_venv():
 def make_icons():
     sys.path.insert(0, str(ROOT))
     import claude_usage_tracker as m
-    from PIL import Image
-    base = m.make_icon_image({"five_hour": {"pct": 66}, "seven_day": {"pct": 40}})
+    base = m.make_app_icon(256)
     base.save(ROOT / "app_icon.png")
-    base.resize((256, 256), Image.NEAREST).save(
-        ICO, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+    base.save(ICO, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
     print("Generated app icon.")
 
 

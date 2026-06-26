@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/icon.png" width="84" alt="Claude Usage Tracker"></p>
+
 # Claude Usage Tracker
 
 A small Windows desktop widget that tracks your Claude plan limits — the **5-hour**
@@ -52,19 +54,31 @@ empty.
 
 ## Install
 
-Requires Windows 11, Python 3.11+, and Claude Code already logged in
-(`~/.claude/.credentials.json`). The native windows use the Edge WebView2 runtime,
-which ships with Windows 11.
+**Requirements**
+- Windows 10 / 11
+- Python 3.11+ — install from [python.org](https://www.python.org/downloads/) and tick
+  **"Add python.exe to PATH"**
+- Claude Code installed and logged in, so `~/.claude/.credentials.json` exists
+- Edge **WebView2** runtime (preinstalled on Windows 11; otherwise a free
+  [download](https://developer.microsoft.com/microsoft-edge/webview2/)) — for the
+  dashboard/widget windows
+
+**Steps**
 
 ```bash
-git clone <this-repo> claude-usage
-cd claude-usage
+git clone https://github.com/paris-paraskevas/claude-usage-tracker.git
+cd claude-usage-tracker
 python install.py
 ```
 
-`install.py` creates a local virtualenv, installs dependencies, generates the icon,
-and adds **Desktop + Start Menu + Startup** shortcuts. It will then auto-start at
-login. Remove the shortcuts with `python uninstall.py`.
+That's all. `install.py` will:
+1. create a local virtualenv (`.venv`) and install dependencies,
+2. generate the app icon,
+3. add **Desktop + Start Menu + Startup** shortcuts (so it auto-starts on login).
+
+Then launch **Claude Usage Tracker** from the Start Menu or Desktop (or run the
+command `install.py` prints). The mini widget appears top-right and a tray icon
+appears by the clock. Uninstall the shortcuts any time with `python uninstall.py`.
 
 ## Usage
 
