@@ -40,7 +40,8 @@ talks to nothing but that one Anthropic endpoint.
 - **Proactive alerts + traffic-light verdict** — toasts when a window is on track to
   run out *before* it resets, when the active context hits 90% (time to `/compact`),
   or when overage credits near the cap; plus a one-glance **green / amber / red**
-  verdict in the widget and dashboard, and a heads-up when a new version is on PyPI.
+  verdict in the widget and dashboard, and a daily update check with a one-click in-app
+  **Update** (the `.exe` self-updates; pipx installs use `pipx upgrade`).
 - **Live tray icon** — two bars (left = 5h, right = weekly) that fill and change
   colour with usage.
 - **20% notifications** — a Windows toast each time the 5h or weekly window crosses
@@ -98,6 +99,10 @@ python install.py
 After any of these, the mini widget appears top-right and a tray icon by the clock.
 **To pin it to the taskbar** (Windows blocks apps from doing this themselves):
 right-click the running app's taskbar icon → *Pin to taskbar*.
+
+**Updating:** the app checks daily and shows an **Update to vX** item in the tray. For
+the installer build it downloads and runs the new Setup.exe for you (closes, upgrades,
+relaunches); pipx installs use `pipx upgrade claude-usage-tracker`.
 
 ## Usage
 

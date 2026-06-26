@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.8"
+__version__ = "0.1.9"
 
 
 def _data_dir() -> Path:
@@ -692,14 +692,24 @@ def _vtuple(v):
         return (0,)
 
 
-def check_pypi_latest():
-    """Latest published version on PyPI (or None). Hits pypi.org, not the rate-limited
-    Anthropic endpoint — safe to call ~daily."""
+RELEASES_URL = "https://github.com/paris-paraskevas/claude-usage-tracker/releases/latest"
+
+
+def check_github_latest():
+    """(latest_version, installer_url) from the latest GitHub release, or (None, None).
+    One call gives both the version and the Setup.exe URL; safe to call ~daily."""
     try:
-        with urllib.request.urlopen("https://pypi.org/pypi/claude-usage-tracker/json", timeout=10) as resp:
-            return json.load(resp).get("info", {}).get("version")
+        req = urllib.request.Request(
+            "https://api.github.com/repos/paris-paraskevas/claude-usage-tracker/releases/latest",
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "claude-usage-tracker"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            d = json.load(resp)
+        ver = (d.get("tag_name") or "").lstrip("v")
+        url = next((a.get("browser_download_url") for a in d.get("assets", [])
+                    if str(a.get("name", "")).lower().endswith(".exe")), None)
+        return (ver or None), url
     except Exception:
-        return None
+        return None, None
 
 
 def build_snapshot(r: FetchResult, hist: dict, cfg: dict) -> dict:
@@ -1693,6 +1703,7 @@ class TrayApp:
         self.port = int(cfg.get("dashboard_port", 8787))
         self.widget_proc = None
         self._update_available = None
+        self._update_url = None
         self._verdict = ""
         self._job = None
         self._children = []
@@ -1776,8 +1787,30 @@ class TrayApp:
         webbrowser.open(f"http://127.0.0.1:{self.port}/")
 
     def _on_update(self, icon, item):
-        webbrowser.open("https://github.com/paris-paraskevas/claude-usage-tracker/releases/latest")
-        notify("Update", "Run:  pipx upgrade claude-usage-tracker   (then Quit and relaunch)")
+        threading.Thread(target=self._do_update, daemon=True).start()
+
+    def _do_update(self):
+        url = self._update_url
+        if getattr(sys, "frozen", False) and url:
+            try:
+                notify(APP_NAME, f"Downloading v{self._update_available}…")
+                dst = os.path.join(os.environ.get("TEMP", str(APP_DIR)), "ClaudeUsageTracker-Setup.exe")
+                req = urllib.request.Request(url, headers={"User-Agent": "claude-usage-tracker"})
+                with urllib.request.urlopen(req, timeout=180) as r:
+                    data = r.read()
+                with open(dst, "wb") as f:
+                    f.write(data)
+                # Silent installer: closes this app, upgrades in place, relaunches it.
+                subprocess.Popen([dst, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], close_fds=True)
+                time.sleep(1)
+                self._on_quit(self.icon, None)
+            except Exception as exc:
+                log(f"self-update failed: {exc}")
+                notify("Update failed", "Opening the download page…")
+                webbrowser.open(RELEASES_URL)
+        else:
+            webbrowser.open(RELEASES_URL)
+            notify("Update", "Run: pipx upgrade claude-usage-tracker  (then relaunch)")
 
     def _on_refresh(self, icon, item):
         self._wake.set()
@@ -1833,6 +1866,7 @@ class TrayApp:
         self._cwd = getattr(self, "_cwd", None)
         self._verdict = getattr(self, "_verdict", "")
         self._update_available = getattr(self, "_update_available", None)
+        self._update_url = getattr(self, "_update_url", None)
         sessions_iv = int(self.cfg.get("sessions_interval_seconds", 45))
         sessions_top = int(self.cfg.get("sessions_top_n", 8))
         last_api = 0.0
@@ -1850,11 +1884,11 @@ class TrayApp:
                     last_sessions = now
                 if self.cfg.get("update_check", True) and (now - last_update >= 86400):
                     last_update = now
-                    latest = check_pypi_latest()
+                    latest, dl = check_github_latest()
                     if latest and _vtuple(latest) > _vtuple(__version__):
-                        self._update_available = latest
+                        self._update_available, self._update_url = latest, dl
                         if not getattr(self, "_update_notified", False):
-                            notify("Update available", f"v{latest} is out — run: pipx upgrade claude-usage-tracker")
+                            notify("Update available", f"v{latest} — open the tray menu → Update")
                             self._update_notified = True
                 sl = read_statusline_snapshot()
                 fresh = bool(sl and (now - sl["ts"]) <= stale_secs)
