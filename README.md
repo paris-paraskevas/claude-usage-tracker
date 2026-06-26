@@ -17,8 +17,13 @@ talks to nothing but that one Anthropic endpoint.
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/dashboard.png" alt="Dashboard" width="560"><br>
-  <em>The full dashboard — gauges, live reset countdowns, burn-rate, history, credits (sample data)</em>
+  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/dashboard.png" alt="Dashboard" width="600"><br>
+  <em>The full dashboard — gauges, live reset countdowns, burn-rate, history, overage credits, and Open Sessions (sample data)</em>
+</p>
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/sessions.png" alt="Open Sessions panel" width="620"><br>
+  <em>Open Sessions — per-project context-window fill % (toggle to Tokens), with active indicators (sample data)</em>
 </p>
 
 ## Features
