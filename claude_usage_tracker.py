@@ -1,0 +1,1400 @@
+"""
+Claude Usage Tracker — a Windows desktop widget for Claude plan limits.
+
+Shows your 5-hour and weekly usage (the same numbers `/usage` shows) in a
+live system-tray icon, fires a toast every time usage crosses a 20% mark, and
+serves a small dark-glass dashboard with animated gauges, live reset
+countdowns, a burn-rate / time-to-limit projection, usage history, and overage
+credits.
+
+Data source: GET https://api.anthropic.com/api/oauth/usage, authenticated with
+the OAuth token Claude Code already stores in ~/.claude/.credentials.json.
+Read-only — it never writes to your credentials file and talks to nothing but
+that one Anthropic endpoint.
+
+    pythonw claude_usage_tracker.py            # tray widget (normal use)
+    python  claude_usage_tracker.py --once     # print status once and exit
+    python  claude_usage_tracker.py --once --debug
+    python  claude_usage_tracker.py --window --port 8787   # dashboard window
+    python  claude_usage_tracker.py --install-autostart
+    python  claude_usage_tracker.py --uninstall-autostart
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import os
+import socket
+import subprocess
+import sys
+import threading
+import time
+import traceback
+import urllib.error
+import urllib.request
+import webbrowser
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Paths & constants
+# ---------------------------------------------------------------------------
+
+APP_NAME = "Claude Usage Tracker"
+
+
+def _data_dir() -> Path:
+    """Where config/state/history/log/icon live.
+
+    Frozen (PyInstaller .exe): %LOCALAPPDATA%\\ClaudeUsageTracker, so data
+    persists outside the per-launch temp extraction dir. Script mode: next to
+    the .py file.
+    """
+    if getattr(sys, "frozen", False):
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "ClaudeUsageTracker"
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return base
+    return Path(__file__).resolve().parent
+
+
+APP_DIR = _data_dir()
+CREDS_PATH = Path(os.path.expanduser("~")) / ".claude" / ".credentials.json"
+CONFIG_PATH = APP_DIR / "config.json"
+STATE_PATH = APP_DIR / "state.json"
+HISTORY_PATH = APP_DIR / "history.json"
+LOG_PATH = APP_DIR / "claude_usage_tracker.log"
+ICON_PATH = APP_DIR / "app_icon.png"
+
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+
+# Headers mirror what the Claude Code CLI sends for OAuth requests.
+BASE_HEADERS = {
+    "anthropic-beta": "oauth-2025-04-20",
+    "anthropic-version": "2023-06-01",
+    "User-Agent": "claude-cli/2.0.0 (external, cli)",
+    "Accept": "application/json",
+}
+
+DEFAULT_CONFIG = {
+    "poll_interval_seconds": 60,
+    "threshold_step": 20,            # ping every N percent
+    "windows": ["five_hour", "seven_day"],
+    "notify_at_100": True,
+    "notify_on_start": True,
+    "request_timeout_seconds": 20,
+    "dashboard_port": 8787,
+    "history_cap": 2880,             # ~2 days at 60s
+    "open_as_window": True,          # tray default action: native window vs browser
+    "show_widget_on_start": True,    # show the always-on-top mini widget at launch
+    "widget_width": 392,
+    "widget_height": 150,
+}
+
+LABELS = {
+    "five_hour": "5h",
+    "seven_day": "Weekly",
+    "seven_day_opus": "Weekly · Opus",
+    "seven_day_sonnet": "Weekly · Sonnet",
+}
+
+WINDOW_LEN = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
+
+_instance_guard = None   # holds the single-instance socket for the process lifetime
+STORE_LOCK = threading.Lock()
+STORE: dict = {"snapshot": {"ok": False, "error": "starting", "windows": []}}
+
+
+# ---------------------------------------------------------------------------
+# Small utilities
+# ---------------------------------------------------------------------------
+
+def log(msg: str) -> None:
+    line = f"{_now_local():%Y-%m-%d %H:%M:%S}  {msg}"
+    try:
+        if LOG_PATH.exists() and LOG_PATH.stat().st_size > 1_000_000:
+            tail = LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()[-300:]
+            LOG_PATH.write_text("\n".join(tail) + "\n", encoding="utf-8")
+        with LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except Exception:
+        pass
+    try:
+        if sys.stdout and sys.stdout.isatty():
+            print(line)
+    except Exception:
+        pass
+
+
+def _now_local() -> datetime:
+    return datetime.now().astimezone()
+
+
+def load_config() -> dict:
+    cfg = dict(DEFAULT_CONFIG)
+    try:
+        if CONFIG_PATH.exists():
+            cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+        else:
+            save_json(CONFIG_PATH, DEFAULT_CONFIG)   # atomic; safe under multi-process startup
+    except Exception as exc:
+        log(f"config load failed, using defaults: {exc}")
+    return cfg
+
+
+def load_json(path: Path, default):
+    try:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log(f"read {path.name} failed: {exc}")
+    return default
+
+
+def save_json(path: Path, data) -> None:
+    try:
+        tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception as exc:
+        log(f"write {path.name} failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# OS / process helpers (single-instance guard, child-process cleanup)
+# ---------------------------------------------------------------------------
+
+def bind_guard(port: int):
+    """Bind a localhost port as a single-instance lock; raises OSError if taken."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    except OSError:
+        pass
+    s.bind(("127.0.0.1", port))
+    return s
+
+
+def make_kill_on_close_job():
+    """Win32 Job Object with KILL_ON_JOB_CLOSE: child processes assigned to it
+    are killed by the OS when this process exits — even on crash/Task-Manager
+    kill — so the widget/window children can never orphan."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateJobObjectW.restype = wintypes.HANDLE
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+
+        class BASIC(ctypes.Structure):
+            _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64),
+                        ("PerJobUserTimeLimit", ctypes.c_int64),
+                        ("LimitFlags", wintypes.DWORD),
+                        ("MinimumWorkingSetSize", ctypes.c_size_t),
+                        ("MaximumWorkingSetSize", ctypes.c_size_t),
+                        ("ActiveProcessLimit", wintypes.DWORD),
+                        ("Affinity", ctypes.c_size_t),
+                        ("PriorityClass", wintypes.DWORD),
+                        ("SchedulingClass", wintypes.DWORD)]
+
+        class IO(ctypes.Structure):
+            _fields_ = [("a", ctypes.c_uint64), ("b", ctypes.c_uint64),
+                        ("c", ctypes.c_uint64), ("d", ctypes.c_uint64),
+                        ("e", ctypes.c_uint64), ("f", ctypes.c_uint64)]
+
+        class EXT(ctypes.Structure):
+            _fields_ = [("BasicLimitInformation", BASIC), ("IoInfo", IO),
+                        ("ProcessMemoryLimit", ctypes.c_size_t),
+                        ("JobMemoryLimit", ctypes.c_size_t),
+                        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                        ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+        info = EXT()
+        info.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        k32.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info))
+        return job
+    except Exception as exc:
+        log(f"job object unavailable: {exc}")
+        return None
+
+
+def assign_to_job(job, proc) -> None:
+    if not job or proc is None:
+        return
+    try:
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.AssignProcessToJobObject(job, int(proc._handle))
+    except Exception as exc:
+        log(f"assign to job failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Credentials (read-only)
+# ---------------------------------------------------------------------------
+
+class TokenState:
+    OK = "ok"
+    EXPIRED = "expired"
+    MISSING = "missing"
+
+
+def read_oauth() -> dict:
+    try:
+        data = json.loads(CREDS_PATH.read_text(encoding="utf-8"))
+        return data.get("claudeAiOauth") or {}
+    except Exception:
+        return {}
+
+
+def read_token() -> tuple[str | None, str]:
+    """Return (access_token, state). Never writes to the credentials file."""
+    oauth = read_oauth()
+    token = oauth.get("accessToken")
+    expires_at = oauth.get("expiresAt")  # epoch milliseconds
+    if not token:
+        return None, TokenState.MISSING
+    if isinstance(expires_at, (int, float)) and expires_at / 1000.0 <= time.time() + 60:
+        return token, TokenState.EXPIRED
+    return token, TokenState.OK
+
+
+# ---------------------------------------------------------------------------
+# API call + parsing
+# ---------------------------------------------------------------------------
+
+class FetchResult:
+    def __init__(self, ok, windows=None, extra=None, raw=None, error=None,
+                 token_state=TokenState.OK, retry_after=None):
+        self.ok = ok
+        self.windows = windows or {}     # key -> {"pct": float, "resets_at": datetime|None}
+        self.extra = extra               # overage credits dict or None
+        self.raw = raw
+        self.error = error
+        self.token_state = token_state
+        self.retry_after = retry_after   # seconds to back off (HTTP 429)
+
+
+def _coerce_pct(value) -> float | None:
+    """Clamp a 0-100 utilization value (the endpoint already reports percent)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return max(0.0, min(100.0, float(value)))
+
+
+def _parse_reset(value) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            ts = value / 1000.0 if value > 1e12 else float(value)
+            return datetime.fromtimestamp(ts, tz=timezone.utc).astimezone()
+        s = str(value).strip()
+        if s.isdigit():
+            return _parse_reset(int(s))
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone()
+    except Exception:
+        return None
+
+
+def parse_windows(data: dict) -> dict:
+    out: dict = {}
+    if not isinstance(data, dict):
+        return out
+    candidates = [data]
+    for k in ("usage", "rate_limits", "limits", "data"):
+        if isinstance(data.get(k), dict):
+            candidates.append(data[k])
+    for key in LABELS:
+        for cand in candidates:
+            w = cand.get(key)
+            if not isinstance(w, dict):
+                continue
+            pct = None
+            for pk in ("utilization", "percentage", "percent", "used_pct", "pct"):
+                if pk in w:
+                    pct = _coerce_pct(w[pk])
+                    if pct is not None:
+                        break
+            if pct is None and "used" in w and "limit" in w:
+                try:
+                    pct = max(0.0, min(100.0, float(w["used"]) / float(w["limit"]) * 100.0))
+                except Exception:
+                    pct = None
+            reset = None
+            for rk in ("resets_at", "reset_at", "resets_at_iso", "reset", "next_reset_at"):
+                if rk in w:
+                    reset = _parse_reset(w[rk])
+                    if reset:
+                        break
+            primary = key in ("five_hour", "seven_day")
+            if pct is not None and (primary or reset is not None or pct > 0):
+                out[key] = {"pct": pct, "resets_at": reset}
+            break
+    return out
+
+
+def parse_extra(data: dict):
+    """Overage credits, normalized to currency units. Prefers the `spend` block."""
+    def amount(d):
+        if isinstance(d, dict) and "amount_minor" in d and "exponent" in d:
+            try:
+                return d["amount_minor"] / (10 ** d["exponent"])
+            except Exception:
+                return None
+        return None
+
+    spend = data.get("spend") if isinstance(data, dict) else None
+    if isinstance(spend, dict) and spend.get("enabled"):
+        u = spend.get("used") or {}
+        lim = spend.get("limit") or {}
+        used, limit = amount(u), amount(lim)
+        pct = spend.get("percent")
+        if pct is None:
+            pct = (used / limit * 100.0) if (used is not None and limit) else 0.0
+        cur = u.get("currency") or lim.get("currency") or ""
+        return {"enabled": True, "used": used, "limit": limit, "currency": cur, "pct": float(pct or 0.0)}
+    eu = data.get("extra_usage") if isinstance(data, dict) else None
+    if isinstance(eu, dict) and eu.get("is_enabled"):
+        return {"enabled": True, "used": None, "limit": None,
+                "currency": eu.get("currency", ""), "pct": _coerce_pct(eu.get("utilization")) or 0.0}
+    return None
+
+
+def fetch_usage(timeout: int) -> FetchResult:
+    token, tstate = read_token()
+    if tstate == TokenState.MISSING:
+        return FetchResult(False, error="No Claude login found", token_state=tstate)
+    if tstate == TokenState.EXPIRED:
+        return FetchResult(False, error="Login expired", token_state=tstate)
+
+    headers = dict(BASE_HEADERS)
+    headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(USAGE_URL, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            return FetchResult(False, error=f"Auth rejected (HTTP {exc.code})",
+                               token_state=TokenState.EXPIRED)
+        if exc.code == 429:
+            try:
+                ra = int(exc.headers.get("retry-after", ""))
+            except (TypeError, ValueError):
+                ra = 300
+            return FetchResult(False, error="Rate limited by API (429)", retry_after=max(60, ra))
+        return FetchResult(False, error=f"HTTP {exc.code}")
+    except Exception as exc:
+        return FetchResult(False, error=f"{type(exc).__name__}: {exc}")
+    return FetchResult(True, windows=parse_windows(data), extra=parse_extra(data), raw=data)
+
+
+# ---------------------------------------------------------------------------
+# Severity, formatting, projections
+# ---------------------------------------------------------------------------
+
+# Usage color scale (low -> high):
+#   0-20 green · 20-60 blue · 60-80 orange · 80-90 red · 90-99 near-black · 100 yellow
+USAGE_BANDS = [
+    (100, "#ffd60a", "max"),
+    (90,  "#0a0a0c", "crit"),
+    (80,  "#f85149", "high"),
+    (60,  "#e3893a", "warn"),
+    (20,  "#58a6ff", "low"),
+    (0,   "#3fb950", "ok"),
+]
+
+
+def usage_style(pct: float) -> tuple[str, str]:
+    """Return (hex_color, level) for a 0-100 utilization value."""
+    for threshold, hexv, level in USAGE_BANDS:
+        if pct >= threshold:
+            return (hexv, level)
+    return ("#3fb950", "ok")
+
+
+def usage_rgba(pct: float) -> tuple[int, int, int, int]:
+    h = usage_style(pct)[0].lstrip("#")
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), 255)
+
+
+def fmt_reset(dt: datetime | None) -> str:
+    if dt is None:
+        return "?"
+    now = _now_local()
+    if (dt - now).total_seconds() < 0:
+        return "due"
+    if dt.date() == now.date():
+        return dt.strftime("%H:%M")
+    if (dt - now).total_seconds() < 7 * 86400:
+        return dt.strftime("%a %H:%M")
+    return dt.strftime("%b %d %H:%M")
+
+
+def status_line(windows: dict) -> str:
+    parts = []
+    for key in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
+        if key in windows:
+            w = windows[key]
+            parts.append(f"{LABELS[key]} {w['pct']:.0f}%->{fmt_reset(w['resets_at'])}")
+    return "  ".join(parts) if parts else "no data"
+
+
+def project(ts, pcts, cur, reset_ms, now_s, lookback=1800):
+    """Return (rate_per_hour, eta_seconds_to_100 | None) from recent samples."""
+    xs, ys = [], []
+    for t, p in zip(ts, pcts):
+        if t >= now_s - lookback:
+            xs.append(t)
+            ys.append(p)
+    if len(xs) < 2 or (xs[-1] - xs[0]) < 300:
+        return (None, None)
+    slope = (ys[-1] - ys[0]) / (xs[-1] - xs[0])      # percent per second
+    rate_h = slope * 3600.0
+    if slope <= 0.0015:                              # ~0.1%/min floor => "steady"
+        return (rate_h, None)
+    eta = (100.0 - cur) / slope
+    if eta <= 0:
+        return (rate_h, 0)
+    if reset_ms and (now_s + eta) > (reset_ms / 1000.0):
+        return (rate_h, None)                        # window resets before the limit
+    return (rate_h, eta)
+
+
+# ---------------------------------------------------------------------------
+# History
+# ---------------------------------------------------------------------------
+
+def load_history() -> dict:
+    h = load_json(HISTORY_PATH, {"t": [], "five_hour": [], "seven_day": []})
+    for k in ("t", "five_hour", "seven_day"):
+        h.setdefault(k, [])
+    return h
+
+
+def append_history(hist: dict, windows: dict, now_s: float, cap: int) -> None:
+    hist["t"].append(int(now_s))
+    hist["five_hour"].append(round(windows.get("five_hour", {}).get("pct", 0.0), 2))
+    hist["seven_day"].append(round(windows.get("seven_day", {}).get("pct", 0.0), 2))
+    for k in ("t", "five_hour", "seven_day"):
+        if len(hist[k]) > cap:
+            hist[k] = hist[k][-cap:]
+
+
+# ---------------------------------------------------------------------------
+# Snapshot (the JSON the dashboard consumes)
+# ---------------------------------------------------------------------------
+
+def build_snapshot(r: FetchResult, hist: dict, cfg: dict) -> dict:
+    now_s = time.time()
+    oauth = read_oauth()
+    snap = {
+        "ok": r.ok,
+        "error": r.error,
+        "token_state": r.token_state,
+        "updated_at": int(now_s),
+        "subscription": oauth.get("subscriptionType", ""),
+        "poll_interval": int(cfg.get("poll_interval_seconds", 60)),
+        "windows": [],
+        "extra": r.extra,
+        "history": {},
+    }
+    order = ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"]
+    for key in order:
+        if key not in r.windows:
+            continue
+        w = r.windows[key]
+        reset_ms = int(w["resets_at"].timestamp() * 1000) if w["resets_at"] else None
+        color, level = usage_style(w["pct"])
+        item = {"key": key, "label": LABELS[key], "pct": round(w["pct"], 1),
+                "resets_at": reset_ms, "color": color, "level": level,
+                "rate_per_hour": None, "eta_seconds": None}
+        if key in ("five_hour", "seven_day"):
+            rate, eta = project(hist["t"], hist[key], w["pct"], reset_ms, now_s)
+            item["rate_per_hour"] = round(rate, 2) if (rate is not None and rate > 0) else None
+            item["eta_seconds"] = None if eta is None else int(eta)
+        snap["windows"].append(item)
+
+    # last ~240 points for the sparkline
+    n = min(240, len(hist["t"]))
+    if n:
+        snap["history"] = {
+            "t": hist["t"][-n:],
+            "five_hour": hist["five_hour"][-n:],
+            "seven_day": hist["seven_day"][-n:],
+        }
+    return snap
+
+
+# ---------------------------------------------------------------------------
+# Tray icon image
+# ---------------------------------------------------------------------------
+
+def make_icon_image(windows: dict, error: bool = False):
+    """Two vertical bars: left = 5h, right = weekly. Height = usage, color = band."""
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+
+    if error:
+        d.arc([6, 6, 58, 58], 0, 360, fill=(248, 81, 73, 255), width=6)
+        d.line([32, 18, 32, 38], fill=(248, 81, 73, 255), width=7)
+        d.ellipse([28, 44, 36, 52], fill=(248, 81, 73, 255))
+        return img
+
+    top, bot = 7, 57
+    for key, x0, x1 in (("five_hour", 11, 29), ("seven_day", 35, 53)):
+        pct = max(0.0, min(100.0, windows.get(key, {}).get("pct", 0.0)))
+        # Track with a light border so any fill colour (incl. near-black) reads.
+        d.rounded_rectangle([x0, top, x1, bot], radius=4,
+                            fill=(255, 255, 255, 26), outline=(255, 255, 255, 100), width=2)
+        if pct > 0:
+            ytop = bot - (bot - top) * pct / 100.0
+            box = [x0 + 2, max(top + 2, ytop), x1 - 2, bot - 2]
+            if box[3] - box[1] >= 8:
+                d.rounded_rectangle(box, radius=3, fill=usage_rgba(pct))
+            else:
+                d.rectangle(box, fill=usage_rgba(pct))
+    return img
+
+
+def ensure_app_icon() -> None:
+    if ICON_PATH.exists():
+        return
+    try:
+        img = make_icon_image({"five_hour": {"pct": 66}, "seven_day": {"pct": 40}})
+        img.save(ICON_PATH)
+    except Exception as exc:
+        log(f"icon generation failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+
+def notify(title: str, msg: str) -> None:
+    try:
+        from winotify import Notification, audio
+        kwargs = {"app_id": APP_NAME, "title": title, "msg": msg}
+        if ICON_PATH.exists():
+            kwargs["icon"] = str(ICON_PATH)
+        toast = Notification(**kwargs)
+        try:
+            toast.set_audio(audio.Default, loop=False)
+        except Exception:
+            pass
+        toast.show()
+    except Exception as exc:
+        log(f"toast failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Threshold ping logic
+# ---------------------------------------------------------------------------
+
+def bucket_of(pct: float, step: int) -> int:
+    return 100 if pct >= 100 else int(pct // step) * step
+
+
+def check_thresholds(windows: dict, state: dict, cfg: dict) -> None:
+    step = int(cfg.get("threshold_step", 20)) or 20
+    for key in cfg.get("windows", ["five_hour", "seven_day"]):
+        if key not in windows:
+            continue
+        w = windows[key]
+        pct = w["pct"]
+        reset_iso = w["resets_at"].isoformat() if w["resets_at"] else None
+        prev = state.get(key, {})
+        cur_bucket = bucket_of(pct, step)
+        # New window or first sighting -> baseline silently (no catch-up spam).
+        if prev.get("bucket") is None or reset_iso != prev.get("resets_at"):
+            state[key] = {"bucket": cur_bucket, "resets_at": reset_iso}
+            continue
+        if cur_bucket > prev["bucket"] and cur_bucket >= step:
+            label = LABELS.get(key, key)
+            if cur_bucket >= 100 and cfg.get("notify_at_100", True):
+                notify(f"Claude {label} limit reached", f"{pct:.0f}% used · resets {fmt_reset(w['resets_at'])}")
+            elif cur_bucket < 100:
+                notify(f"Claude {label} at {cur_bucket}%", f"{pct:.0f}% used · resets {fmt_reset(w['resets_at'])}")
+            state[key] = {"bucket": cur_bucket, "resets_at": reset_iso}
+        else:
+            state[key]["resets_at"] = reset_iso
+
+
+# ---------------------------------------------------------------------------
+# Dashboard (served at http://127.0.0.1:<port>/)
+# ---------------------------------------------------------------------------
+
+DASHBOARD_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Claude Usage</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><circle cx='32' cy='32' r='26' fill='none' stroke='%233fb950' stroke-width='8'/></svg>">
+<style>
+  @property --p5 { syntax:'<number>'; initial-value:0; inherits:false; }
+  @property --p7 { syntax:'<number>'; initial-value:0; inherits:false; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg0:#070a10; --bg1:#0c111b; --card:rgba(255,255,255,.045);
+    --line:rgba(255,255,255,.09); --ink:#e8eef6; --dim:#8b97a8; --track:rgba(255,255,255,.07);
+  }
+  html,body{height:100%}
+  html{transition:--p5 .9s cubic-bezier(.22,1,.36,1),--p7 .9s cubic-bezier(.22,1,.36,1)}
+  body{
+    font:14px/1.5 -apple-system,"Segoe UI",Inter,system-ui,sans-serif;
+    color:var(--ink);
+    background:
+      radial-gradient(1200px 700px at 12% -10%, #15233b 0%, transparent 55%),
+      radial-gradient(1000px 600px at 110% 10%, #221a33 0%, transparent 50%),
+      linear-gradient(180deg,var(--bg1),var(--bg0));
+    background-attachment:fixed; padding:clamp(14px,3.2vw,30px) clamp(12px,3vw,26px) clamp(18px,3vw,34px); -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:960px;margin:0 auto}
+  header{display:flex;align-items:center;gap:12px;margin-bottom:22px;flex-wrap:wrap}
+  .logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,#d97757,#cf5b3e);
+    display:grid;place-items:center;font-weight:800;color:#1a0f0a;box-shadow:0 6px 18px rgba(207,91,62,.35)}
+  h1{font-size:18px;font-weight:650;letter-spacing:.2px}
+  .sub{color:var(--dim);font-size:12px}
+  .badge{font-size:11px;color:var(--dim);border:1px solid var(--line);padding:3px 9px;border-radius:999px;text-transform:capitalize}
+  .live{margin-left:auto;display:flex;align-items:center;gap:7px;color:var(--dim);font-size:12px}
+  .dot{width:8px;height:8px;border-radius:50%;background:#3fb950;box-shadow:0 0 0 0 rgba(63,185,80,.6);animation:pulse 2.4s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(63,185,80,.55)}70%{box-shadow:0 0 0 9px rgba(63,185,80,0)}100%{box-shadow:0 0 0 0 rgba(63,185,80,0)}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:18px;backdrop-filter:blur(14px);
+    box-shadow:0 12px 40px rgba(0,0,0,.35)}
+  .gauges{display:grid;grid-template-columns:1fr 1fr;gap:clamp(10px,1.6vw,16px);margin-bottom:clamp(10px,1.6vw,16px)}
+  @media(max-width:340px){.gauges{grid-template-columns:1fr}}
+  .gauge{padding:clamp(14px,2.4vw,24px) clamp(10px,2vw,20px);display:flex;flex-direction:column;align-items:center;text-align:center;transition:box-shadow .4s}
+  .gauge.warn{box-shadow:0 12px 40px rgba(0,0,0,.35),0 0 26px rgba(227,137,58,.20)}
+  .gauge.high{box-shadow:0 12px 40px rgba(0,0,0,.35),0 0 30px rgba(248,81,73,.32)}
+  .gauge.crit{box-shadow:0 12px 40px rgba(0,0,0,.35),0 0 38px rgba(248,81,73,.55)}
+  .gauge.max{box-shadow:0 12px 40px rgba(0,0,0,.35),0 0 40px rgba(255,214,10,.55)}
+  .ring{position:relative;width:clamp(116px,29vw,228px);aspect-ratio:1;border-radius:50%;display:grid;place-items:center;
+    background:conic-gradient(var(--c,#3fb950) calc(var(--p)*1%), var(--track) 0)}
+  .ring#r-five_hour{--p:var(--p5)} .ring#r-seven_day{--p:var(--p7)}
+  .ring::after{content:"";position:absolute;inset:7.5%;border-radius:50%;
+    background:linear-gradient(180deg,#0e1420,#0a0f18);border:1px solid rgba(255,255,255,.05)}
+  .ring .val{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;gap:2px}
+  .pct{font-size:clamp(26px,7.4vw,46px);font-weight:720;letter-spacing:-1.5px;line-height:.92}
+  .pct small{font-size:clamp(12px,2.6vw,18px);font-weight:600;color:var(--dim);margin-left:1px;letter-spacing:0}
+  .glabel{color:var(--dim);font-size:clamp(9px,1.5vw,11px);text-transform:uppercase;letter-spacing:1.4px}
+  .reset{margin-top:clamp(10px,1.8vw,16px);font-size:clamp(11px,1.7vw,13px)}
+  .reset b{font-variant-numeric:tabular-nums}
+  .reset .abs{color:var(--dim);font-size:clamp(10px,1.5vw,11.5px);margin-top:2px}
+  .burn{margin-top:clamp(8px,1.4vw,11px);font-size:clamp(10px,1.5vw,12px);color:var(--dim);min-height:16px}
+  .burn .hot{color:#e3893a;font-weight:600} .burn .ok{color:#3fb950}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:clamp(10px,1.6vw,16px)}
+  @media(max-width:600px){.row{grid-template-columns:1fr}}
+  .panel{padding:18px 18px 16px}
+  .ptitle{font-size:11px;color:var(--dim);text-transform:uppercase;letter-spacing:1.4px;margin-bottom:12px;display:flex;justify-content:space-between}
+  .legend span{display:inline-flex;align-items:center;gap:5px;margin-left:10px;font-size:11px;color:var(--dim);text-transform:none;letter-spacing:0}
+  .legend i{width:9px;height:9px;border-radius:2px;display:inline-block}
+  svg.spark{width:100%;height:clamp(92px,15vw,128px);display:block;overflow:visible}
+  .mini{display:flex;align-items:center;gap:10px;margin-top:11px}
+  .mini .lbl{width:104px;font-size:12px;color:var(--dim)}
+  .bar{flex:1;height:9px;border-radius:6px;background:var(--track);overflow:hidden}
+  .bar>i{display:block;height:100%;border-radius:6px;transition:width .8s cubic-bezier(.22,1,.36,1)}
+  .mini .num{font-size:12px;font-variant-numeric:tabular-nums;width:46px;text-align:right}
+  .credits .cval{font-size:22px;font-weight:680;margin-bottom:2px}
+  .credits .csub{color:var(--dim);font-size:12px;margin-bottom:12px}
+  .scale{display:flex;justify-content:center;gap:13px;flex-wrap:wrap;margin-top:18px;color:var(--dim);font-size:11px}
+  .scale span{display:inline-flex;align-items:center;gap:6px}
+  .scale i{width:11px;height:11px;border-radius:3px;display:inline-block}
+  footer{margin-top:14px;text-align:center;color:var(--dim);font-size:11px;line-height:1.7}
+  .err{padding:16px 18px;border:1px solid rgba(248,81,73,.4);background:rgba(248,81,73,.08);
+    border-radius:14px;color:#ffb4ad;margin-bottom:16px;font-size:13px;display:none}
+  .err.show{display:block}
+  .skel{opacity:.35}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">C</div>
+    <div>
+      <h1>Claude Usage</h1>
+      <div class="sub" id="updated">connecting…</div>
+    </div>
+    <div class="badge" id="tier">—</div>
+    <div class="live"><span class="dot"></span><span>live</span></div>
+  </header>
+
+  <div class="err" id="err"></div>
+
+  <div class="gauges">
+    <div class="card gauge" id="g-five_hour">
+      <div class="ring" id="r-five_hour" style="--c:#3fb950">
+        <div class="val">
+          <div class="pct" id="p-five_hour">–<small>%</small></div>
+          <div class="glabel">5-hour</div>
+        </div>
+      </div>
+      <div class="reset"><b id="cd-five_hour">—</b><div class="abs" id="ab-five_hour"></div></div>
+      <div class="burn" id="bn-five_hour"></div>
+    </div>
+    <div class="card gauge" id="g-seven_day">
+      <div class="ring" id="r-seven_day" style="--c:#3fb950">
+        <div class="val">
+          <div class="pct" id="p-seven_day">–<small>%</small></div>
+          <div class="glabel">Weekly</div>
+        </div>
+      </div>
+      <div class="reset"><b id="cd-seven_day">—</b><div class="abs" id="ab-seven_day"></div></div>
+      <div class="burn" id="bn-seven_day"></div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="card panel">
+      <div class="ptitle">Usage history
+        <span class="legend"><span><i style="background:#5aa3ff"></i>5h</span><span><i style="background:#c08bff"></i>weekly</span></span>
+      </div>
+      <svg class="spark" id="spark" preserveAspectRatio="none"></svg>
+    </div>
+    <div class="card panel">
+      <div class="ptitle">Overage credits &amp; scoped limits</div>
+      <div id="extra"></div>
+      <div id="scoped"></div>
+    </div>
+  </div>
+
+  <div class="scale">
+    <span><i style="background:#3fb950"></i>0–20</span>
+    <span><i style="background:#58a6ff"></i>20–60</span>
+    <span><i style="background:#e3893a"></i>60–80</span>
+    <span><i style="background:#f85149"></i>80–90</span>
+    <span><i style="background:#0a0a0c;border:1px solid #2a2f3a"></i>90–99</span>
+    <span><i style="background:#ffd60a"></i>100</span>
+  </div>
+
+  <footer>
+    Reads your local Claude login (read-only) · refreshes automatically<br>
+    <span id="src">api.anthropic.com/api/oauth/usage</span>
+  </footer>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+let WIN={};   // key -> {resets_at, color}
+let LASTH=null;   // last history payload, for resize reflow
+function fdur(s){
+  if(s==null)return"—";
+  s=Math.max(0,Math.floor(s));
+  const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60),sec=s%60;
+  if(d>0)return d+"d "+h+"h";
+  if(h>0)return h+"h "+String(m).padStart(2,"0")+"m";
+  if(m>0)return m+"m "+String(sec).padStart(2,"0")+"s";
+  return sec+"s";
+}
+function fabs(ms){
+  if(!ms)return"";
+  const dt=new Date(ms),now=new Date();
+  const t=dt.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"});
+  if(dt.toDateString()===now.toDateString())return"at "+t+" today";
+  return"at "+dt.toLocaleDateString([], {weekday:"short"})+" "+t;
+}
+function tickCountdowns(){
+  const now=Date.now();
+  for(const k in WIN){
+    const w=WIN[k]; const el=$("cd-"+k); if(!el)continue;
+    if(!w.resets_at){el.textContent="—";continue;}
+    el.textContent="resets in "+fdur((w.resets_at-now)/1000);
+  }
+}
+function renderGauge(w){
+  const k=w.key;
+  document.documentElement.style.setProperty(k==="five_hour"?"--p5":"--p7", w.pct);
+  const ring=$("r-"+k); if(ring)ring.style.setProperty("--c",w.color);
+  const p=$("p-"+k); if(p)p.innerHTML=Math.round(w.pct)+"<small>%</small>";
+  const g=$("g-"+k); if(g)g.className="card gauge "+(["warn","high","crit","max"].indexOf(w.level)>=0?w.level:"");
+  WIN[k]={resets_at:w.resets_at,color:w.color};
+  $("ab-"+k).textContent=fabs(w.resets_at);
+  const bn=$("bn-"+k);
+  if(bn){
+    if(w.eta_seconds!=null&&w.eta_seconds>=0&&w.rate_per_hour>0){
+      bn.innerHTML="↗ <span class='hot'>"+w.rate_per_hour.toFixed(1)+"%/h</span> · hits 100% in ~"+fdur(w.eta_seconds);
+    }else if(w.rate_per_hour!=null&&w.rate_per_hour>0.1){
+      bn.innerHTML="↗ "+w.rate_per_hour.toFixed(1)+"%/h · <span class='ok'>resets before limit</span>";
+    }else if(w.rate_per_hour!=null){
+      bn.innerHTML="<span class='ok'>steady</span> · no recent burn";
+    }else{ bn.textContent="gathering rate…"; }
+  }
+}
+function renderSpark(h){
+  const svg=$("spark"); svg.innerHTML="";
+  const ns="http://www.w3.org/2000/svg";
+  const W=svg.clientWidth||520,H=118,top=10,base=H-16;
+  svg.setAttribute("viewBox","0 0 "+W+" "+H);
+  const yv=p=>base-(p/100)*(base-top);
+  function line(x1,y1,x2,y2,stroke){const l=document.createElementNS(ns,"line");
+    l.setAttribute("x1",x1);l.setAttribute("y1",y1);l.setAttribute("x2",x2);l.setAttribute("y2",y2);
+    l.setAttribute("stroke",stroke);svg.appendChild(l);}
+  function text(x,y,t,anchor){const e=document.createElementNS(ns,"text");
+    e.setAttribute("x",x);e.setAttribute("y",y);e.setAttribute("fill","#5b6675");e.setAttribute("font-size","9");
+    if(anchor)e.setAttribute("text-anchor",anchor);e.textContent=t;svg.appendChild(e);}
+  [0,50,100].forEach(p=>{line(26,yv(p),W,yv(p),"rgba(255,255,255,.06)");text(22,yv(p)+3,p,"end");});
+  if(!h||!h.t||h.t.length<2){
+    text(W/2,H/2,"collecting data…","middle");return;
+  }
+  const t0=h.t[0],t1=h.t[h.t.length-1],span=Math.max(1,t1-t0);
+  const x=t=>30+((t-t0)/span)*(W-34);
+  [["#5aa3ff",h.five_hour],["#c08bff",h.seven_day]].forEach(c=>{
+    const arr=c[1];let d="";
+    for(let i=0;i<h.t.length;i++)d+=(i?"L":"M")+x(h.t[i]).toFixed(1)+" "+yv(arr[i]).toFixed(1)+" ";
+    const area=d+"L "+x(t1).toFixed(1)+" "+base+" L "+x(t0).toFixed(1)+" "+base+" Z";
+    const fa=document.createElementNS(ns,"path");fa.setAttribute("d",area);fa.setAttribute("fill",c[0]);fa.setAttribute("opacity",".12");svg.appendChild(fa);
+    const pa=document.createElementNS(ns,"path");pa.setAttribute("d",d.trim());pa.setAttribute("fill","none");pa.setAttribute("stroke",c[0]);pa.setAttribute("stroke-width","2.5");pa.setAttribute("stroke-linejoin","round");pa.setAttribute("stroke-linecap","round");svg.appendChild(pa);
+    const dot=document.createElementNS(ns,"circle");dot.setAttribute("cx",x(t1));dot.setAttribute("cy",yv(arr[arr.length-1]));dot.setAttribute("r","3.4");dot.setAttribute("fill",c[0]);svg.appendChild(dot);
+  });
+}
+function renderExtra(e){
+  const box=$("extra");
+  if(!e||!e.enabled){box.innerHTML="<div class='csub'>No overage credits enabled.</div>";return;}
+  const cur=e.currency||"";
+  const head=(e.used!=null&&e.limit!=null)?(cur+" "+e.used.toFixed(2)+" <span style='color:#8b97a8;font-size:13px;font-weight:500'>of "+cur+" "+e.limit.toFixed(2)+"</span>"):(e.pct.toFixed(1)+"% used");
+  const col=e.pct>=80?"#e3893a":"#3fb950";
+  box.innerHTML="<div class='credits'><div class='cval'>"+head+"</div>"+
+    "<div class='bar'><i style='width:"+Math.min(100,e.pct)+"%;background:"+col+"'></i></div>"+
+    "<div class='csub' style='margin-top:8px'>"+e.pct.toFixed(0)+"% of monthly overage cap</div></div>";
+}
+function renderScoped(wins){
+  const box=$("scoped"); box.innerHTML="";
+  const scoped=wins.filter(w=>w.key.startsWith("seven_day_"));
+  if(!scoped.length)return;
+  scoped.forEach(w=>{
+    box.insertAdjacentHTML("beforeend",
+      "<div class='mini'><div class='lbl'>"+w.label.replace('Weekly · ','')+"</div>"+
+      "<div class='bar'><i style='width:"+Math.min(100,w.pct)+"%;background:"+w.color+(w.color==="#0a0a0c"?";box-shadow:inset 0 0 0 1.5px #f85149":"")+"'></i></div>"+
+      "<div class='num'>"+Math.round(w.pct)+"%</div></div>");
+  });
+}
+async function refresh(){
+  try{
+    const r=await fetch("/api/usage",{cache:"no-store"});
+    const d=await r.json();
+    const err=$("err");
+    if(!d.ok){
+      err.className="err show";
+      err.textContent="⚠ "+(d.error||"unavailable")+(d.token_state==="expired"||d.token_state==="missing"?" — run any Claude Code command to refresh your login.":"");
+    }else{ err.className="err"; }
+    $("tier").textContent=d.subscription||"plan";
+    $("updated").textContent=d.ok?("updated "+new Date(d.updated_at*1000).toLocaleTimeString()):"—";
+    const wins=d.windows||[];
+    wins.filter(w=>w.key==="five_hour"||w.key==="seven_day").forEach(renderGauge);
+    LASTH=d.history; renderSpark(LASTH);
+    renderExtra(d.extra);
+    renderScoped(wins);
+    tickCountdowns();
+  }catch(e){ $("err").className="err show"; $("err").textContent="⚠ cannot reach the tracker service."; }
+}
+setInterval(tickCountdowns,1000);
+setInterval(refresh,5000);
+refresh();
+let _rz; window.addEventListener("resize",()=>{clearTimeout(_rz);_rz=setTimeout(()=>renderSpark(LASTH),120);});
+</script>
+</body>
+</html>"""
+
+
+WIDGET_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Usage</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%}
+  body{font:12px/1.4 -apple-system,"Segoe UI",Inter,system-ui,sans-serif;color:#e8eef6;
+    background:linear-gradient(180deg,#0e1422,#080b12);
+    border:1px solid rgba(255,255,255,.10);border-radius:13px;overflow:hidden;
+    padding:11px 13px;user-select:none;-webkit-user-select:none;cursor:default}
+  .top{display:flex;align-items:center;gap:7px;margin-bottom:10px;color:#8b97a8;font-size:10px}
+  .top .dot{width:6px;height:6px;border-radius:50%;background:#3fb950}
+  .top .ttl{text-transform:uppercase;letter-spacing:1.3px}
+  .top .tier{color:#5b6675;text-transform:capitalize;letter-spacing:.3px}
+  .top .x{margin-left:auto;cursor:pointer;color:#6b7686;font-size:15px;line-height:1;padding:0 2px}
+  .top .x:hover{color:#e8eef6}
+  .row{display:flex;align-items:center;gap:10px;margin:8px 0}
+  .lab{width:32px;color:#aeb8c6;font-weight:650;font-size:11.5px}
+  .bar{flex:1;height:9px;border-radius:5px;background:rgba(255,255,255,.12);overflow:hidden}
+  .bar>i{display:block;height:100%;border-radius:5px;width:0;transition:width .7s cubic-bezier(.22,1,.36,1)}
+  .pc{width:40px;text-align:right;font-weight:720;font-size:15px;font-variant-numeric:tabular-nums}
+  .cd{width:60px;text-align:right;color:#8b97a8;font-size:10.5px;font-variant-numeric:tabular-nums}
+  .err{color:#ffb4ad;font-size:11px;padding:8px 2px}
+</style>
+</head>
+<body>
+  <div class="top">
+    <span class="dot" id="dot"></span><span class="ttl">Claude usage</span>
+    <span class="tier" id="tier"></span><span class="x" onclick="closeWidget()" title="Hide">×</span>
+  </div>
+  <div id="body">
+    <div class="row"><span class="lab">5h</span><div class="bar"><i id="b5"></i></div><span class="pc" id="pc5">–</span><span class="cd" id="cd5"></span></div>
+    <div class="row"><span class="lab">Week</span><div class="bar"><i id="b7"></i></div><span class="pc" id="pc7">–</span><span class="cd" id="cd7"></span></div>
+  </div>
+<script>
+const $=id=>document.getElementById(id);
+let R={};
+function closeWidget(){ try{ window.pywebview.api.close(); }catch(e){ try{window.close();}catch(_){} } }
+function sdur(s){ if(s==null)return""; s=Math.max(0,Math.floor(s));
+  const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  if(d>0)return"↻ "+d+"d "+h+"h"; if(h>0)return"↻ "+h+"h "+String(m).padStart(2,"0")+"m";
+  if(m>0)return"↻ "+m+"m"; return"↻ "+(s%60)+"s"; }
+function tick(){const now=Date.now();for(const k in R){const el=$("cd"+k);if(el)el.textContent=R[k]?sdur((R[k]-now)/1000):"";}}
+function setRow(i,w){ const b=$("b"+i),pc=$("pc"+i); const black=w.color==="#0a0a0c";
+  if(b){b.style.width=Math.min(100,w.pct)+"%";b.style.background=w.color;
+    b.style.boxShadow=black?"inset 0 0 0 1.5px #f85149":"none";}
+  if(pc){pc.textContent=Math.round(w.pct)+"%";pc.style.color=black?"#e8eef6":w.color;}
+  R[i]=w.resets_at; }
+async function refresh(){ try{
+  const d=await (await fetch("/api/usage",{cache:"no-store"})).json();
+  const wins=d.windows||[];
+  if(!d.ok && !wins.length){ $("dot").style.background="#f85149"; $("tier").textContent=(d.error||"unavailable"); return; }
+  $("dot").style.background=d.ok?"#3fb950":"#e3893a";
+  $("tier").textContent=d.subscription||"";
+  wins.forEach(w=>{ if(w.key==="five_hour")setRow("5",w); if(w.key==="seven_day")setRow("7",w); });
+  tick();
+}catch(e){ $("dot").style.background="#e3893a"; } }
+setInterval(tick,1000); setInterval(refresh,5000); refresh();
+</script>
+</body>
+</html>"""
+
+
+class DashboardHandler(BaseHTTPRequestHandler):
+    timeout = 10  # drop slow/hung local clients
+
+    def log_message(self, *args):
+        pass  # silence default stderr logging
+
+    def _send(self, code, ctype, body: bytes):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except Exception:
+            pass
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path in ("/", "/index.html"):
+            self._send(200, "text/html; charset=utf-8", DASHBOARD_HTML.encode("utf-8"))
+        elif path == "/widget":
+            self._send(200, "text/html; charset=utf-8", WIDGET_HTML.encode("utf-8"))
+        elif path == "/api/usage":
+            with STORE_LOCK:
+                snap = STORE.get("snapshot", {})
+            self._send(200, "application/json", json.dumps(snap).encode("utf-8"))
+        elif path == "/favicon.ico":
+            self._send(204, "image/x-icon", b"")
+        else:
+            self._send(404, "text/plain", b"not found")
+
+
+def start_server(port: int) -> tuple[ThreadingHTTPServer | None, int]:
+    for p in range(port, port + 10):
+        try:
+            httpd = ThreadingHTTPServer(("127.0.0.1", p), DashboardHandler)
+            httpd.daemon_threads = True
+            t = threading.Thread(target=httpd.serve_forever, daemon=True)
+            t.start()
+            log(f"dashboard server on http://127.0.0.1:{p}/")
+            return httpd, p
+        except OSError:
+            continue
+    log("could not bind a dashboard port")
+    return None, port
+
+
+# ---------------------------------------------------------------------------
+# Native window (optional, separate process) + browser fallback
+# ---------------------------------------------------------------------------
+
+def webview_available() -> bool:
+    return importlib.util.find_spec("webview") is not None
+
+
+def open_dashboard(port: int, prefer_window: bool) -> None:
+    url = f"http://127.0.0.1:{port}/"
+    if prefer_window and webview_available():
+        try:
+            if getattr(sys, "frozen", False):
+                cmd = [sys.executable, "--window", "--port", str(port)]
+            else:
+                cmd = [_pythonw(), str(Path(__file__).resolve()), "--window", "--port", str(port)]
+            subprocess.Popen(cmd, close_fds=True)
+            return
+        except Exception as exc:
+            log(f"window spawn failed, using browser: {exc}")
+    webbrowser.open(url)
+
+
+def run_window(port: int) -> int:
+    global _instance_guard
+    url = f"http://127.0.0.1:{port}/"
+    try:
+        _instance_guard = bind_guard(49223)   # one window at a time
+    except OSError:
+        return 0
+    try:
+        import webview
+        webview.create_window(APP_NAME, url, width=820, height=640,
+                              min_size=(300, 360), background_color="#070a10")
+        webview.start()
+    except Exception as exc:
+        log(f"window mode failed, opening browser: {exc}")
+        webbrowser.open(url)
+    return 0
+
+
+def run_widget(port: int) -> int:
+    """Small frameless always-on-top draggable widget (the /widget view)."""
+    global _instance_guard
+    cfg = load_config()
+    url = f"http://127.0.0.1:{port}/widget"
+    try:
+        _instance_guard = bind_guard(49224)   # one widget at a time
+    except OSError:
+        return 0
+    try:
+        import webview
+
+        w = int(cfg.get("widget_width", 392))
+        h = int(cfg.get("widget_height", 150))
+        pos = {}
+        try:    # top-right corner with a small margin
+            import ctypes
+            sw = ctypes.windll.user32.GetSystemMetrics(0)
+            pos = {"x": max(0, sw - w - 24), "y": 28}
+        except Exception:
+            pass
+
+        class Api:
+            def close(self):
+                for win in list(webview.windows):
+                    try:
+                        win.destroy()
+                    except Exception:
+                        pass
+
+        webview.create_window(APP_NAME, url, width=w, height=h, resizable=False,
+                              frameless=True, easy_drag=True, on_top=True,
+                              background_color="#0e1422", js_api=Api(), **pos)
+        webview.start()
+    except Exception as exc:
+        log(f"widget mode failed: {exc}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Autostart + shortcuts (Startup folder via PowerShell)
+# ---------------------------------------------------------------------------
+
+def _startup_lnk_path() -> Path:
+    appdata = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
+    return Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / f"{APP_NAME}.lnk"
+
+
+def _pythonw() -> str:
+    exe = Path(sys.executable)
+    candidate = exe.with_name("pythonw.exe")
+    return str(candidate if candidate.exists() else exe)
+
+
+def install_autostart() -> None:
+    lnk = _startup_lnk_path()
+    if getattr(sys, "frozen", False):
+        target, args = sys.executable, ""
+        workdir, icon = str(Path(sys.executable).resolve().parent), sys.executable
+    else:
+        target = _pythonw()
+        args = f'"{Path(__file__).resolve()}"'
+        workdir = str(Path(__file__).resolve().parent)
+        icon = str(ICON_PATH) if ICON_PATH.exists() else target
+    q = lambda s: str(s).replace("'", "''")   # escape single quotes for PowerShell literals
+    ps = (
+        "$ws = New-Object -ComObject WScript.Shell; "
+        f"$s = $ws.CreateShortcut('{q(lnk)}'); "
+        f"$s.TargetPath = '{q(target)}'; "
+        f"$s.Arguments = '{q(args)}'; "
+        f"$s.WorkingDirectory = '{q(workdir)}'; "
+        f"$s.IconLocation = '{q(icon)}'; "
+        f"$s.Description = '{APP_NAME}'; "
+        "$s.Save()"
+    )
+    subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], check=True)
+    print(f"Autostart installed: {lnk}")
+
+
+def uninstall_autostart() -> None:
+    lnk = _startup_lnk_path()
+    if lnk.exists():
+        lnk.unlink()
+        print(f"Autostart removed: {lnk}")
+    else:
+        print("Autostart was not installed.")
+
+
+# ---------------------------------------------------------------------------
+# Tray application
+# ---------------------------------------------------------------------------
+
+class TrayApp:
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.state = load_json(STATE_PATH, {})
+        self.history = load_history()
+        self.last = FetchResult(False, error="starting…")
+        self.icon = None
+        self.port = int(cfg.get("dashboard_port", 8787))
+        self.widget_proc = None
+        self._job = None
+        self._children = []
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._started_notified = False
+
+    def build_menu(self):
+        import pystray
+        return pystray.Menu(
+            pystray.MenuItem(lambda i: "Hide widget" if self._widget_alive() else "Show widget",
+                             self._on_toggle_widget),
+            pystray.MenuItem("Open dashboard", self._on_open, default=True),
+            pystray.MenuItem("Open in browser", self._on_browser),
+            pystray.MenuItem("Refresh now", self._on_refresh),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Open config file", self._on_config),
+            pystray.MenuItem("Open log file", self._on_log),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Quit", self._on_quit),
+        )
+
+    def run(self):
+        import pystray
+        ensure_app_icon()
+        httpd, self.port = start_server(self.port)
+        self.icon = pystray.Icon(APP_NAME, icon=make_icon_image({}),
+                                 title=f"{APP_NAME}\nstarting…", menu=self.build_menu())
+        self._job = make_kill_on_close_job()
+        threading.Thread(target=self._poll_loop, daemon=True).start()
+        if self.cfg.get("show_widget_on_start", True):
+            self.widget_proc = self._spawn_mode("--widget")
+        self.icon.run()
+
+    # ----- child window/widget process control -----
+    def _spawn_mode(self, mode: str):
+        try:
+            if getattr(sys, "frozen", False):
+                cmd = [sys.executable, mode, "--port", str(self.port)]
+            else:
+                cmd = [_pythonw(), str(Path(__file__).resolve()), mode, "--port", str(self.port)]
+            p = subprocess.Popen(cmd, close_fds=True)
+            assign_to_job(self._job, p)        # OS kills it if we ever die
+            self._children = [c for c in self._children if c.poll() is None]
+            self._children.append(p)
+            return p
+        except Exception as exc:
+            log(f"spawn {mode} failed: {exc}")
+            return None
+
+    def _widget_alive(self) -> bool:
+        return self.widget_proc is not None and self.widget_proc.poll() is None
+
+    def _on_toggle_widget(self, icon, item):
+        if self._widget_alive():
+            try:
+                self.widget_proc.terminate()
+            except Exception:
+                pass
+        else:
+            self.widget_proc = self._spawn_mode("--widget")
+
+    # menu handlers
+    def _on_open(self, icon, item):
+        if self.cfg.get("open_as_window", True) and webview_available():
+            if self._spawn_mode("--window"):
+                return
+        webbrowser.open(f"http://127.0.0.1:{self.port}/")
+
+    def _on_browser(self, icon, item):
+        webbrowser.open(f"http://127.0.0.1:{self.port}/")
+
+    def _on_refresh(self, icon, item):
+        self._wake.set()
+
+    def _on_config(self, icon, item):
+        load_config()
+        os.startfile(str(CONFIG_PATH))  # noqa: S606
+
+    def _on_log(self, icon, item):
+        if not LOG_PATH.exists():
+            LOG_PATH.write_text("", encoding="utf-8")
+        os.startfile(str(LOG_PATH))  # noqa: S606
+
+    def _on_quit(self, icon, item):
+        self._stop.set()
+        self._wake.set()
+        for p in self._children:        # job object is the backstop; this is the clean path
+            try:
+                if p.poll() is None:
+                    p.terminate()
+            except Exception:
+                pass
+        icon.stop()
+
+    def _refresh_visual(self, r: FetchResult):
+        if not self.icon:
+            return
+        try:
+            if r.ok:
+                self.icon.icon = make_icon_image(r.windows)
+                self.icon.title = f"{APP_NAME}\n{status_line(r.windows)}"[:127]
+            elif r.token_state in (TokenState.EXPIRED, TokenState.MISSING):
+                self.icon.icon = make_icon_image({}, error=True)
+                self.icon.title = f"{APP_NAME}\n{r.error}"[:127]
+            else:
+                # transient (429/network): keep last-good icon, note retry in tooltip
+                self.icon.title = f"{APP_NAME}\n{r.error} — retrying"[:127]
+        except Exception as exc:
+            log(f"visual update failed: {exc}")
+
+    def _poll_loop(self):
+        interval = int(self.cfg.get("poll_interval_seconds", 60))
+        timeout = int(self.cfg.get("request_timeout_seconds", 20))
+        cap = int(self.cfg.get("history_cap", 2880))
+        warned_token = False
+        while not self._stop.is_set():
+            try:
+                r = fetch_usage(timeout)
+                self.last = r
+                if r.ok:
+                    append_history(self.history, r.windows, time.time(), cap)
+                    save_json(HISTORY_PATH, self.history)
+                    check_thresholds(r.windows, self.state, self.cfg)
+                    save_json(STATE_PATH, self.state)
+                    warned_token = False
+                    log(f"ok: {status_line(r.windows)}")
+                    if not self._started_notified and self.cfg.get("notify_on_start", True):
+                        notify(f"{APP_NAME} started", status_line(r.windows))
+                        self._started_notified = True
+                else:
+                    log(f"fetch failed: {r.error}")
+                    if r.token_state in (TokenState.EXPIRED, TokenState.MISSING) and not warned_token:
+                        notify(APP_NAME, f"{r.error}. Run any Claude Code command to refresh your login.")
+                        warned_token = True
+                if r.ok:
+                    snap = build_snapshot(r, self.history, self.cfg)
+                else:
+                    # Keep the last good reading; just flag the error + timestamp.
+                    with STORE_LOCK:
+                        snap = dict(STORE.get("snapshot", {}))
+                    snap["ok"] = False
+                    snap["error"] = r.error
+                    snap["token_state"] = r.token_state
+                    snap["updated_at"] = int(time.time())
+                with STORE_LOCK:
+                    STORE["snapshot"] = snap
+                self._refresh_visual(r)
+            except Exception:
+                log("poll loop error:\n" + traceback.format_exc())
+            # Back off on rate-limiting instead of hammering every interval.
+            wait = interval
+            if not self.last.ok and self.last.retry_after:
+                wait = max(interval, min(self.last.retry_after, 900))
+                log(f"backing off {wait}s after rate limit")
+            self._wake.wait(timeout=wait)
+            self._wake.clear()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def run_once(debug: bool) -> int:
+    cfg = load_config()
+    r = fetch_usage(int(cfg.get("request_timeout_seconds", 20)))
+    if r.ok:
+        print("STATUS:", status_line(r.windows))
+        for key, w in r.windows.items():
+            print(f"  {key:16s} {w['pct']:6.1f}%   resets {fmt_reset(w['resets_at'])}")
+        if r.extra and r.extra.get("enabled"):
+            e = r.extra
+            if e.get("used") is not None:
+                print(f"  overage credits  {e['currency']} {e['used']:.2f} / {e['limit']:.2f}  ({e['pct']:.0f}%)")
+    else:
+        print("ERROR:", r.error, f"(token_state={r.token_state})")
+    if debug:
+        print("\n--- RAW RESPONSE ---")
+        print(json.dumps(r.raw, indent=2)[:6000] if r.raw is not None else "(no body)")
+    return 0 if r.ok else 1
+
+
+def main() -> int:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
+    ap = argparse.ArgumentParser(description=APP_NAME)
+    ap.add_argument("--once", action="store_true", help="print status once and exit")
+    ap.add_argument("--debug", action="store_true", help="with --once, dump raw API JSON")
+    ap.add_argument("--window", action="store_true", help="open the dashboard as a native window")
+    ap.add_argument("--widget", action="store_true", help="open the always-on-top mini widget")
+    ap.add_argument("--port", type=int, default=None, help="dashboard port (with --window/--widget)")
+    ap.add_argument("--install-autostart", action="store_true")
+    ap.add_argument("--uninstall-autostart", action="store_true")
+    args = ap.parse_args()
+
+    if args.install_autostart:
+        ensure_app_icon()
+        install_autostart()
+        return 0
+    if args.uninstall_autostart:
+        uninstall_autostart()
+        return 0
+    if args.once:
+        return run_once(args.debug)
+    if args.window:
+        port = args.port or int(load_config().get("dashboard_port", 8787))
+        return run_window(port)
+    if args.widget:
+        port = args.port or int(load_config().get("dashboard_port", 8787))
+        return run_widget(port)
+
+    # Tray mode: single-instance guard (hold a localhost port for the lifetime).
+    global _instance_guard
+    try:
+        _instance_guard = bind_guard(49222)
+    except OSError:
+        log("another instance is already running; exiting")
+        return 0
+
+    log("tray app starting")
+    TrayApp(load_config()).run()
+    log("tray app stopped")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

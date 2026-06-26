@@ -1,0 +1,25 @@
+# Python / venv
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+
+# Generated assets (recreated by install.py)
+app_icon.png
+app.ico
+
+# User/runtime data — usage history can be sensitive, never commit it
+config.json
+state.json
+history.json
+*.log
+
+# Tooling scratch
+.playwright-mcp/
+
+# Screenshot scratch at repo root (curated copies live in docs/)
+/dash-*.png
+/widget-*.png
+/icon-montage.png
