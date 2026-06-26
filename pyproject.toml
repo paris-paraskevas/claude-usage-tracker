@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-usage-tracker"
+version = "0.1.0"
+description = "Windows tray widget + dashboard for Claude plan usage (5-hour & weekly limits)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "paris-paraskevas" }]
+keywords = ["claude", "anthropic", "usage", "tray", "widget", "windows"]
+classifiers = [
+    "Environment :: Win32 (MS Windows)",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "pystray>=0.19",
+    "Pillow>=10",
+    "winotify>=1.1",
+    "pywebview>=5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/paris-paraskevas/claude-usage-tracker"
+Issues = "https://github.com/paris-paraskevas/claude-usage-tracker/issues"
+
+# Console launcher (CLI: --once, --install, --uninstall …)
+[project.scripts]
+claude-usage-tracker = "claude_usage_tracker:main"
+
+# No-console launcher for the tray app (what shortcuts point to)
+[project.gui-scripts]
+claude-usage-tracker-gui = "claude_usage_tracker:main"
+
+[tool.setuptools]
+py-modules = ["claude_usage_tracker"]

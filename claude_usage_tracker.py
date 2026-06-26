@@ -46,21 +46,22 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-def _data_dir() -> Path:
-    """Where config/state/history/log/icon live.
+__version__ = "0.1.0"
 
-    Frozen (PyInstaller .exe): %LOCALAPPDATA%\\ClaudeUsageTracker, so data
-    persists outside the per-launch temp extraction dir. Script mode: next to
-    the .py file.
+
+def _data_dir() -> Path:
+    """Per-user data dir (config/state/history/log/icon).
+
+    Always %LOCALAPPDATA%\\ClaudeUsageTracker — works the same whether running
+    from a source checkout, a pipx install, or frozen, and never writes into
+    site-packages or the repo.
     """
-    if getattr(sys, "frozen", False):
-        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "ClaudeUsageTracker"
-        try:
-            base.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
-        return base
-    return Path(__file__).resolve().parent
+    base = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "ClaudeUsageTracker"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return base
 
 
 APP_DIR = _data_dir()
@@ -947,10 +948,13 @@ function renderSpark(h){
   const t0=h.t[0],t1=h.t[h.t.length-1],span=Math.max(1,t1-t0);
   const x=t=>30+((t-t0)/span)*(W-34);
   [["#5aa3ff",h.five_hour],["#c08bff",h.seven_day]].forEach(c=>{
-    const arr=c[1];let d="";
-    for(let i=0;i<h.t.length;i++)d+=(i?"L":"M")+x(h.t[i]).toFixed(1)+" "+yv(arr[i]).toFixed(1)+" ";
-    const area=d+"L "+x(t1).toFixed(1)+" "+base+" L "+x(t0).toFixed(1)+" "+base+" Z";
-    const fa=document.createElementNS(ns,"path");fa.setAttribute("d",area);fa.setAttribute("fill",c[0]);fa.setAttribute("opacity",".12");svg.appendChild(fa);
+    const arr=c[1]; let d="", prev=null;
+    for(let i=0;i<h.t.length;i++){
+      // start a new segment across a window reset (a sharp drop) so we never draw a vertical cliff
+      const cmd=(prev===null || arr[i] < prev-20)?"M":"L";
+      d+=cmd+x(h.t[i]).toFixed(1)+" "+yv(arr[i]).toFixed(1)+" ";
+      prev=arr[i];
+    }
     const pa=document.createElementNS(ns,"path");pa.setAttribute("d",d.trim());pa.setAttribute("fill","none");pa.setAttribute("stroke",c[0]);pa.setAttribute("stroke-width","2.5");pa.setAttribute("stroke-linejoin","round");pa.setAttribute("stroke-linecap","round");svg.appendChild(pa);
     const dot=document.createElementNS(ns,"circle");dot.setAttribute("cx",x(t1));dot.setAttribute("cy",yv(arr[arr.length-1]));dot.setAttribute("r","3.4");dot.setAttribute("fill",c[0]);svg.appendChild(dot);
   });
@@ -1149,24 +1153,17 @@ def open_dashboard(port: int, prefer_window: bool) -> None:
     webbrowser.open(url)
 
 
-def set_app_user_model_id(appid: str = "ClaudeUsageTracker") -> None:
-    """Distinct taskbar identity so Windows uses our window icon, not pythonw's."""
-    try:
-        import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(appid)
-    except Exception:
-        pass
-
-
-def set_window_icon(ico_path) -> bool:
-    """Set this process's top-level window icon (titlebar + taskbar). Returns True
+def set_window_icon(ico_path, toolwindow=False) -> bool:
+    """Set this process's top-level window icon (titlebar + taskbar). When
+    toolwindow=True, also flag the window WS_EX_TOOLWINDOW so it has no taskbar
+    button / Alt-Tab entry (right for an always-on-top widget). Returns True
     once a visible top-level window was found and updated."""
     try:
         import ctypes
         from ctypes import wintypes
         u32 = ctypes.windll.user32
         k32 = ctypes.windll.kernel32
-        # Correct restypes — handles are pointer-sized; default c_int truncates on 64-bit.
+        # Correct restypes — handles/styles are pointer-sized; default c_int truncates on 64-bit.
         u32.LoadImageW.restype = ctypes.c_void_p
         u32.LoadImageW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR, ctypes.c_uint,
                                    ctypes.c_int, ctypes.c_int, ctypes.c_uint]
@@ -1175,16 +1172,20 @@ def set_window_icon(ico_path) -> bool:
         setclass = getattr(u32, "SetClassLongPtrW", None) or u32.SetClassLongW
         setclass.restype = ctypes.c_void_p
         setclass.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+        getl = getattr(u32, "GetWindowLongPtrW", None) or u32.GetWindowLongW
+        setl = getattr(u32, "SetWindowLongPtrW", None) or u32.SetWindowLongW
+        getl.restype = ctypes.c_ssize_t
+        getl.argtypes = [wintypes.HWND, ctypes.c_int]
+        setl.restype = ctypes.c_ssize_t
+        setl.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
 
         IMAGE_ICON, LR_LOADFROMFILE, LR_DEFAULTSIZE = 1, 0x10, 0x40
         big = u32.LoadImageW(None, str(ico_path), IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE)
         small = u32.LoadImageW(None, str(ico_path), IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
-        if not big and not small:
-            log("window icon: LoadImage failed")
-            return False
 
         pid = k32.GetCurrentProcessId()
         WM_SETICON, GW_OWNER, GCLP_HICON, GCLP_HICONSM = 0x80, 4, -14, -34
+        GWL_EXSTYLE, WS_EX_TOOLWINDOW, WS_EX_APPWINDOW = -20, 0x80, 0x40000
         found = []
         proto = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
 
@@ -1198,12 +1199,17 @@ def set_window_icon(ico_path) -> bool:
                 if small:
                     u32.SendMessageW(hwnd, WM_SETICON, 0, small)  # ICON_SMALL
                     setclass(hwnd, GCLP_HICONSM, small)
+                if toolwindow:
+                    ex = getl(hwnd, GWL_EXSTYLE)
+                    setl(hwnd, GWL_EXSTYLE, (ex | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW)
+                    u32.ShowWindow(hwnd, 0)   # SW_HIDE — required for the taskbar to drop it
+                    u32.ShowWindow(hwnd, 5)   # SW_SHOW
                 found.append(hwnd)
             return True
 
         u32.EnumWindows(proto(cb), 0)
         if found:
-            log(f"window icon set on {len(found)} window(s)")
+            log(f"window icon set on {len(found)} window(s)" + (" (tool window)" if toolwindow else ""))
             return True
         return False
     except Exception as exc:
@@ -1211,10 +1217,10 @@ def set_window_icon(ico_path) -> bool:
         return False
 
 
-def _apply_window_icon() -> None:
+def _apply_window_icon(toolwindow=False) -> None:
     for _ in range(25):               # the webview window can take a moment to appear
         time.sleep(0.4)
-        if set_window_icon(ICO_PATH):
+        if set_window_icon(ICO_PATH, toolwindow=toolwindow):
             return
     log("window icon: no top-level window found")
 
@@ -1229,7 +1235,6 @@ def run_window(port: int) -> int:
     try:
         import webview
         ensure_app_icon()
-        set_app_user_model_id()
         webview.create_window(APP_NAME, url, width=820, height=640,
                               min_size=(300, 360), background_color="#070a10")
         threading.Thread(target=_apply_window_icon, daemon=True).start()
@@ -1252,7 +1257,6 @@ def run_widget(port: int) -> int:
     try:
         import webview
         ensure_app_icon()
-        set_app_user_model_id()
 
         w = int(cfg.get("widget_width", 392))
         h = int(cfg.get("widget_height", 150))
@@ -1275,7 +1279,7 @@ def run_widget(port: int) -> int:
         webview.create_window(APP_NAME, url, width=w, height=h, resizable=False,
                               frameless=True, easy_drag=True, on_top=True,
                               background_color="#0e1422", js_api=Api(), **pos)
-        threading.Thread(target=_apply_window_icon, daemon=True).start()
+        threading.Thread(target=_apply_window_icon, args=(True,), daemon=True).start()
         webview.start(icon=str(ICO_PATH))
     except Exception as exc:
         log(f"widget mode failed: {exc}")
@@ -1286,49 +1290,103 @@ def run_widget(port: int) -> int:
 # Autostart + shortcuts (Startup folder via PowerShell)
 # ---------------------------------------------------------------------------
 
-def _startup_lnk_path() -> Path:
-    appdata = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
-    return Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / f"{APP_NAME}.lnk"
-
-
 def _pythonw() -> str:
     exe = Path(sys.executable)
     candidate = exe.with_name("pythonw.exe")
     return str(candidate if candidate.exists() else exe)
 
 
-def install_autostart() -> None:
-    lnk = _startup_lnk_path()
-    if getattr(sys, "frozen", False):
-        target, args = sys.executable, ""
-        workdir, icon = str(Path(sys.executable).resolve().parent), sys.executable
-    else:
-        target = _pythonw()
-        args = f'"{Path(__file__).resolve()}"'
-        workdir = str(Path(__file__).resolve().parent)
-        icon = str(ICON_PATH) if ICON_PATH.exists() else target
-    q = lambda s: str(s).replace("'", "''")   # escape single quotes for PowerShell literals
+def _launch_target():
+    """(target, args) for shortcuts: prefer the installed no-console gui launcher
+    (pipx/pip exposes 'claude-usage-tracker-gui.exe'); else the dev venv's
+    pythonw + this script."""
+    import shutil
+    gui = shutil.which("claude-usage-tracker-gui")
+    if gui and gui.lower().endswith(".exe"):
+        return gui, ""
+    return _pythonw(), f'"{Path(__file__).resolve()}"'
+
+
+def _ps_q(s) -> str:
+    return str(s).replace("'", "''")   # escape single quotes for PowerShell literals
+
+
+def _make_shortcuts(target, args, locations) -> None:
+    folders = "@(" + ",".join(f"[Environment]::GetFolderPath('{loc}')" for loc in locations) + ")"
+    icon = str(ICO_PATH) if ICO_PATH.exists() else target
     ps = (
-        "$ws = New-Object -ComObject WScript.Shell; "
-        f"$s = $ws.CreateShortcut('{q(lnk)}'); "
-        f"$s.TargetPath = '{q(target)}'; "
-        f"$s.Arguments = '{q(args)}'; "
-        f"$s.WorkingDirectory = '{q(workdir)}'; "
-        f"$s.IconLocation = '{q(icon)}'; "
-        f"$s.Description = '{APP_NAME}'; "
-        "$s.Save()"
+        "$ws=New-Object -ComObject WScript.Shell;"
+        f"foreach($d in {folders}){{"
+        f"$p=Join-Path $d '{_ps_q(APP_NAME)}.lnk';"
+        "$s=$ws.CreateShortcut($p);"
+        f"$s.TargetPath='{_ps_q(target)}';$s.Arguments='{_ps_q(args)}';"
+        f"$s.WorkingDirectory='{_ps_q(Path(target).parent)}';$s.IconLocation='{_ps_q(icon)}';"
+        f"$s.Description='{_ps_q(APP_NAME)}';$s.Save()}}"
     )
     subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], check=True)
-    print(f"Autostart installed: {lnk}")
+
+
+def _remove_shortcuts() -> None:
+    ps = (
+        "foreach($d in @([Environment]::GetFolderPath('Desktop'),"
+        "[Environment]::GetFolderPath('Programs'),[Environment]::GetFolderPath('Startup'))){"
+        f"$p=Join-Path $d '{_ps_q(APP_NAME)}.lnk'; if(Test-Path $p){{Remove-Item $p -Force; \"removed $p\"}}}}"
+    )
+    subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps])
+
+
+def _ask(question, default=True) -> bool:
+    suffix = "Y/n" if default else "y/N"
+    try:
+        a = input(f"  {question} [{suffix}] ").strip().lower()
+    except EOFError:
+        return default
+    return default if not a else a.startswith("y")
+
+
+def do_install() -> None:
+    ensure_app_icon()
+    target, args = _launch_target()
+    print(f"\n{APP_NAME} setup")
+    print(f"  launcher: {target}\n")
+    locs = []
+    if _ask("Add a Desktop shortcut?"):
+        locs.append("Desktop")
+    if _ask("Add to the Start Menu?"):
+        locs.append("Programs")
+    if _ask("Start automatically when you log in?"):
+        locs.append("Startup")
+    if locs:
+        _make_shortcuts(target, args, locs)
+        print(f"\n  shortcuts created: {', '.join(locs)}")
+    else:
+        print("\n  no shortcuts created.")
+    print("\n  Note: Windows does not let an app pin itself to the taskbar.")
+    print("  To pin it: launch the app, then right-click its taskbar icon -> Pin to taskbar.")
+    if _ask("\n  Launch it now?", default=True):
+        try:
+            cmd = [target] + ([args.strip('"')] if args.strip() else [])
+            subprocess.Popen(cmd, close_fds=True)
+            print("  launched — look for the tray icon (by the clock) and the mini widget (top-right).")
+        except Exception as exc:
+            print(f"  launch failed: {exc}")
+    print()
+
+
+def do_uninstall() -> None:
+    _remove_shortcuts()
+    print("Removed Desktop / Start Menu / Startup shortcuts.")
+
+
+def install_autostart() -> None:   # non-interactive: Startup shortcut only
+    ensure_app_icon()
+    target, args = _launch_target()
+    _make_shortcuts(target, args, ["Startup"])
+    print("Autostart installed (Startup shortcut).")
 
 
 def uninstall_autostart() -> None:
-    lnk = _startup_lnk_path()
-    if lnk.exists():
-        lnk.unlink()
-        print(f"Autostart removed: {lnk}")
-    else:
-        print("Autostart was not installed.")
+    do_uninstall()
 
 
 # ---------------------------------------------------------------------------
@@ -1567,12 +1625,23 @@ def main() -> int:
     ap.add_argument("--window", action="store_true", help="open the dashboard as a native window")
     ap.add_argument("--widget", action="store_true", help="open the always-on-top mini widget")
     ap.add_argument("--port", type=int, default=None, help="dashboard port (with --window/--widget)")
-    ap.add_argument("--install-autostart", action="store_true")
+    ap.add_argument("--install", action="store_true", help="interactive setup (shortcuts + autostart)")
+    ap.add_argument("--uninstall", action="store_true", help="remove shortcuts")
+    ap.add_argument("--install-autostart", action="store_true", help="add the Startup shortcut only")
     ap.add_argument("--uninstall-autostart", action="store_true")
+    ap.add_argument("--version", action="store_true")
     args = ap.parse_args()
 
+    if args.version:
+        print(f"{APP_NAME} {__version__}")
+        return 0
+    if args.install:
+        do_install()
+        return 0
+    if args.uninstall:
+        do_uninstall()
+        return 0
     if args.install_autostart:
-        ensure_app_icon()
         install_autostart()
         return 0
     if args.uninstall_autostart:

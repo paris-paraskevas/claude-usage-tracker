@@ -5,6 +5,7 @@ __pycache__/
 build/
 dist/
 *.spec
+*.egg-info/
 
 # Generated assets (recreated by install.py)
 app_icon.png
@@ -14,6 +15,7 @@ app.ico
 config.json
 state.json
 history.json
+last_snapshot.json
 *.log
 
 # Tooling scratch
