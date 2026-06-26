@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 
 def _data_dir() -> Path:
@@ -1234,7 +1234,9 @@ async function refresh(){ try{
   const wins=d.windows||[];
   if(!d.ok && !wins.length){ $("dot").style.background="#f85149"; $("tier").textContent=(d.error||"unavailable"); return; }
   $("dot").style.background=d.ok?"#3fb950":"#e3893a";
-  $("tier").textContent=d.subscription||"";
+  const dir=(d.cwd||"").replace(/[\\\/]+$/,"").split(/[\\\/]/).pop();
+  $("tier").textContent = dir || d.subscription || "";
+  $("tier").title = d.cwd || "";
   wins.forEach(w=>{ if(w.key==="five_hour")setRow("5",w); if(w.key==="seven_day")setRow("7",w); });
   const c=d.context;
   if(c && c.used_percentage!=null){
@@ -1322,6 +1324,16 @@ def open_dashboard(port: int, prefer_window: bool) -> None:
     webbrowser.open(url)
 
 
+def set_app_user_model_id(appid: str = "ClaudeUsageTracker.App") -> None:
+    """Give the process a distinct taskbar identity, so Windows uses the window's
+    own icon for the taskbar button instead of falling back to pythonw.exe's."""
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(appid)
+    except Exception:
+        pass
+
+
 def set_window_icon(ico_path, toolwindow=False) -> bool:
     """Set this process's top-level window icon (titlebar + taskbar). When
     toolwindow=True, also flag the window WS_EX_TOOLWINDOW so it has no taskbar
@@ -1404,6 +1416,7 @@ def run_window(port: int) -> int:
     try:
         import webview
         ensure_app_icon()
+        set_app_user_model_id()
         webview.create_window(APP_NAME, url, width=820, height=640,
                               min_size=(300, 360), background_color="#070a10")
         threading.Thread(target=_apply_window_icon, daemon=True).start()
@@ -1426,6 +1439,7 @@ def run_widget(port: int) -> int:
     try:
         import webview
         ensure_app_icon()
+        set_app_user_model_id()
 
         w = int(cfg.get("widget_width", 392))
         h = int(cfg.get("widget_height", 150))
@@ -1700,6 +1714,7 @@ class TrayApp:
         self._sessions = getattr(self, "_sessions", [])
         self._sessions_cache = getattr(self, "_sessions_cache", {})
         self._context = getattr(self, "_context", None)
+        self._cwd = getattr(self, "_cwd", None)
         sessions_iv = int(self.cfg.get("sessions_interval_seconds", 45))
         sessions_top = int(self.cfg.get("sessions_top_n", 8))
         last_api = 0.0
@@ -1721,6 +1736,7 @@ class TrayApp:
                 # Claude Code isn't running — heavily rate-limited so we poll rarely.
                 if fresh:
                     self._context = sl.get("context") or self._context
+                    self._cwd = sl.get("cwd") or self._cwd
                     if now - last_api >= extras_iv:
                         rr = fetch_usage(timeout)
                         last_api = now
@@ -1764,6 +1780,7 @@ class TrayApp:
                     snap["updated_at"] = int(now)
                 snap["sessions"] = self._sessions
                 snap["context"] = self._context
+                snap["cwd"] = self._cwd
                 with STORE_LOCK:
                     STORE["snapshot"] = snap
                 self._refresh_visual(r)
