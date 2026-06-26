@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 
 def _data_dir() -> Path:
@@ -1191,7 +1191,7 @@ WIDGET_HTML = r"""<!doctype html>
   .top{display:flex;align-items:center;gap:7px;margin-bottom:10px;color:#8b97a8;font-size:10px}
   .top .dot{width:6px;height:6px;border-radius:50%;background:#3fb950}
   .top .ttl{text-transform:uppercase;letter-spacing:1.3px}
-  .top .tier{color:#5b6675;text-transform:capitalize;letter-spacing:.3px}
+  .top .tier{color:#e8eef6;font-size:13.5px;font-weight:700;text-transform:none;letter-spacing:.2px}
   .top .x{margin-left:auto;cursor:pointer;color:#6b7686;font-size:15px;line-height:1;padding:0 2px}
   .top .x:hover{color:#e8eef6}
   .row{display:flex;align-items:center;gap:10px;margin:8px 0}
