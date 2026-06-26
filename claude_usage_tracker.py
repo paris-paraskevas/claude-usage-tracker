@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 
 def _data_dir() -> Path:
@@ -105,7 +105,7 @@ DEFAULT_CONFIG = {
     "open_as_window": True,          # tray default action: native window vs browser
     "show_widget_on_start": True,    # show the always-on-top mini widget at launch
     "widget_width": 392,
-    "widget_height": 150,
+    "widget_height": 178,
 }
 
 LABELS = {
@@ -565,14 +565,19 @@ def scan_sessions(cache: dict, now: float, window_s: int = 5 * 3600,
                         msg = o.get("message")
                         u = msg.get("usage") if isinstance(msg, dict) else o.get("usage")
                         if isinstance(u, dict):
-                            # Exclude cache_read (cheap context re-reads) so the share
-                            # reflects real work, not just how big the context is.
-                            tok = (int(u.get("input_tokens", 0) or 0)
-                                   + int(u.get("output_tokens", 0) or 0)
-                                   + int(u.get("cache_creation_input_tokens", 0) or 0))
+                            inp = int(u.get("input_tokens", 0) or 0)
+                            out = int(u.get("output_tokens", 0) or 0)
+                            cc = int(u.get("cache_creation_input_tokens", 0) or 0)
+                            cr = int(u.get("cache_read_input_tokens", 0) or 0)
+                            ts = _parse_iso(o.get("timestamp")) or st.st_mtime
+                            # 5h burn excludes cheap cache-reads; context fill is the full prompt.
+                            tok = inp + out + cc
                             if tok > 0:
-                                ts = _parse_iso(o.get("timestamp")) or st.st_mtime
                                 ent["events"].append((ts, tok))
+                            ctx = inp + cc + cr
+                            if ctx > 0:
+                                ent["ctx"], ent["ctx_ts"] = ctx, ts
+                                ent["max_ctx"] = max(ent.get("max_ctx", 0), ctx)
                 ent["size"] = st.st_size
             except Exception:
                 pass
@@ -591,15 +596,25 @@ def scan_sessions(cache: dict, now: float, window_s: int = 5 * 3600,
             continue
         cwd = ent.get("cwd")
         name = os.path.basename(cwd.rstrip("/\\")) if cwd else Path(key).parent.name
-        a = agg.setdefault(name, {"name": name, "tokens": 0, "last": 0})
+        a = agg.setdefault(name, {"name": name, "tokens": 0, "last": 0,
+                                  "ctx": 0, "ctx_ts": 0, "max_ctx": 0})
         a["tokens"] += toks
         a["last"] = max(a["last"], ent.get("mtime", 0))
+        if ent.get("ctx_ts", 0) >= a["ctx_ts"]:        # newest session drives the context fill
+            a["ctx"], a["ctx_ts"] = ent.get("ctx", 0), ent.get("ctx_ts", 0)
+        a["max_ctx"] = max(a["max_ctx"], ent.get("max_ctx", 0))
     rows = list(agg.values())
     total = sum(r["tokens"] for r in rows) or 1
     for r in rows:
         r["share"] = round(r["tokens"] / total * 100, 1)
         r["active"] = (now - r["last"]) <= active_s
         r["idle_s"] = int(now - r["last"])
+        # A session that ever exceeded 200k must be on the 1M window; else assume 200k.
+        window = 1_000_000 if r["max_ctx"] > 200_000 else 200_000
+        r["context_pct"] = round(min(100.0, r["ctx"] / window * 100.0), 1) if r["ctx"] else 0.0
+        r["context_tokens"] = r["ctx"]
+        for k in ("ctx", "ctx_ts", "max_ctx"):
+            r.pop(k, None)
     rows.sort(key=lambda r: r["tokens"], reverse=True)
     return rows[:top_n]
 
@@ -902,6 +917,11 @@ DASHBOARD_HTML = r"""<!doctype html>
   .sbar>i{display:block;height:100%;border-radius:5px;background:#5aa3ff;transition:width .6s cubic-bezier(.22,1,.36,1)}
   .snum{width:52px;text-align:right;color:var(--dim);font-variant-numeric:tabular-nums}
   .sempty{color:var(--dim);font-size:12px;padding:6px 0}
+  .srt{display:flex;align-items:center;gap:10px}
+  .stabs{display:inline-flex;gap:3px;background:rgba(255,255,255,.05);border-radius:8px;padding:3px}
+  .stab{background:none;border:0;color:var(--dim);font:inherit;font-size:11px;padding:3px 9px;border-radius:6px;cursor:pointer;text-transform:none;letter-spacing:0}
+  .stab:hover{color:var(--ink)}
+  .stab.on{background:rgba(255,255,255,.10);color:var(--ink)}
   .scale{display:flex;justify-content:center;gap:13px;flex-wrap:wrap;margin-top:18px;color:var(--dim);font-size:11px}
   .scale span{display:inline-flex;align-items:center;gap:6px}
   .scale i{width:11px;height:11px;border-radius:3px;display:inline-block}
@@ -972,7 +992,12 @@ DASHBOARD_HTML = r"""<!doctype html>
   </div>
 
   <div class="card panel" id="sesscard">
-    <div class="ptitle">Sessions · last 5h <span class="legend" id="sesssub"></span></div>
+    <div class="ptitle"><span>Sessions · last 5h</span>
+      <span class="srt">
+        <span class="stabs"><button class="stab on" data-m="context">Context&nbsp;%</button><button class="stab" data-m="tokens">Tokens</button></span>
+        <span class="legend" id="sesssub"></span>
+      </span>
+    </div>
     <div id="sessions"></div>
   </div>
 
@@ -1090,18 +1115,23 @@ function renderScoped(wins){
   });
 }
 function fmtTok(n){ n=n||0; if(n>=1e6)return (n/1e6).toFixed(n>=1e7?0:1)+"M"; if(n>=1e3)return Math.round(n/1e3)+"k"; return ""+n; }
+function bandColor(p){ if(p>=100)return"#ffd60a"; if(p>=80)return"#f85149"; if(p>=60)return"#e3893a"; if(p>=20)return"#58a6ff"; return"#3fb950"; }
+let SESS=[], SMODE="context";
 function renderSessions(list){
+  if(list) SESS=list;
   const box=$("sessions"), sub=$("sesssub");
-  if(!list||!list.length){ box.innerHTML="<div class='sempty'>no Claude sessions in the last 5h</div>"; sub.textContent=""; return; }
-  const act=list.filter(s=>s.active).length;
+  if(!SESS.length){ box.innerHTML="<div class='sempty'>no Claude sessions in the last 5h</div>"; sub.textContent=""; return; }
+  const act=SESS.filter(s=>s.active).length;
   sub.innerHTML = act ? ("<span style='color:#3fb950'>"+act+" active</span>") : "";
-  const max=Math.max.apply(null, list.map(s=>s.tokens).concat([1]));
-  box.innerHTML=list.map(s=>{
-    const w=Math.max(4, s.tokens/max*100), nm=(s.name||"?").replace(/[<>&]/g,"");
+  const maxTok=Math.max.apply(null, SESS.map(s=>s.tokens).concat([1]));
+  box.innerHTML=SESS.map(s=>{
+    const nm=(s.name||"?").replace(/[<>&]/g,""); let w, val, col;
+    if(SMODE==="context"){ const p=s.context_pct||0; w=Math.max(3,Math.min(100,p)); val=Math.round(p)+"%"; col=bandColor(p); }
+    else { w=Math.max(3, s.tokens/maxTok*100); val=fmtTok(s.tokens); col="#5aa3ff"; }
     return "<div class='srow'><span class='sdot "+(s.active?"on":"")+"'></span>"+
-      "<span class='sname' title='"+nm+" · "+s.share+"%'>"+nm+"</span>"+
-      "<div class='sbar'><i style='width:"+w+"%'></i></div>"+
-      "<span class='snum'>"+fmtTok(s.tokens)+"</span></div>";
+      "<span class='sname' title='"+nm+"'>"+nm+"</span>"+
+      "<div class='sbar'><i style='width:"+w+"%;background:"+col+"'></i></div>"+
+      "<span class='snum'>"+val+"</span></div>";
   }).join("");
 }
 async function refresh(){
@@ -1136,6 +1166,10 @@ setInterval(tickCountdowns,1000);
 setInterval(refresh,5000);
 refresh();
 let _rz; window.addEventListener("resize",()=>{clearTimeout(_rz);_rz=setTimeout(()=>renderSpark(LASTH),120);});
+document.querySelectorAll(".stab").forEach(b=>b.addEventListener("click",()=>{
+  document.querySelectorAll(".stab").forEach(x=>x.classList.remove("on"));
+  b.classList.add("on"); SMODE=b.dataset.m; renderSessions();
+}));
 </script>
 </body>
 </html>"""
@@ -1177,10 +1211,13 @@ WIDGET_HTML = r"""<!doctype html>
   <div id="body">
     <div class="row"><span class="lab">5h</span><div class="bar"><i id="b5"></i></div><span class="pc" id="pc5">–</span><span class="cd" id="cd5"></span></div>
     <div class="row"><span class="lab">Week</span><div class="bar"><i id="b7"></i></div><span class="pc" id="pc7">–</span><span class="cd" id="cd7"></span></div>
+    <div class="row"><span class="lab">Ctx</span><div class="bar"><i id="bc"></i></div><span class="pc" id="pcc">–</span><span class="cd" id="cdc"></span></div>
   </div>
 <script>
 const $=id=>document.getElementById(id);
 let R={};
+function bandColor(p){ if(p>=100)return"#ffd60a"; if(p>=80)return"#f85149"; if(p>=60)return"#e3893a"; if(p>=20)return"#58a6ff"; return"#3fb950"; }
+function fmtTok(n){ n=n||0; if(n>=1e6)return (n/1e6).toFixed(1)+"M"; if(n>=1e3)return Math.round(n/1e3)+"k"; return ""+n; }
 function closeWidget(){ try{ window.pywebview.api.close(); }catch(e){ try{window.close();}catch(_){} } }
 function sdur(s){ if(s==null)return""; s=Math.max(0,Math.floor(s));
   const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
@@ -1199,6 +1236,13 @@ async function refresh(){ try{
   $("dot").style.background=d.ok?"#3fb950":"#e3893a";
   $("tier").textContent=d.subscription||"";
   wins.forEach(w=>{ if(w.key==="five_hour")setRow("5",w); if(w.key==="seven_day")setRow("7",w); });
+  const c=d.context;
+  if(c && c.used_percentage!=null){
+    const p=c.used_percentage, col=bandColor(p), bk=p>=90;
+    $("bc").style.width=Math.min(100,p)+"%"; $("bc").style.background=col;
+    $("pcc").textContent=Math.round(p)+"%"; $("pcc").style.color=col;
+    $("cdc").textContent=c.total_input_tokens?fmtTok(c.total_input_tokens):"";
+  }
   tick();
 }catch(e){ $("dot").style.background="#e3893a"; } }
 setInterval(tick,1000); setInterval(refresh,5000); refresh();
@@ -1655,6 +1699,7 @@ class TrayApp:
         self._extra = getattr(self, "_extra", None)
         self._sessions = getattr(self, "_sessions", [])
         self._sessions_cache = getattr(self, "_sessions_cache", {})
+        self._context = getattr(self, "_context", None)
         sessions_iv = int(self.cfg.get("sessions_interval_seconds", 45))
         sessions_top = int(self.cfg.get("sessions_top_n", 8))
         last_api = 0.0
@@ -1675,6 +1720,7 @@ class TrayApp:
                 # occasionally refresh overage/scoped extras, or as a fallback when
                 # Claude Code isn't running — heavily rate-limited so we poll rarely.
                 if fresh:
+                    self._context = sl.get("context") or self._context
                     if now - last_api >= extras_iv:
                         rr = fetch_usage(timeout)
                         last_api = now
@@ -1717,6 +1763,7 @@ class TrayApp:
                     snap["token_state"] = r.token_state
                     snap["updated_at"] = int(now)
                 snap["sessions"] = self._sessions
+                snap["context"] = self._context
                 with STORE_LOCK:
                     STORE["snapshot"] = snap
                 self._refresh_visual(r)

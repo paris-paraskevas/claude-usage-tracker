@@ -23,11 +23,15 @@ talks to nothing but that one Anthropic endpoint.
 
 ## Features
 
-- **Always-on-top mini widget** — a tiny frameless, draggable strip that stays on
-  top so your usage is always glanceable. Toggle it from the tray.
+- **Always-on-top mini widget** — a tiny frameless, draggable strip (5h, weekly,
+  and the active terminal's **context %**) that stays on top. Toggle it from the tray.
 - **Full dashboard** — animated ring gauges, live reset countdowns, a **burn-rate /
   time-to-limit projection** ("≈7%/h · hits 100% in ~1h 10m"), a usage history
   sparkline, overage credits, and per-model (Opus/Sonnet) scoped weekly limits.
+- **Open Sessions** — per-project **context-window fill %** and last-5h token usage,
+  read from your local Claude Code logs (token counts only, never content), with
+  **Context % / Tokens** tabs and active indicators — see which terminal is burning
+  your usage.
 - **Live tray icon** — two bars (left = 5h, right = weekly) that fill and change
   colour with usage.
 - **20% notifications** — a Windows toast each time the 5h or weekly window crosses
