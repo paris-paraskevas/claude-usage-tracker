@@ -73,6 +73,7 @@ SNAPSHOT_PATH = APP_DIR / "last_snapshot.json"
 # Written by the Claude Code statusline (scripts/statusline.py) on every render —
 # the app's primary, API-free source of live 5h/weekly usage.
 STATUSLINE_SNAPSHOT = Path(os.path.expanduser("~")) / ".claude" / "usage-snapshot.json"
+PROJECTS_DIR = Path(os.path.expanduser("~")) / ".claude" / "projects"
 LOG_PATH = APP_DIR / "claude_usage_tracker.log"
 ICON_PATH = APP_DIR / "app_icon.png"
 ICO_PATH = APP_DIR / "app.ico"
@@ -92,6 +93,8 @@ DEFAULT_CONFIG = {
     "statusline_stale_seconds": 300,     # treat statusline data older than this as stale
     "api_extras_interval_seconds": 1800, # how often to refresh overage/scoped extras from the API
     "api_fallback_interval_seconds": 300,# min gap between API polls when no statusline data
+    "sessions_interval_seconds": 45,     # how often to rescan local session logs
+    "sessions_top_n": 8,
     "threshold_step": 20,            # ping every N percent
     "windows": ["five_hour", "seven_day"],
     "notify_at_100": True,
@@ -508,6 +511,99 @@ def append_history(hist: dict, windows: dict, now_s: float, cap: int) -> None:
 # Snapshot (the JSON the dashboard consumes)
 # ---------------------------------------------------------------------------
 
+def _parse_iso(s):
+    try:
+        s = str(s)
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return None
+
+
+def scan_sessions(cache: dict, now: float, window_s: int = 5 * 3600,
+                  active_s: int = 600, top_n: int = 8):
+    """Per-project Claude Code token usage over the last `window_s`, read
+    incrementally from ~/.claude/projects/*/*.jsonl (token counts + timestamps
+    only — never message content; nothing leaves the machine).
+
+    `cache` is mutated: {path: {size, mtime, cwd, events:[(ts,tokens)]}}.
+    Returns a list of {name, tokens, share, active, idle_s} sorted by tokens.
+    """
+    cutoff = now - window_s
+    try:
+        files = list(PROJECTS_DIR.glob("*/*.jsonl"))
+    except Exception:
+        return []
+    seen = set()
+    for f in files:
+        try:
+            st = f.stat()
+        except Exception:
+            continue
+        key = str(f)
+        seen.add(key)
+        if st.st_mtime < cutoff and key not in cache:
+            continue  # untouched within the window and not already tracked
+        ent = cache.get(key) or {"size": 0, "mtime": 0, "cwd": None, "events": []}
+        if st.st_size < ent["size"]:                       # rotated / truncated
+            ent = {"size": 0, "mtime": 0, "cwd": ent.get("cwd"), "events": []}
+        if st.st_size > ent["size"]:
+            try:
+                with open(f, "r", encoding="utf-8", errors="replace") as fh:
+                    fh.seek(ent["size"])
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            o = json.loads(line)
+                        except Exception:
+                            continue
+                        if ent["cwd"] is None and isinstance(o.get("cwd"), str):
+                            ent["cwd"] = o["cwd"]
+                        msg = o.get("message")
+                        u = msg.get("usage") if isinstance(msg, dict) else o.get("usage")
+                        if isinstance(u, dict):
+                            # Exclude cache_read (cheap context re-reads) so the share
+                            # reflects real work, not just how big the context is.
+                            tok = (int(u.get("input_tokens", 0) or 0)
+                                   + int(u.get("output_tokens", 0) or 0)
+                                   + int(u.get("cache_creation_input_tokens", 0) or 0))
+                            if tok > 0:
+                                ts = _parse_iso(o.get("timestamp")) or st.st_mtime
+                                ent["events"].append((ts, tok))
+                ent["size"] = st.st_size
+            except Exception:
+                pass
+        ent["mtime"] = st.st_mtime
+        ent["events"] = [(t, k) for (t, k) in ent["events"] if t >= cutoff]
+        cache[key] = ent
+    for k in list(cache.keys()):                            # forget deleted files
+        if k not in seen:
+            del cache[k]
+
+    # Aggregate per project (a folder may have several session files / terminals).
+    agg = {}
+    for key, ent in cache.items():
+        toks = sum(k for (_, k) in ent["events"])
+        if toks <= 0:
+            continue
+        cwd = ent.get("cwd")
+        name = os.path.basename(cwd.rstrip("/\\")) if cwd else Path(key).parent.name
+        a = agg.setdefault(name, {"name": name, "tokens": 0, "last": 0})
+        a["tokens"] += toks
+        a["last"] = max(a["last"], ent.get("mtime", 0))
+    rows = list(agg.values())
+    total = sum(r["tokens"] for r in rows) or 1
+    for r in rows:
+        r["share"] = round(r["tokens"] / total * 100, 1)
+        r["active"] = (now - r["last"]) <= active_s
+        r["idle_s"] = int(now - r["last"])
+    rows.sort(key=lambda r: r["tokens"], reverse=True)
+    return rows[:top_n]
+
+
 def read_statusline_snapshot():
     """Read live 5h/weekly usage written by the Claude Code statusline (no API call).
 
@@ -798,6 +894,14 @@ DASHBOARD_HTML = r"""<!doctype html>
   .mini .num{font-size:12px;font-variant-numeric:tabular-nums;width:46px;text-align:right}
   .credits .cval{font-size:22px;font-weight:680;margin-bottom:2px}
   .credits .csub{color:var(--dim);font-size:12px;margin-bottom:12px}
+  .srow{display:flex;align-items:center;gap:10px;margin:9px 0;font-size:12.5px}
+  .sdot{width:8px;height:8px;border-radius:50%;flex:none;background:#3a3f48}
+  .sdot.on{background:#3fb950;box-shadow:0 0 6px rgba(63,185,80,.55)}
+  .sname{width:clamp(84px,24%,190px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#d7dde6}
+  .sbar{flex:1;height:8px;border-radius:5px;background:rgba(255,255,255,.08);overflow:hidden}
+  .sbar>i{display:block;height:100%;border-radius:5px;background:#5aa3ff;transition:width .6s cubic-bezier(.22,1,.36,1)}
+  .snum{width:52px;text-align:right;color:var(--dim);font-variant-numeric:tabular-nums}
+  .sempty{color:var(--dim);font-size:12px;padding:6px 0}
   .scale{display:flex;justify-content:center;gap:13px;flex-wrap:wrap;margin-top:18px;color:var(--dim);font-size:11px}
   .scale span{display:inline-flex;align-items:center;gap:6px}
   .scale i{width:11px;height:11px;border-radius:3px;display:inline-block}
@@ -865,6 +969,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div id="extra"></div>
       <div id="scoped"></div>
     </div>
+  </div>
+
+  <div class="card panel" id="sesscard">
+    <div class="ptitle">Sessions · last 5h <span class="legend" id="sesssub"></span></div>
+    <div id="sessions"></div>
   </div>
 
   <div class="scale">
@@ -980,6 +1089,21 @@ function renderScoped(wins){
       "<div class='num'>"+Math.round(w.pct)+"%</div></div>");
   });
 }
+function fmtTok(n){ n=n||0; if(n>=1e6)return (n/1e6).toFixed(n>=1e7?0:1)+"M"; if(n>=1e3)return Math.round(n/1e3)+"k"; return ""+n; }
+function renderSessions(list){
+  const box=$("sessions"), sub=$("sesssub");
+  if(!list||!list.length){ box.innerHTML="<div class='sempty'>no Claude sessions in the last 5h</div>"; sub.textContent=""; return; }
+  const act=list.filter(s=>s.active).length;
+  sub.innerHTML = act ? ("<span style='color:#3fb950'>"+act+" active</span>") : "";
+  const max=Math.max.apply(null, list.map(s=>s.tokens).concat([1]));
+  box.innerHTML=list.map(s=>{
+    const w=Math.max(4, s.tokens/max*100), nm=(s.name||"?").replace(/[<>&]/g,"");
+    return "<div class='srow'><span class='sdot "+(s.active?"on":"")+"'></span>"+
+      "<span class='sname' title='"+nm+" · "+s.share+"%'>"+nm+"</span>"+
+      "<div class='sbar'><i style='width:"+w+"%'></i></div>"+
+      "<span class='snum'>"+fmtTok(s.tokens)+"</span></div>";
+  }).join("");
+}
 async function refresh(){
   try{
     const d=await (await fetch("/api/usage",{cache:"no-store"})).json();
@@ -1004,6 +1128,7 @@ async function refresh(){
     LASTH=d.history; renderSpark(LASTH);
     renderExtra(d.extra);
     renderScoped(wins);
+    renderSessions(d.sessions);
     tickCountdowns();
   }catch(e){ $("err").className="err show"; $("err").textContent="⚠ cannot reach the tracker service."; }
 }
@@ -1528,11 +1653,22 @@ class TrayApp:
         extras_iv = int(self.cfg.get("api_extras_interval_seconds", 1800))
         fallback_iv = int(self.cfg.get("api_fallback_interval_seconds", 300))
         self._extra = getattr(self, "_extra", None)
+        self._sessions = getattr(self, "_sessions", [])
+        self._sessions_cache = getattr(self, "_sessions_cache", {})
+        sessions_iv = int(self.cfg.get("sessions_interval_seconds", 45))
+        sessions_top = int(self.cfg.get("sessions_top_n", 8))
         last_api = 0.0
+        last_sessions = 0.0
         warned_token = False
         while not self._stop.is_set():
             try:
                 now = time.time()
+                if now - last_sessions >= sessions_iv:
+                    try:
+                        self._sessions = scan_sessions(self._sessions_cache, now, top_n=sessions_top)
+                    except Exception:
+                        log("sessions scan error:\n" + traceback.format_exc())
+                    last_sessions = now
                 sl = read_statusline_snapshot()
                 fresh = bool(sl and (now - sl["ts"]) <= stale_secs)
                 # Prefer the statusline file (no API). Hit /api/oauth/usage only to
@@ -1580,6 +1716,7 @@ class TrayApp:
                     snap["error"] = r.error
                     snap["token_state"] = r.token_state
                     snap["updated_at"] = int(now)
+                snap["sessions"] = self._sessions
                 with STORE_LOCK:
                     STORE["snapshot"] = snap
                 self._refresh_visual(r)
