@@ -63,16 +63,27 @@ empty.
 
 ## Install
 
-**Requirements**
-- Windows 10 / 11
-- Python 3.11+ — install from [python.org](https://www.python.org/downloads/) and tick
-  **"Add python.exe to PATH"**
-- Claude Code installed and logged in, so `~/.claude/.credentials.json` exists
-- Edge **WebView2** runtime (preinstalled on Windows 11; otherwise a free
-  [download](https://developer.microsoft.com/microsoft-edge/webview2/)) — for the
-  dashboard/widget windows
+Requires Windows 10/11, **Claude Code installed and logged in** (so
+`~/.claude/.credentials.json` exists), and the Edge **WebView2** runtime
+(preinstalled on Windows 11; otherwise a free
+[download](https://developer.microsoft.com/microsoft-edge/webview2/)). Then pick one:
 
-**Steps**
+### Option A — Installer (easiest, no Python needed)
+
+Download **`ClaudeUsageTracker-Setup.exe`** from the
+[latest release](https://github.com/paris-paraskevas/claude-usage-tracker/releases/latest)
+and run it. A standard Windows wizard: accept the license, then tick the shortcuts
+you want — **Desktop / Start Menu / start at sign-in**.
+
+### Option B — pipx (updatable from the command line)
+
+```bash
+pipx install claude-usage-tracker
+claude-usage-tracker --install      # interactive: Desktop / Start Menu / Startup
+pipx upgrade claude-usage-tracker   # later, to update
+```
+
+### Option C — from source
 
 ```bash
 git clone https://github.com/paris-paraskevas/claude-usage-tracker.git
@@ -80,14 +91,9 @@ cd claude-usage-tracker
 python install.py
 ```
 
-That's all. `install.py` will:
-1. create a local virtualenv (`.venv`) and install dependencies,
-2. generate the app icon,
-3. add **Desktop + Start Menu + Startup** shortcuts (so it auto-starts on login).
-
-Then launch **Claude Usage Tracker** from the Start Menu or Desktop (or run the
-command `install.py` prints). The mini widget appears top-right and a tray icon
-appears by the clock. Uninstall the shortcuts any time with `python uninstall.py`.
+After any of these, the mini widget appears top-right and a tray icon by the clock.
+**To pin it to the taskbar** (Windows blocks apps from doing this themselves):
+right-click the running app's taskbar icon → *Pin to taskbar*.
 
 ## Usage
 
