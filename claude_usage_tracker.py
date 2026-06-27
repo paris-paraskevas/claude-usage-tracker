@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.17"
+__version__ = "0.1.18"
 
 
 def _data_dir() -> Path:
@@ -112,6 +112,9 @@ DEFAULT_CONFIG = {
     "show_widget_on_start": True,    # show the always-on-top mini widget at launch
     "widget_width": 392,
     "widget_height": 216,
+    "show_bar_on_start": False,      # the minimal one-line HUD bar overlay
+    "bar_width": 360,
+    "bar_height": 40,
 }
 
 LABELS = {
@@ -1917,6 +1920,20 @@ WIDGET_HTML = r"""<!doctype html>
   .grip::after{content:"";position:absolute;right:3px;bottom:3px;width:8px;height:8px;
     border-right:2px solid var(--faint);border-bottom:2px solid var(--faint)}
   .grip:hover::after{border-color:var(--dim)}
+  /* ---- minimal "bar" kind (FPS-overlay style) ---- */
+  body.kind-bar{flex-direction:row;align-items:center;gap:0;padding:5px 11px;
+    background:rgba(18,18,20,.62);border:1px solid rgba(255,255,255,.08);border-radius:9px}
+  body.kind-bar .top,body.kind-bar #body,body.kind-bar .acts{display:none}
+  #bar{display:none}
+  body.kind-bar #bar{display:flex;align-items:center;gap:14px;width:100%;overflow:hidden;
+    font:600 12px/1 var(--mono);white-space:nowrap;text-shadow:0 1px 2px rgba(0,0,0,.6)}
+  #bar .f{display:inline-flex;gap:5px;align-items:baseline;color:var(--dim)}
+  #bar .f b{font-weight:700;font-variant-numeric:tabular-nums}
+  #bar .dir{color:var(--ink);font-weight:700;max-width:42%;overflow:hidden;text-overflow:ellipsis}
+  #bar .acts2{margin-left:auto;display:flex;gap:8px;opacity:0;transition:opacity .15s}
+  body.kind-bar:hover #bar .acts2{opacity:1}
+  #bar .ic{cursor:pointer;color:var(--faint);font-size:13px;line-height:1}
+  #bar .ic:hover{color:var(--ink)}
 </style>
 </head>
 <body>
@@ -1933,11 +1950,14 @@ WIDGET_HTML = r"""<!doctype html>
     <button class="btn" id="w-refresh" onclick="refreshNow()">Refresh</button>
     <button class="btn" id="w-check" onclick="checkUpd()">Check for updates</button>
   </div>
+  <div id="bar"></div>
   <button class="grip" id="grip" title="Drag to resize"></button>
 <script>
 const $=id=>document.getElementById(id);
 let R={};
 let SEL=""; try{ SEL=localStorage.getItem("trackSel")||""; }catch(_){}
+const KIND=new URLSearchParams(location.search).get("kind")||"panel";
+document.body.classList.add("kind-"+KIND);
 function esc(s){ return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
 function bandColor(p){ if(p>=80)return"#d4694f"; if(p>=60)return"#cda24e"; return"#5e9e72"; }
 function fmtTok(n){ n=n||0; if(n>=1e6)return (n/1e6).toFixed(1)+"M"; if(n>=1e3)return Math.round(n/1e3)+"k"; return ""+n; }
@@ -1973,9 +1993,23 @@ function curContext(d){         // context for the selected session, or the acti
   if(SEL){ const s=(d.sessions||[]).find(x=>x.name===SEL); if(s) return {pct:s.context_pct, tok:s.context_tokens}; }
   const c=d.context||{}; return {pct:(c.used_percentage!=null?c.used_percentage:null), tok:c.total_input_tokens};
 }
+function pctOf(wins,key){ const w=(wins||[]).find(x=>x.key===key); return w?w.pct:null; }
+function bfld(label,pct){ return pct==null?"":"<span class='f'>"+label+" <b style='color:"+bandColor(pct)+"'>"+Math.round(pct)+"%</b></span>"; }
+function refreshNow2(){ fetch("/api/refresh",{method:"POST"}).catch(()=>{}); setTimeout(refresh,500); }
+function renderBar(d){           // minimal one-line HUD (dir + chosen percentages)
+  const wins=d.windows||[];
+  if(!d.ok && !wins.length){ $("bar").innerHTML="<span class='f dir'>"+esc(d.error||"unavailable")+"</span>"; return; }
+  const cx=curContext(d), dir=SEL||actDir(d);
+  let html="<span class='f dir' title='"+esc(d.cwd||"")+"'>"+esc(dir)+"</span>";
+  html+=bfld("Ctx:",cx.pct)+bfld("5h:",pctOf(wins,"five_hour"))+bfld("7d:",pctOf(wins,"seven_day"));
+  html+="<span class='acts2'><span class='ic' onclick='refreshNow2()' title='Refresh'>↻</span>"+
+        "<span class='ic' onclick='closeWidget()' title='Hide'>×</span></span>";
+  $("bar").innerHTML=html;
+}
 async function refresh(){ try{
   const d=await (await fetch("/api/usage",{cache:"no-store"})).json();
   const wins=d.windows||[];
+  if(KIND==="bar"){ renderBar(d); tick(); return; }
   if(!d.ok && !wins.length){ $("dot").style.background="#d4694f"; $("verdict").textContent=(d.error||"unavailable"); $("verdict").style.color="#d4694f"; return; }
   $("dot").style.background=d.ok?"#5e9e72":"#cda24e";
   const v=d.verdict;
@@ -1995,7 +2029,7 @@ async function refresh(){ try{
     $("cdc").textContent=cx.tok?fmtTok(cx.tok):"";
   } else { $("bc").style.width="0%"; $("pcc").textContent="–"; $("pcc").style.color=""; $("cdc").textContent=""; }
   tick();
-}catch(e){ $("dot").style.background="#cda24e"; } }
+}catch(e){ if(KIND!=="bar"){ $("dot").style.background="#cda24e"; } } }
 (function(){ const g=$("grip"); if(!g)return; let sx,sy,sw,sh,on=false;
   g.addEventListener("mousedown",e=>{ e.stopPropagation(); e.preventDefault(); });  // don't let easy_drag move the window
   g.addEventListener("pointerdown",e=>{ on=true; sx=e.screenX; sy=e.screenY; sw=window.innerWidth; sh=window.innerHeight;
@@ -2215,13 +2249,16 @@ def run_window(port: int) -> int:
     return 0
 
 
-def run_widget(port: int) -> int:
-    """Small frameless always-on-top draggable widget (the /widget view)."""
+def run_overlay(port: int, kind: str = "panel") -> int:
+    """Frameless always-on-top overlay. kind='panel' = the mini widget; kind='bar' =
+    the minimal one-line HUD (translucent, FPS-counter style). Both render the same
+    /api/usage data; the kind only changes the layout (CSS class) and the window chrome."""
     global _instance_guard
     cfg = load_config()
-    url = f"http://127.0.0.1:{port}/widget"
+    bar = (kind == "bar")
+    url = f"http://127.0.0.1:{port}/widget" + ("?kind=bar" if bar else "")
     try:
-        _instance_guard = bind_guard(49224)   # one widget at a time
+        _instance_guard = bind_guard(49225 if bar else 49224)   # one of each kind at a time
     except OSError:
         return 0
     try:
@@ -2229,8 +2266,10 @@ def run_widget(port: int) -> int:
         ensure_app_icon()
         set_app_user_model_id()
 
-        w = max(int(cfg.get("widget_width", 392)), 280)
-        h = max(int(cfg.get("widget_height", 216)), 150)   # floor: keep all content visible
+        if bar:
+            w, h, minsz = max(int(cfg.get("bar_width", 360)), 200), max(int(cfg.get("bar_height", 40)), 30), (200, 30)
+        else:
+            w, h, minsz = max(int(cfg.get("widget_width", 392)), 280), max(int(cfg.get("widget_height", 216)), 150), (280, 150)
         pos = {}
         try:    # top-right corner with a small margin
             import ctypes
@@ -2256,18 +2295,25 @@ def run_widget(port: int) -> int:
             def save_size(self, w, h):  # remember the chosen size for next launch
                 try:
                     c = load_config()
-                    c["widget_width"], c["widget_height"] = max(280, int(w)), max(150, int(h))
+                    if bar:
+                        c["bar_width"], c["bar_height"] = max(200, int(w)), max(30, int(h))
+                    else:
+                        c["widget_width"], c["widget_height"] = max(280, int(w)), max(150, int(h))
                     save_json(CONFIG_PATH, c)
                 except Exception:
                     pass
 
-        webview.create_window(APP_NAME, url, width=w, height=h, resizable=True,
-                              min_size=(280, 150), frameless=True, easy_drag=True, on_top=True,
-                              background_color="#141416", js_api=Api(), **pos)
+        kw = dict(width=w, height=h, resizable=True, min_size=minsz,
+                  frameless=True, easy_drag=True, on_top=True, js_api=Api(), **pos)
+        if bar:
+            kw["transparent"] = True            # see-through HUD; CSS paints a translucent panel
+        else:
+            kw["background_color"] = "#141416"
+        webview.create_window(APP_NAME, url, **kw)
         threading.Thread(target=_apply_window_icon, args=(True,), daemon=True).start()
         webview.start(icon=str(ICO_PATH))
     except Exception as exc:
-        log(f"widget mode failed: {exc}")
+        log(f"overlay ({kind}) failed: {exc}")
     return 0
 
 
@@ -2446,6 +2492,7 @@ class TrayApp:
         self.icon = None
         self.port = int(cfg.get("dashboard_port", 8787))
         self.widget_proc = None
+        self.bar_proc = None
         self._update_available = None
         self._update_url = None
         self._verdict = ""
@@ -2462,6 +2509,8 @@ class TrayApp:
                              visible=lambda i: bool(self._update_available)),
             pystray.MenuItem(lambda i: "Hide widget" if self._widget_alive() else "Show widget",
                              self._on_toggle_widget),
+            pystray.MenuItem(lambda i: "Hide minimal bar" if self._bar_alive() else "Show minimal bar",
+                             self._on_toggle_bar),
             pystray.MenuItem("Open dashboard", self._on_open, default=True),
             pystray.MenuItem("Open in browser", self._on_browser),
             pystray.MenuItem("Refresh now", self._on_refresh),
@@ -2495,6 +2544,8 @@ class TrayApp:
         threading.Thread(target=self._poll_loop, daemon=True).start()
         if self.cfg.get("show_widget_on_start", True):
             self.widget_proc = self._spawn_mode("--widget")
+        if self.cfg.get("show_bar_on_start", False):
+            self.bar_proc = self._spawn_mode("--bar")
         self.icon.run()
 
     # ----- child window/widget process control -----
@@ -2524,6 +2575,18 @@ class TrayApp:
                 pass
         else:
             self.widget_proc = self._spawn_mode("--widget")
+
+    def _bar_alive(self) -> bool:
+        return self.bar_proc is not None and self.bar_proc.poll() is None
+
+    def _on_toggle_bar(self, icon, item):
+        if self._bar_alive():
+            try:
+                self.bar_proc.terminate()
+            except Exception:
+                pass
+        else:
+            self.bar_proc = self._spawn_mode("--bar")
 
     # menu handlers
     def _on_open(self, icon, item):
@@ -2830,7 +2893,8 @@ def main() -> int:
     ap.add_argument("--debug", action="store_true", help="with --once, dump raw API JSON")
     ap.add_argument("--window", action="store_true", help="open the dashboard as a native window")
     ap.add_argument("--widget", action="store_true", help="open the always-on-top mini widget")
-    ap.add_argument("--port", type=int, default=None, help="dashboard port (with --window/--widget)")
+    ap.add_argument("--bar", action="store_true", help="open the minimal one-line HUD bar overlay")
+    ap.add_argument("--port", type=int, default=None, help="dashboard port (with --window/--widget/--bar)")
     ap.add_argument("--install", action="store_true", help="interactive setup (shortcuts + autostart)")
     ap.add_argument("--uninstall", action="store_true", help="remove shortcuts")
     ap.add_argument("--install-autostart", action="store_true", help="add the Startup shortcut only")
@@ -2860,7 +2924,10 @@ def main() -> int:
         return run_window(port)
     if args.widget:
         port = args.port or int(load_config().get("dashboard_port", 8787))
-        return run_widget(port)
+        return run_overlay(port, "panel")
+    if args.bar:
+        port = args.port or int(load_config().get("dashboard_port", 8787))
+        return run_overlay(port, "bar")
 
     # Tray mode: single-instance guard (hold a localhost port for the lifetime).
     global _instance_guard
