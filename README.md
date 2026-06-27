@@ -48,7 +48,8 @@ talks to nothing but that one Anthropic endpoint.
   run out *before* it resets, when the active context hits 90% (time to `/compact`),
   or when overage credits near the cap; plus a one-glance **green / amber / red**
   verdict in the widget and dashboard, and a daily update check with a one-click in-app
-  **Update** (the `.exe` self-updates; pipx installs use `pipx upgrade`).
+  **Update** (the `.exe` self-updates; pipx installs use `pipx upgrade`). **Refresh** and
+  **Check for updates** are also one click away in the dashboard, widget, and tray menu.
 - **Live tray icon** — two bars (left = 5h, right = weekly) that fill and change
   colour with usage.
 - **20% notifications** — a Windows toast each time the 5h or weekly window crosses

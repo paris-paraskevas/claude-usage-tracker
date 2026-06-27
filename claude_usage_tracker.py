@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.13"
+__version__ = "0.1.14"
 
 
 def _data_dir() -> Path:
@@ -126,6 +126,8 @@ WINDOW_LEN = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
 _instance_guard = None   # holds the single-instance socket for the process lifetime
 STORE_LOCK = threading.Lock()
 STORE: dict = {"snapshot": {"ok": False, "error": "starting", "windows": []}}
+CONTROL: dict = {}   # {"refresh": fn, "check_update": fn} — wired by the running TrayApp
+                     # so the dashboard/widget can drive the poll loop over HTTP
 
 
 # ---------------------------------------------------------------------------
@@ -1420,6 +1422,17 @@ DASHBOARD_HTML = r"""<!doctype html>
   .heatmap{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,1fr);gap:3px;overflow-x:auto;padding-bottom:3px}
   .hm{width:11px;height:11px;border-radius:2px;background:var(--panel2)}
   .hm.l1{background:#5a3526}.hm.l2{background:#8a4a33}.hm.l3{background:#b56043}.hm.l4{background:#d97757}
+  /* header controls: refresh + update */
+  .ic{background:var(--panel);border:1px solid var(--line);color:var(--dim);width:30px;height:30px;
+    border-radius:7px;cursor:pointer;font-size:14px;line-height:1;display:grid;place-items:center}
+  .ic:hover{color:var(--ink);border-color:rgba(255,255,255,.18)}
+  .ic.spin{animation:spin .8s linear}
+  @keyframes spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+  .updcta{font:600 11px/1 var(--sans);text-transform:uppercase;letter-spacing:.3px;padding:7px 11px;
+    border-radius:6px;background:var(--accent);color:#1c0f08;text-decoration:none;white-space:nowrap}
+  .linkbtn{background:none;border:0;color:var(--accent);font:inherit;cursor:pointer;padding:0}
+  .linkbtn:hover{text-decoration:underline}
+  footer a{color:var(--accent)}
 </style>
 </head>
 <body>
@@ -1433,6 +1446,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="badge" id="tier">—</div>
     <div class="vpill" id="vpill"></div>
     <div class="live"><span class="dot" id="livedot"></span><span id="livetxt">live</span></div>
+    <a class="updcta" id="updcta" target="_blank" rel="noopener" hidden></a>
+    <button class="ic" id="btn-refresh" title="Re-check usage now">↻</button>
   </header>
 
   <div class="err" id="err"></div>
@@ -1552,8 +1567,9 @@ DASHBOARD_HTML = r"""<!doctype html>
   </div>
 
   <footer>
-    Live usage from Claude Code's statusline data · read-only<br>
-    <span id="src">no endpoint polling — avoids rate limits</span>
+    <button class="linkbtn" id="btn-checkupd">Check for updates</button>
+    <span id="updres"></span><br>
+    Live usage from Claude Code's statusline data · read-only · no endpoint polling
   </footer>
 </div>
 
@@ -1568,6 +1584,21 @@ async function doSignin(){
   try{ await fetch("/api/login",{method:"POST"}); }catch(e){}
   // claude auth login runs in its own console; the next poll picks up the new token.
   setTimeout(()=>{ if(b){ b.disabled=false; b.textContent="Sign in to Claude"; } },4000);
+}
+const REL="https://github.com/paris-paraskevas/claude-usage-tracker/releases/latest";
+async function doRefresh(){
+  const b=$("btn-refresh"); if(b){ b.classList.remove("spin"); void b.offsetWidth; b.classList.add("spin"); }
+  try{ await fetch("/api/refresh",{method:"POST"}); }catch(e){}
+  setTimeout(refresh,500);   // give the poll loop a beat, then pull the fresh snapshot
+}
+async function doCheckUpdate(){
+  const r=$("updres"); if(r)r.textContent="checking…";
+  try{
+    const d=await (await fetch("/api/check-update",{method:"POST"})).json();
+    if(d.update){ r.innerHTML="v"+d.latest+" available — <a href='"+REL+"' target='_blank' rel='noopener'>download</a>"; }
+    else if(d.latest){ r.textContent="up to date (v"+d.current+")"; }
+    else{ r.textContent="couldn't reach GitHub"; }
+  }catch(e){ if(r)r.textContent="couldn't reach GitHub"; }
 }
 function fdur(s){
   if(s==null)return"—";
@@ -1794,10 +1825,14 @@ async function refresh(){
     renderScoped(wins);
     renderSessions(d.sessions);
     renderAlltime(d.alltime);
+    const up=d.update||{}, cta=$("updcta");
+    if(cta){ if(up.available){ cta.hidden=false; cta.textContent="Update to v"+up.available; cta.href=up.url||REL; } else { cta.hidden=true; } }
     tickCountdowns();
   }catch(e){ $("err").className="err show"; $("err").textContent="⚠ cannot reach the tracker service."; }
 }
 buildTicks();
+$("btn-refresh").onclick=doRefresh;
+$("btn-checkupd").onclick=doCheckUpdate;
 setInterval(tickCountdowns,1000);
 setInterval(refresh,5000);
 refresh();
@@ -1859,7 +1894,7 @@ WIDGET_HTML = r"""<!doctype html>
 <body>
   <div class="top">
     <span class="dot" id="dot"></span><span class="ttl" id="acct">Claude usage</span>
-    <span class="tier" id="tier"></span><span class="verdict" id="verdict"></span><span class="x" onclick="closeWidget()" title="Hide">×</span>
+    <span class="tier" id="tier"></span><span class="verdict" id="verdict"></span><span class="x" onclick="refreshNow()" title="Re-check usage now">↻</span><span class="x" onclick="closeWidget()" title="Hide">×</span>
   </div>
   <div id="body">
     <div class="row"><span class="lab">5h</span><div class="bar"><i id="b5"></i></div><span class="pc" id="pc5">–</span><span class="cd" id="cd5"></span></div>
@@ -1872,6 +1907,7 @@ let R={};
 function bandColor(p){ if(p>=80)return"#d4694f"; if(p>=60)return"#cda24e"; return"#5e9e72"; }
 function fmtTok(n){ n=n||0; if(n>=1e6)return (n/1e6).toFixed(1)+"M"; if(n>=1e3)return Math.round(n/1e3)+"k"; return ""+n; }
 function closeWidget(){ try{ window.pywebview.api.close(); }catch(e){ try{window.close();}catch(_){} } }
+async function refreshNow(){ try{ await fetch("/api/refresh",{method:"POST"}); }catch(e){} setTimeout(refresh,500); }
 function sdur(s){ if(s==null)return""; s=Math.max(0,Math.floor(s));
   const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
   if(d>0)return"↻ "+d+"d "+h+"h"; if(h>0)return"↻ "+h+"h "+String(m).padStart(2,"0")+"m";
@@ -1947,11 +1983,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?", 1)[0]
         # Loopback only (the server already binds 127.0.0.1; double-check anyway).
-        # Worst case if abused: a console window opens running `claude auth login`,
-        # which the user still has to complete — it can't change creds on its own.
-        if path == "/api/login" and self.client_address[0] in ("127.0.0.1", "::1"):
+        # These just nudge the tray's own poll loop / sign-in — nothing destructive.
+        if self.client_address[0] not in ("127.0.0.1", "::1"):
+            self._send(403, "text/plain", b"forbidden")
+            return
+        if path == "/api/login":
             threading.Thread(target=launch_login, daemon=True).start()
             self._send(200, "application/json", b'{"ok":true}')
+        elif path == "/api/refresh":
+            fn = CONTROL.get("refresh")
+            if fn:
+                try:
+                    fn()
+                except Exception:
+                    pass
+            self._send(200, "application/json", b'{"ok":true}')
+        elif path == "/api/check-update":
+            fn = CONTROL.get("check_update")
+            try:
+                res = fn() if fn else {"update": False, "current": __version__, "latest": None}
+            except Exception:
+                res = {"update": False, "current": __version__, "latest": None}
+            self._send(200, "application/json", json.dumps(res).encode("utf-8"))
         else:
             self._send(404, "text/plain", b"not found")
 
@@ -2314,6 +2367,7 @@ class TrayApp:
             pystray.MenuItem("Open dashboard", self._on_open, default=True),
             pystray.MenuItem("Open in browser", self._on_browser),
             pystray.MenuItem("Refresh now", self._on_refresh),
+            pystray.MenuItem("Check for updates", self._on_check_update),
             pystray.MenuItem("Sign in to Claude…", self._on_login),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Open config file", self._on_config),
@@ -2337,6 +2391,8 @@ class TrayApp:
         self.icon = pystray.Icon(APP_NAME, icon=make_icon_image({}),
                                  title=f"{APP_NAME}\nstarting…", menu=self.build_menu())
         self._job = make_kill_on_close_job()
+        CONTROL["refresh"] = self._wake.set            # let the dashboard/widget re-poll
+        CONTROL["check_update"] = self._check_update_now
         threading.Thread(target=self._poll_loop, daemon=True).start()
         if self.cfg.get("show_widget_on_start", True):
             self.widget_proc = self._spawn_mode("--widget")
@@ -2408,6 +2464,33 @@ class TrayApp:
 
     def _on_refresh(self, icon, item):
         self._wake.set()
+
+    def _check_update_now(self) -> dict:
+        """Query GitHub for the latest release now; update state if newer. Returns
+        {current, latest, url, update}."""
+        latest, dl = check_github_latest()
+        res = {"current": __version__, "latest": latest, "url": dl, "update": False}
+        if latest and _vtuple(latest) > _vtuple(__version__):
+            self._update_available, self._update_url = latest, dl
+            res["update"] = True
+        return res
+
+    def _on_check_update(self, icon, item):
+        threading.Thread(target=self._do_check_update, daemon=True).start()
+
+    def _do_check_update(self):
+        res = self._check_update_now()
+        if res["update"]:
+            notify("Update available", f"v{res['latest']} — open the tray menu → Update")
+        elif res["latest"]:
+            notify(APP_NAME, f"You're on the latest version (v{__version__}).")
+        else:
+            notify(APP_NAME, "Couldn't reach GitHub to check for updates.")
+        try:
+            if self.icon:
+                self.icon.update_menu()      # surface the Update item if one appeared
+        except Exception:
+            pass
 
     def _on_login(self, icon, item):
         threading.Thread(target=launch_login, daemon=True).start()
@@ -2548,6 +2631,7 @@ class TrayApp:
                 snap["context"] = self._context
                 snap["cwd"] = self._cwd
                 snap["alltime"] = self._alltime
+                snap["update"] = {"available": self._update_available, "url": self._update_url}
                 self._verdict = (snap.get("verdict") or {}).get("text", "")
                 with STORE_LOCK:
                     STORE["snapshot"] = snap
