@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.9"
+__version__ = "0.1.10"
 
 
 def _data_dir() -> Path:
@@ -267,6 +267,26 @@ def read_oauth() -> dict:
         return data.get("claudeAiOauth") or {}
     except Exception:
         return {}
+
+
+_account_cache = {"mtime": 0.0, "data": None}
+
+
+def read_account():
+    """Logged-in account (email / display name / org) from ~/.claude.json, cached by
+    mtime so the large file is only parsed when the account actually changes."""
+    p = Path(os.path.expanduser("~")) / ".claude.json"
+    try:
+        mt = p.stat().st_mtime
+        if mt != _account_cache["mtime"]:
+            a = json.loads(p.read_text(encoding="utf-8")).get("oauthAccount") or {}
+            _account_cache["data"] = {"email": a.get("emailAddress"),
+                                      "name": a.get("displayName"),
+                                      "org": a.get("organizationName")}
+            _account_cache["mtime"] = mt
+        return _account_cache["data"]
+    except Exception:
+        return _account_cache.get("data")
 
 
 def read_token() -> tuple[str | None, str]:
@@ -721,6 +741,7 @@ def build_snapshot(r: FetchResult, hist: dict, cfg: dict) -> dict:
         "token_state": r.token_state,
         "updated_at": int(now_s),
         "subscription": oauth.get("subscriptionType", ""),
+        "account": read_account(),
         "poll_interval": int(cfg.get("poll_interval_seconds", 60)),
         "windows": [],
         "extra": r.extra,
@@ -1256,7 +1277,9 @@ async function refresh(){
       err.className="err show";
       err.textContent="⚠ "+(d.error||"waiting for data")+(authBad?" — run any Claude Code command to refresh your login.":" — retrying…");
     }else{ err.className="err"; }
-    $("tier").textContent=d.subscription||"plan";
+    const acc=d.account||{};
+    $("tier").textContent = acc.org || d.subscription || "plan";
+    $("tier").title = acc.email || "";
     const vp=$("vpill"), v=d.verdict;
     if(v && v.text){ vp.style.display=""; vp.textContent=v.text; vp.style.color=v.color; vp.style.borderColor=v.color+"66"; vp.style.background=v.color+"1f"; }
     else { vp.style.display="none"; }
@@ -1303,7 +1326,7 @@ WIDGET_HTML = r"""<!doctype html>
     padding:11px 13px;user-select:none;-webkit-user-select:none;cursor:default}
   .top{display:flex;align-items:center;gap:7px;margin-bottom:10px;color:#8b97a8;font-size:10px}
   .top .dot{width:6px;height:6px;border-radius:50%;background:#3fb950}
-  .top .ttl{text-transform:uppercase;letter-spacing:1.3px}
+  .top .ttl{letter-spacing:.3px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .top .tier{color:#e8eef6;font-size:13.5px;font-weight:700;text-transform:none;letter-spacing:.2px}
   .top .verdict{margin-left:auto;font-weight:700;font-size:11px;padding-right:8px;white-space:nowrap}
   .top .x{cursor:pointer;color:#6b7686;font-size:15px;line-height:1;padding:0 2px}
@@ -1319,7 +1342,7 @@ WIDGET_HTML = r"""<!doctype html>
 </head>
 <body>
   <div class="top">
-    <span class="dot" id="dot"></span><span class="ttl">Claude usage</span>
+    <span class="dot" id="dot"></span><span class="ttl" id="acct">Claude usage</span>
     <span class="tier" id="tier"></span><span class="verdict" id="verdict"></span><span class="x" onclick="closeWidget()" title="Hide">×</span>
   </div>
   <div id="body">
@@ -1351,6 +1374,9 @@ async function refresh(){ try{
   const v=d.verdict;
   if(v && v.text){ $("verdict").textContent=v.text; $("verdict").style.color=v.color; if(d.ok)$("dot").style.background=v.color; }
   else { $("verdict").textContent=""; }
+  const acc=d.account||{};
+  $("acct").textContent = acc.org || acc.name || (acc.email||"").split("@")[0] || "Claude";
+  $("acct").title = acc.email || "";
   const dir=(d.cwd||"").replace(/[\\\/]+$/,"").split(/[\\\/]/).pop();
   $("tier").textContent = dir || d.subscription || "";
   $("tier").title = d.cwd || "";
