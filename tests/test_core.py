@@ -115,14 +115,14 @@ def test_scan_all_time(tmp_path, monkeypatch):
     proj = tmp_path / "C--Dev-foo"
     proj.mkdir()
     lines = []
-    for i in range(2):                                   # 2 Opus messages
+    for i in range(2):                                   # 2 Opus messages, session s1
         lines.append(json.dumps({
-            "timestamp": f"2026-06-26T12:00:0{i}.000Z", "cwd": r"C:\Dev\foo",
+            "timestamp": f"2026-06-26T12:00:0{i}.000Z", "cwd": r"C:\Dev\foo", "sessionId": "s1",
             "message": {"model": "claude-opus-4-8", "usage": {
                 "input_tokens": 100, "output_tokens": 50,
                 "cache_creation_input_tokens": 10, "cache_read_input_tokens": 9000}}}))
-    lines.append(json.dumps({                            # 1 Fable message
-        "timestamp": "2026-06-26T13:00:00.000Z", "cwd": r"C:\Dev\foo",
+    lines.append(json.dumps({                            # 1 Fable message, session s1
+        "timestamp": "2026-06-26T13:00:00.000Z", "cwd": r"C:\Dev\foo", "sessionId": "s1",
         "message": {"model": "claude-fable-5", "usage": {
             "input_tokens": 200, "output_tokens": 30,
             "cache_creation_input_tokens": 5, "cache_read_input_tokens": 1000}}}))
@@ -130,32 +130,37 @@ def test_scan_all_time(tmp_path, monkeypatch):
     f.write_text("\n".join(lines), encoding="utf-8")
     monkeypatch.setattr(m, "PROJECTS_DIR", tmp_path)
 
-    # Pin "now" to the data's own day so the 30-day window deterministically covers it.
+    # Pin "now" to the data's own day so the period windows deterministically cover it.
     import datetime as _dt
     now = _dt.datetime(2026, 6, 26, 18, 0, 0).timestamp()
 
     cache = {}
-    a = m.scan_all_time(cache, now, days=30)
-    assert a["tokens"] == (100 + 50 + 10) * 2 + (200 + 30 + 5)   # cache reads excluded
-    assert a["total"]["cr"] == 9000 * 2 + 1000                   # tracked separately
-    assert a["total"]["msgs"] == 3
-    assert {r["name"] for r in a["by_model"]} == {"Opus 4.8", "Fable 5"}
-    assert a["by_project"][0]["name"] == "foo"
-    assert len(a["days"]) == 30                                  # zero-filled span
-    assert a["days"][-1]["d"] == "2026-06-26"                    # last day = today (pinned)
-    assert sum(d["tokens"] for d in a["days"]) == a["tokens"]    # all activity on one day
+    a = m.scan_all_time(cache, now)
+    allp = a["periods"]["all"]
+    assert allp["tokens"] == (100 + 50 + 10) * 2 + (200 + 30 + 5)   # cache reads excluded
+    assert a["total"]["cr"] == 9000 * 2 + 1000                      # tracked separately
+    assert a["total"]["msgs"] == 3 and allp["messages"] == 3
+    assert allp["sessions"] == 1                                    # one distinct sessionId
+    assert {r["name"] for r in allp["models"]} == {"Opus 4.8", "Fable 5"}
+    assert allp["fav_model"] == "Opus 4.8"                          # most tokens
+    assert a["projects"][0]["name"] == "foo"
+    assert a["peak_hour"] is not None
+    assert a["streak_current"] >= 1 and a["streak_longest"] >= 1
+    assert a["heatmap"]["days"]                                     # non-empty grid
 
-    # Incremental: appending a line is folded in once (no re-read, no double count).
+    # Incremental: a new-session line is folded in once (no re-read, no double count).
     with open(f, "a", encoding="utf-8") as fh:
         fh.write("\n" + json.dumps({
-            "timestamp": "2026-06-26T14:00:00.000Z", "cwd": r"C:\Dev\foo",
+            "timestamp": "2026-06-26T14:00:00.000Z", "cwd": r"C:\Dev\foo", "sessionId": "s2",
             "message": {"model": "claude-opus-4-8", "usage": {
                 "input_tokens": 1, "output_tokens": 1,
                 "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}}))
-    a2 = m.scan_all_time(cache, time.time())
+    a2 = m.scan_all_time(cache, now)
     assert a2["total"]["msgs"] == 4
-    assert a2["tokens"] == (100 + 50 + 10) * 2 + (200 + 30 + 5) + 2
+    assert a2["periods"]["all"]["tokens"] == (100 + 50 + 10) * 2 + (200 + 30 + 5) + 2
+    assert a2["periods"]["all"]["sessions"] == 2                    # two distinct sessions
 
     # A second scan with no changes is a no-op (totals stable).
-    a3 = m.scan_all_time(cache, time.time())
-    assert a3["tokens"] == a2["tokens"] and a3["total"]["msgs"] == 4
+    a3 = m.scan_all_time(cache, now)
+    assert a3["periods"]["all"]["tokens"] == a2["periods"]["all"]["tokens"]
+    assert a3["total"]["msgs"] == 4

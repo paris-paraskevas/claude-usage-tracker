@@ -37,11 +37,13 @@ talks to nothing but that one Anthropic endpoint.
   read from your local Claude Code logs (token counts only, never content), with
   **Context % / Tokens** tabs and active indicators — see which terminal is burning
   your usage.
-- **All-time tokens** — a second dashboard tab with your lifetime totals
-  (input / output / cache write / cache read), a **by-model** and **by-project**
-  breakdown, and a **30-day daily-usage chart**. Folded incrementally from your local
-  logs (each file read once, then only new bytes), so it's accurate without rescanning
-  gigabytes; cache-reads are tallied separately since they bill ~10× cheaper.
+- **All-time stats** — a second dashboard tab that mines your whole local history:
+  an **Overview** (sessions, messages, total tokens, active days, current/longest
+  streak, peak hour, favorite model, a contribution **heatmap**, and a "you've burned
+  N× more tokens than *War and Peace*" line) and a **Models** view (tokens-over-time
+  stacked chart + per-model input/output split), all with a **7d / 30d / All** toggle.
+  Folded incrementally from your local logs (each file read once, then only new bytes),
+  so it's accurate without rescanning gigabytes — token counts only, never content.
 - **Proactive alerts + traffic-light verdict** — toasts when a window is on track to
   run out *before* it resets, when the active context hits 90% (time to `/compact`),
   or when overage credits near the cap; plus a one-glance **green / amber / red**

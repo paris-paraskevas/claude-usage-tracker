@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.12"
+__version__ = "0.1.13"
 
 
 def _data_dir() -> Path:
@@ -646,10 +646,10 @@ def scan_sessions(cache: dict, now: float, window_s: int = 5 * 3600,
 
 
 # ---------------------------------------------------------------------------
-# All-time totals (lifetime token usage across every local session log)
+# All-time stats (lifetime usage mined from every local session log)
 # ---------------------------------------------------------------------------
 
-ALLTIME_VERSION = 1
+ALLTIME_VERSION = 2
 
 MODEL_NAMES = {
     "claude-opus-4-8": "Opus 4.8", "claude-opus-4-7": "Opus 4.7",
@@ -657,6 +657,20 @@ MODEL_NAMES = {
     "claude-sonnet-4-6": "Sonnet 4.6", "claude-sonnet-4-5": "Sonnet 4.5",
     "claude-haiku-4-5": "Haiku 4.5", "claude-fable-5": "Fable 5",
 }
+
+# "you've used Nx more tokens than <work>" — rough token estimates (words x 1.3).
+COMPARISONS = [
+    ("the U.S. Constitution", 10_000),
+    ("The Little Prince", 22_000),
+    ("The Great Gatsby", 63_000),
+    ("1984", 120_000),
+    ("Pride and Prejudice", 165_000),
+    ("Dune", 244_000),
+    ("Moby-Dick", 268_000),
+    ("War and Peace", 750_000),
+    ("the Lord of the Rings trilogy", 760_000),
+    ("the Harry Potter series", 1_400_000),
+]
 
 
 def pretty_model(raw) -> str:
@@ -678,7 +692,8 @@ def pretty_model(raw) -> str:
 
 def _empty_alltime_cache() -> dict:
     return {"v": ALLTIME_VERSION, "files": {}, "models": {}, "projects": {},
-            "days": {}, "first_ts": None, "last_ts": None}
+            "days": {}, "day_models": {}, "hours": {}, "sessions": {},
+            "first_ts": None, "last_ts": None}
 
 
 def _acc(d: dict, key: str, inp, out, cw, cr) -> None:
@@ -694,13 +709,13 @@ def _at_tokens(r) -> int:
 
 
 def scan_all_time(cache: dict, now: float, top_n: int = 8, days: int = 30) -> dict:
-    """Lifetime Claude Code token totals from ~/.claude/projects/*/*.jsonl.
+    """Lifetime Claude Code usage from ~/.claude/projects/*/*.jsonl.
 
     Each session log is read incrementally — only the bytes appended since the
     last scan, tracked per file in `cache["files"]` — so the first call backfills
-    the whole history and every later call is cheap. Token counts and timestamps
-    only; message content is never read. `cache` is mutated and persisted between
-    runs. Returns a display dict for the dashboard's All-time tab.
+    the whole history and every later call is cheap. Token counts, models, and
+    timestamps only; message content is never read. `cache` is mutated and
+    persisted between runs. Returns a display dict for the All-time tab.
     """
     if not isinstance(cache, dict) or cache.get("v") != ALLTIME_VERSION:
         cache.clear()
@@ -752,8 +767,21 @@ def scan_all_time(cache: dict, now: float, top_n: int = 8, days: int = 30) -> di
                     _acc(cache["projects"], name, inp, out, cw, cr)
                     ts = _parse_iso(o.get("timestamp"))
                     if ts:
-                        _acc(cache["days"], datetime.fromtimestamp(ts).strftime("%Y-%m-%d"),
-                             inp, out, cw, cr)
+                        dt = datetime.fromtimestamp(ts)
+                        ds = dt.strftime("%Y-%m-%d")
+                        _acc(cache["days"], ds, inp, out, cw, cr)
+                        dm = cache["day_models"].setdefault(ds, {})
+                        dr = dm.get(model)
+                        if dr is None:
+                            dr = dm[model] = {"in": 0, "out": 0, "cw": 0}
+                        dr["in"] += inp; dr["out"] += out; dr["cw"] += cw
+                        hk = str(dt.hour)
+                        cache["hours"][hk] = cache["hours"].get(hk, 0) + inp + out + cw
+                        sid = o.get("sessionId")
+                        if isinstance(sid, str):
+                            prev = cache["sessions"].get(sid, 0)
+                            if ts > prev:
+                                cache["sessions"][sid] = ts
                         cache["first_ts"] = ts if cache["first_ts"] is None else min(cache["first_ts"], ts)
                         cache["last_ts"] = ts if cache["last_ts"] is None else max(cache["last_ts"], ts)
             files[key] = st.st_size
@@ -764,47 +792,175 @@ def scan_all_time(cache: dict, now: float, top_n: int = 8, days: int = 30) -> di
         if k not in live:
             del files[k]
 
-    return _alltime_display(cache, now, top_n, days)
+    return _alltime_display(cache, now, top_n)
 
 
-def _alltime_display(cache: dict, now: float, top_n: int, days: int) -> dict:
+def _d(ds):
+    return datetime.strptime(ds, "%Y-%m-%d").date()
+
+
+def _comparison(total_tokens, rank):
+    """Pick a 'Nx more tokens than <work>' line. `rank` (0=all,1=30d,2=7d) nudges
+    the choice so different periods cite different works."""
+    cands = sorted([(n, t) for (n, t) in COMPARISONS if total_tokens >= t * 2],
+                   key=lambda x: x[1], reverse=True)
+    if not cands:
+        return None
+    name, tok = cands[min(rank, len(cands) - 1)]
+    return {"x": round(total_tokens / tok), "name": name}
+
+
+def _segs(model_map):
+    segs = [{"name": m, "tok": r["in"] + r["out"] + r["cw"]} for m, r in model_map.items()]
+    segs = [s for s in segs if s["tok"] > 0]
+    segs.sort(key=lambda x: x["tok"], reverse=True)
+    return segs
+
+
+def _series(cache, today, ndays):
+    """Stacked-bar bins over time: daily for 7d/30d, weekly for all-time."""
+    dm = cache["day_models"]
+    bins = []
+    if ndays is not None:
+        for i in range(ndays - 1, -1, -1):
+            d = today - timedelta(days=i)
+            segs = _segs(dm.get(d.strftime("%Y-%m-%d"), {}))
+            bins.append({"label": d.strftime("%b ") + str(d.day),
+                         "total": sum(s["tok"] for s in segs), "segs": segs})
+        return bins
+    first = cache.get("first_ts")
+    if not first:
+        return []
+    start = datetime.fromtimestamp(first).date()
+    start = start - timedelta(days=start.weekday())     # align to Monday
+    wk = start
+    while wk <= today:
+        acc = {}
+        for j in range(7):
+            for m, r in dm.get((wk + timedelta(days=j)).strftime("%Y-%m-%d"), {}).items():
+                acc[m] = acc.get(m, 0) + r["in"] + r["out"] + r["cw"]
+        segs = [{"name": m, "tok": t} for m, t in acc.items() if t > 0]
+        segs.sort(key=lambda x: x["tok"], reverse=True)
+        bins.append({"label": wk.strftime("%b ") + str(wk.day), "total": sum(s["tok"] for s in segs), "segs": segs})
+        wk += timedelta(days=7)
+    return bins[-26:]                                   # keep it readable
+
+
+def _period(cache, now, today, ndays, rank):
+    cutoff = None if ndays is None else (today - timedelta(days=ndays - 1))
+    tokens = msgs = active = 0
+    for ds, r in cache["days"].items():
+        if cutoff and _d(ds) < cutoff:
+            continue
+        t = _at_tokens(r)
+        if t > 0:
+            active += 1
+        tokens += t
+        msgs += r["msgs"]
+    model_tot = {}
+    for ds, mm in cache["day_models"].items():
+        if cutoff and _d(ds) < cutoff:
+            continue
+        for m, r in mm.items():
+            a = model_tot.setdefault(m, {"in": 0, "out": 0, "cw": 0})
+            a["in"] += r["in"]; a["out"] += r["out"]; a["cw"] += r["cw"]
+    models = [{"name": m, "in": r["in"], "out": r["out"], "tokens": r["in"] + r["out"] + r["cw"]}
+              for m, r in model_tot.items()]
+    models = [x for x in models if x["tokens"] > 0]
+    g = sum(x["tokens"] for x in models) or 1
+    for x in models:
+        x["share"] = round(x["tokens"] / g * 100, 1)
+    models.sort(key=lambda x: x["tokens"], reverse=True)
+    if ndays is None:
+        sessions = len(cache["sessions"])
+    else:
+        cut_ts = now - ndays * 86400
+        sessions = sum(1 for ts in cache["sessions"].values() if ts >= cut_ts)
+    return {
+        "tokens": tokens, "messages": msgs, "sessions": sessions, "active_days": active,
+        "fav_model": models[0]["name"] if models else "—",
+        "models": models[:8],
+        "compare": _comparison(tokens, rank),
+        "series": _series(cache, today, ndays),
+    }
+
+
+def _heatmap(cache, today):
+    toks = {ds: _at_tokens(r) for ds, r in cache["days"].items()}
+    mx = max(toks.values()) if toks else 0
+    first = cache.get("first_ts")
+    if not first:
+        return {"days": [], "max": 0}
+    start = datetime.fromtimestamp(first).date()
+    start = start - timedelta(days=(start.weekday() + 1) % 7)   # align to a Sunday
+    out, d = [], start
+    while d <= today:
+        t = toks.get(d.strftime("%Y-%m-%d"), 0)
+        lvl = 0
+        if t > 0 and mx > 0:
+            frac = t / mx
+            lvl = 1 if frac <= .25 else 2 if frac <= .5 else 3 if frac <= .75 else 4
+        out.append({"d": d.strftime("%Y-%m-%d"), "tok": t, "lvl": lvl})
+        d += timedelta(days=1)
+    return {"days": out, "max": mx}
+
+
+def _streaks(cache, today):
+    active = set(ds for ds, r in cache["days"].items() if _at_tokens(r) > 0)
+    first = cache.get("first_ts")
+    if not first:
+        return (0, 0)
+    longest = run = 0
+    d = datetime.fromtimestamp(first).date()
+    while d <= today:
+        run = run + 1 if d.strftime("%Y-%m-%d") in active else 0
+        longest = max(longest, run)
+        d += timedelta(days=1)
+    cur, d = 0, today
+    if today.strftime("%Y-%m-%d") not in active:        # today may have no activity yet
+        d = today - timedelta(days=1)
+    while d.strftime("%Y-%m-%d") in active:
+        cur += 1
+        d -= timedelta(days=1)
+    return (cur, longest)
+
+
+def _peak_hour(cache):
+    h = cache.get("hours") or {}
+    if not h:
+        return None
+    hr = int(max(h.items(), key=lambda kv: kv[1])[0])
+    return f"{hr % 12 or 12} {'AM' if hr < 12 else 'PM'}"
+
+
+def _alltime_display(cache: dict, now: float, top_n: int = 8) -> dict:
+    today = datetime.fromtimestamp(now).date()
     total = {"in": 0, "out": 0, "cw": 0, "cr": 0, "msgs": 0}
     for r in cache["models"].values():
         for k in total:
             total[k] += r[k]
-
-    def rows(d):
-        out = [{"name": n, "tokens": _at_tokens(r), "in": r["in"], "out": r["out"],
-                "cw": r["cw"], "cr": r["cr"], "msgs": r["msgs"]}
-               for n, r in d.items() if _at_tokens(r) > 0]
-        out.sort(key=lambda x: x["tokens"], reverse=True)
-        return out
-
-    by_model = rows(cache["models"])
-    by_project = rows(cache["projects"])
-    mgrand = sum(r["tokens"] for r in by_model) or 1
-    for r in by_model:
-        r["share"] = round(r["tokens"] / mgrand * 100, 1)
-    pgrand = sum(r["tokens"] for r in by_project) or 1
-    for r in by_project:
-        r["share"] = round(r["tokens"] / pgrand * 100, 1)
-
-    # last `days` calendar days (local time), gaps filled with 0
-    series, today = [], datetime.fromtimestamp(now).date()
-    for i in range(days - 1, -1, -1):
-        ds = (today - timedelta(days=i)).strftime("%Y-%m-%d")
-        r = cache["days"].get(ds)
-        series.append({"d": ds, "tokens": _at_tokens(r) if r else 0})
-
+    projects = [{"name": n, "tokens": _at_tokens(r)} for n, r in cache["projects"].items() if _at_tokens(r) > 0]
+    projects.sort(key=lambda x: x["tokens"], reverse=True)
+    pg = sum(p["tokens"] for p in projects) or 1
+    for p in projects:
+        p["share"] = round(p["tokens"] / pg * 100, 1)
+    cur, longest = _streaks(cache, today)
     return {
+        "ready": cache.get("first_ts") is not None,
         "total": total,
-        "tokens": _at_tokens(total),
-        "by_model": by_model,
-        "by_project": by_project[:top_n],
-        "project_count": len(by_project),
-        "days": series,
         "first_ts": cache.get("first_ts"),
         "last_ts": cache.get("last_ts"),
+        "streak_current": cur,
+        "streak_longest": longest,
+        "peak_hour": _peak_hour(cache),
+        "heatmap": _heatmap(cache, today),
+        "projects": projects[:top_n],
+        "project_count": len(projects),
+        "periods": {
+            "7": _period(cache, now, today, 7, 2),
+            "30": _period(cache, now, today, 30, 1),
+            "all": _period(cache, now, today, None, 0),
+        },
     }
 
 
@@ -1252,6 +1408,18 @@ DASHBOARD_HTML = r"""<!doctype html>
   .err .signin{background:var(--accent);color:#1c0f08;border:0;font:600 12px/1 var(--sans);
     padding:7px 13px;border-radius:6px;cursor:pointer;margin-left:auto}
   .err .signin:hover{filter:brightness(1.08)} .err .signin:disabled{opacity:.6;cursor:default}
+  /* all-time: sub-tabs, model legend, heatmap */
+  .atbar{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+  #at-overview>*,#at-models-view>*{margin-bottom:14px}
+  #at-overview .statgrid{margin-top:0}
+  .mrow{display:flex;align-items:center;gap:10px;margin:11px 0;font-size:12.5px}
+  .mrow .mdot{width:9px;height:9px;border-radius:2px;flex:none}
+  .mrow .mname{width:108px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mrow .mio{flex:1;text-align:right;color:var(--dim);font:12px/1 var(--mono)}
+  .mrow .mshare{width:54px;text-align:right;font:600 12px/1 var(--mono)}
+  .heatmap{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,1fr);gap:3px;overflow-x:auto;padding-bottom:3px}
+  .hm{width:11px;height:11px;border-radius:2px;background:var(--panel2)}
+  .hm.l1{background:#5a3526}.hm.l2{background:#8a4a33}.hm.l3{background:#b56043}.hm.l4{background:#d97757}
 </style>
 </head>
 <body>
@@ -1346,19 +1514,40 @@ DASHBOARD_HTML = r"""<!doctype html>
   </div><!-- /tab-live -->
 
   <div id="tab-alltime" class="tabpane" hidden>
-    <div class="card panel">
-      <div class="ptitle"><span>All-time tokens</span><span class="legend" id="at-span"></span></div>
-      <div class="big" id="at-tokens">…</div>
-      <div class="csub" id="at-sub">calculating from your session history…</div>
-      <div class="statgrid" id="at-stats"></div>
+    <div class="atbar">
+      <div class="stabs" id="at-view">
+        <button class="stab on" data-v="overview">Overview</button>
+        <button class="stab" data-v="models">Models</button>
+      </div>
+      <div class="stabs" id="at-period">
+        <button class="stab" data-p="7">7d</button>
+        <button class="stab" data-p="30">30d</button>
+        <button class="stab on" data-p="all">All</button>
+      </div>
     </div>
-    <div class="row">
-      <div class="card panel"><div class="ptitle">By model</div><div id="at-models"></div></div>
-      <div class="card panel"><div class="ptitle"><span>By project</span><span class="legend" id="at-projmore"></span></div><div id="at-projects"></div></div>
+
+    <div id="at-overview">
+      <div class="statgrid" id="at-stats"><div class="sempty">calculating from your session history…</div></div>
+      <div class="card panel">
+        <div class="ptitle"><span>Activity</span><span class="legend">level <i style="background:#5a3526"></i><i style="background:#8a4a33"></i><i style="background:#b56043"></i><i style="background:#d97757"></i></span></div>
+        <div id="at-heatmap" class="heatmap"></div>
+        <div class="csub" id="at-compare" style="margin-top:13px"></div>
+      </div>
+      <div class="card panel">
+        <div class="ptitle"><span>By project</span><span class="legend" id="at-projmore">all-time</span></div>
+        <div id="at-projects"></div>
+      </div>
     </div>
-    <div class="card panel">
-      <div class="ptitle">Daily usage · last 30 days</div>
-      <svg class="spark" id="at-daily" preserveAspectRatio="none"></svg>
+
+    <div id="at-models-view" hidden>
+      <div class="card panel">
+        <div class="ptitle">Tokens over time</div>
+        <svg class="spark" id="at-series" preserveAspectRatio="none"></svg>
+      </div>
+      <div class="card panel">
+        <div class="ptitle">By model</div>
+        <div id="at-models"></div>
+      </div>
     </div>
   </div>
 
@@ -1510,7 +1699,7 @@ function renderSessions(list){
 function fmtTokFull(n){ n=n||0; if(n>=1e9)return (n/1e9).toFixed(2)+"B"; if(n>=1e6)return (n/1e6).toFixed(1)+"M"; if(n>=1e3)return (n/1e3).toFixed(1)+"k"; return ""+Math.round(n); }
 const MODELCOL={Opus:"#d97757",Sonnet:"#7f93b0",Haiku:"#6e9c95",Fable:"#b08a6a"};
 function modelColor(name){ for(const k in MODELCOL){ if((name||"").indexOf(k)===0)return MODELCOL[k]; } return "#6c6b66"; }
-let ATDAILY=null;
+let AT=null, ATVIEW="overview", ATPERIOD="all";
 function atBar(name,tokens,max,col){
   const nm=(name||"?").replace(/[<>&]/g,"");
   const w=Math.max(3,tokens/(max||1)*100);
@@ -1518,52 +1707,56 @@ function atBar(name,tokens,max,col){
     "<div class='abar'><i style='width:"+w+"%;background:"+col+"'></i></div>"+
     "<span class='anum'>"+fmtTokFull(tokens)+"</span></div>";
 }
-function renderDaily(days){
-  const svg=$("at-daily"); if(!svg)return; svg.innerHTML="";
+function modelRow(x){
+  return "<div class='mrow'><span class='mdot' style='background:"+modelColor(x.name)+"'></span>"+
+    "<span class='mname'>"+esc(x.name)+"</span>"+
+    "<span class='mio'>"+fmtTokFull(x.in)+" in · "+fmtTokFull(x.out)+" out</span>"+
+    "<span class='mshare'>"+(x.share!=null?x.share.toFixed(1):"0")+"%</span></div>";
+}
+function renderHeatmap(hm){
+  const box=$("at-heatmap"); if(!box)return; box.innerHTML="";
+  if(!hm||!hm.days)return;
+  hm.days.forEach(c=>{ const el=document.createElement("div");
+    el.className="hm"+(c.lvl?(" l"+c.lvl):"");
+    el.title=c.d+(c.tok?(" · "+fmtTokFull(c.tok)+" tokens"):"");
+    box.appendChild(el); });
+}
+function renderSeries(bins){
+  const svg=$("at-series"); if(!svg)return; svg.innerHTML="";
   const ns="http://www.w3.org/2000/svg";
-  const W=svg.clientWidth||520,H=128,top=12,base=H-18;
+  const W=svg.clientWidth||520,H=152,top=12,base=H-20;
   svg.setAttribute("viewBox","0 0 "+W+" "+H);
-  if(!days||!days.length)return;
-  const max=Math.max.apply(null,days.map(d=>d.tokens).concat([1]));
-  const n=days.length, step=(W-8)/n, bw=Math.max(1,step-2);
-  const bl=document.createElementNS(ns,"line");
-  bl.setAttribute("x1",4);bl.setAttribute("y1",base);bl.setAttribute("x2",W-4);bl.setAttribute("y2",base);
-  bl.setAttribute("stroke","rgba(255,255,255,.10)");svg.appendChild(bl);
-  days.forEach((d,i)=>{
-    if(d.tokens<=0)return;
-    const h=Math.max(2,(d.tokens/max)*(base-top));
-    const r=document.createElementNS(ns,"rect");
-    r.setAttribute("x",(4+i*step).toFixed(1));r.setAttribute("y",(base-h).toFixed(1));
-    r.setAttribute("width",bw.toFixed(1));r.setAttribute("height",h.toFixed(1));r.setAttribute("rx","2");
-    r.setAttribute("fill",i===n-1?"#d97757":"#7f93b0");
-    const t=document.createElementNS(ns,"title");t.textContent=d.d+" · "+fmtTokFull(d.tokens);r.appendChild(t);
-    svg.appendChild(r);
+  if(!bins||!bins.length)return;
+  const max=Math.max.apply(null,bins.map(b=>b.total).concat([1]));
+  const n=bins.length, step=(W-8)/n, bw=Math.max(2,step-3);
+  const bl=document.createElementNS(ns,"line");bl.setAttribute("x1",4);bl.setAttribute("y1",base);bl.setAttribute("x2",W-4);bl.setAttribute("y2",base);bl.setAttribute("stroke","rgba(255,255,255,.10)");svg.appendChild(bl);
+  bins.forEach((b,i)=>{ let y=base; const x=4+i*step;
+    (b.segs||[]).forEach(s=>{ const h=(s.tok/max)*(base-top); if(h<=0)return;
+      const r=document.createElementNS(ns,"rect");
+      r.setAttribute("x",x.toFixed(1));r.setAttribute("y",(y-h).toFixed(1));
+      r.setAttribute("width",bw.toFixed(1));r.setAttribute("height",h.toFixed(1));
+      r.setAttribute("fill",modelColor(s.name));
+      const t=document.createElementNS(ns,"title");t.textContent=b.label+" · "+s.name+" · "+fmtTokFull(s.tok);r.appendChild(t);
+      svg.appendChild(r); y-=h; });
   });
-  const lbl=(x,txt,anc)=>{const e=document.createElementNS(ns,"text");e.setAttribute("x",x);e.setAttribute("y",H-4);
-    e.setAttribute("fill","#6c6b66");e.setAttribute("font-family","ui-monospace,Consolas,monospace");e.setAttribute("font-size","9");if(anc)e.setAttribute("text-anchor",anc);e.textContent=txt;svg.appendChild(e);};
-  lbl(4,days[0].d.slice(5),"start"); lbl(W-4,days[n-1].d.slice(5),"end");
+  const lbl=(x,txt,anc)=>{const e=document.createElementNS(ns,"text");e.setAttribute("x",x);e.setAttribute("y",H-5);e.setAttribute("fill","#6c6b66");e.setAttribute("font-family","ui-monospace,Consolas,monospace");e.setAttribute("font-size","9");if(anc)e.setAttribute("text-anchor",anc);e.textContent=txt;svg.appendChild(e);};
+  lbl(4,bins[0].label,"start"); if(n>1)lbl(W-4,bins[n-1].label,"end");
 }
 function renderAlltime(a){
-  const big=$("at-tokens"); if(!big)return;
-  if(!a||!a.total||!a.tokens){
-    big.textContent="…"; $("at-sub").textContent="calculating from your session history…";
-    $("at-stats").innerHTML=""; $("at-models").innerHTML=""; $("at-projects").innerHTML=""; $("at-span").textContent="";
-    return;
-  }
-  const t=a.total;
-  big.innerHTML=fmtTokFull(a.tokens)+" <span style='font-size:.4em;color:var(--dim);font-weight:600;letter-spacing:0'>tokens</span>";
-  $("at-sub").textContent="input + output + cache writes — cache reads ("+fmtTokFull(t.cr)+") excluded, they bill ~10× cheaper";
-  $("at-span").textContent=a.first_ts?("since "+new Date(a.first_ts*1000).toLocaleDateString()):"";
-  $("at-stats").innerHTML=[["Input",t.in],["Output",t.out],["Cache write",t.cw],["Cache read",t.cr],["Messages",t.msgs]]
-    .map(s=>"<div class='stat'><div class='n'>"+fmtTokFull(s[1])+"</div><div class='k'>"+s[0]+"</div></div>").join("");
-  const mm=Math.max.apply(null,(a.by_model||[]).map(x=>x.tokens).concat([1]));
-  $("at-models").innerHTML=(a.by_model||[]).map(x=>atBar(x.name,x.tokens,mm,modelColor(x.name))).join("")||"<div class='sempty'>no data yet</div>";
-  const pm=Math.max.apply(null,(a.by_project||[]).map(x=>x.tokens).concat([1]));
-  $("at-projects").innerHTML=(a.by_project||[]).map(x=>atBar(x.name,x.tokens,pm,"#7f93b0")).join("")||"<div class='sempty'>no data yet</div>";
-  const more=(a.project_count||0)-((a.by_project||[]).length);
-  $("at-projmore").textContent=more>0?("+"+more+" more"):"";
-  ATDAILY=a.days;
-  if(!$("tab-alltime").hidden)renderDaily(ATDAILY);
+  if(a)AT=a;
+  if(!AT||!AT.ready)return;                       // keep the "calculating…" placeholder
+  const p=AT.periods[ATPERIOD]||AT.periods.all;
+  const fmtN=n=>(n||0).toLocaleString();
+  const cards=[["Sessions",fmtN(p.sessions)],["Messages",fmtN(p.messages)],["Total tokens",fmtTokFull(p.tokens)],["Active days",fmtN(p.active_days)],
+    ["Current streak",AT.streak_current+"d"],["Longest streak",AT.streak_longest+"d"],["Peak hour",AT.peak_hour||"—"],["Favorite model",p.fav_model||"—"]];
+  $("at-stats").innerHTML=cards.map(c=>"<div class='stat'><div class='n'>"+esc(""+c[1])+"</div><div class='k'>"+c[0]+"</div></div>").join("");
+  $("at-compare").textContent=p.compare?("You've burned ~"+p.compare.x.toLocaleString()+"× more tokens than "+p.compare.name+"."):"";
+  renderHeatmap(AT.heatmap);
+  const pj=AT.projects||[], pmax=Math.max.apply(null,pj.map(x=>x.tokens).concat([1]));
+  $("at-projects").innerHTML=pj.map(x=>atBar(x.name,x.tokens,pmax,"#7f93b0")).join("")||"<div class='sempty'>no data yet</div>";
+  $("at-projmore").textContent=(AT.project_count>pj.length)?("top "+pj.length+" of "+AT.project_count):"all-time";
+  $("at-models").innerHTML=(p.models||[]).map(modelRow).join("")||"<div class='sempty'>no data yet</div>";
+  if(ATVIEW==="models" && !$("tab-alltime").hidden) renderSeries(p.series);
 }
 async function refresh(){
   try{
@@ -1608,17 +1801,26 @@ buildTicks();
 setInterval(tickCountdowns,1000);
 setInterval(refresh,5000);
 refresh();
-let _rz; window.addEventListener("resize",()=>{clearTimeout(_rz);_rz=setTimeout(()=>{renderSpark(LASTH); if(!$("tab-alltime").hidden)renderDaily(ATDAILY);},120);});
-document.querySelectorAll(".stab").forEach(b=>b.addEventListener("click",()=>{
-  document.querySelectorAll(".stab").forEach(x=>x.classList.remove("on"));
+let _rz; window.addEventListener("resize",()=>{clearTimeout(_rz);_rz=setTimeout(()=>{renderSpark(LASTH); if(!$("tab-alltime").hidden)renderAlltime();},120);});
+document.querySelectorAll("#sesscard .stab").forEach(b=>b.addEventListener("click",()=>{
+  document.querySelectorAll("#sesscard .stab").forEach(x=>x.classList.remove("on"));
   b.classList.add("on"); SMODE=b.dataset.m; renderSessions();
+}));
+document.querySelectorAll("#at-view .stab").forEach(b=>b.addEventListener("click",()=>{
+  document.querySelectorAll("#at-view .stab").forEach(x=>x.classList.remove("on")); b.classList.add("on");
+  ATVIEW=b.dataset.v; $("at-overview").hidden=(ATVIEW!=="overview"); $("at-models-view").hidden=(ATVIEW!=="models");
+  renderAlltime();
+}));
+document.querySelectorAll("#at-period .stab").forEach(b=>b.addEventListener("click",()=>{
+  document.querySelectorAll("#at-period .stab").forEach(x=>x.classList.remove("on")); b.classList.add("on");
+  ATPERIOD=b.dataset.p; renderAlltime();
 }));
 document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{
   document.querySelectorAll(".tab").forEach(x=>x.classList.remove("on"));
   b.classList.add("on");
   const t=b.dataset.t;
   $("tab-live").hidden=(t!=="live"); $("tab-alltime").hidden=(t!=="alltime");
-  if(t==="alltime")renderDaily(ATDAILY);   // SVG needs a visible layout to size correctly
+  if(t==="alltime")renderAlltime();   // (re)draw now that the pane has layout
 }));
 </script>
 </body>
