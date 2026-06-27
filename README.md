@@ -2,36 +2,52 @@
 
 # Claude Usage Tracker
 
-A small Windows desktop widget that tracks your Claude plan limits — the **5-hour**
-and **weekly** usage windows, the exact numbers the `/usage` command shows — with a
-live always-on-top widget, a glass dashboard, a tray icon, and a toast notification
-every time usage crosses a 20% mark.
+A small Windows desktop app that tracks your Claude plan limits — the **5-hour**
+and **weekly** usage windows, the exact numbers the `/usage` command shows — with
+always-on-top overlays (a mini **widget** and a one-line **HUD bar**), a tabbed
+**dashboard** (Live · All-time · Status · Settings), a live tray icon, and a toast
+notification every time usage crosses a 20% mark.
 
 It reads the OAuth token Claude Code already stores on your machine and calls the
 same endpoint `/usage` uses. **Read-only** — it never modifies your credentials and
 talks to nothing but that one Anthropic endpoint.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/widget.png" alt="Always-on-top mini widget" width="420"><br>
-  <em>The always-on-top mini widget (sample data)</em>
+  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/widget.png" alt="Always-on-top mini widget" width="392"><br>
+  <em>The always-on-top mini <strong>widget</strong> — 5h / weekly / context %, with a session picker, verdict, and status dot (sample data)</em>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/dashboard.png" alt="Dashboard" width="600"><br>
-  <em>The full dashboard — gauges, live reset countdowns, burn-rate, history, overage credits, and Open Sessions (sample data)</em>
+  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/bar.png" alt="Minimal one-line HUD bar" width="360"><br>
+  <em>The minimal one-line <strong>HUD bar</strong> — a solid, FPS-counter-style strip; fields and order are configurable (sample data)</em>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/sessions.png" alt="Open Sessions panel" width="620"><br>
-  <em>Open Sessions — per-project context-window fill % (toggle to Tokens), with active indicators (sample data)</em>
+  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/dashboard.png" alt="Dashboard — Live tab" width="760"><br>
+  <em>The dashboard's <strong>Live</strong> tab — instrument-dial gauges, reset countdowns, a burn-rate projection, a usage-history sparkline, overage credits, scoped weekly limits, and Sessions (sample data)</em>
+</p>
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/alltime.png" alt="Dashboard — All-time tab" width="760"><br>
+  <em>The <strong>All-time</strong> tab — sessions, messages, total tokens, active days, streaks, peak hour, favorite model, a contribution heatmap, and by-project totals, with a 7d / 30d / All toggle (sample data)</em>
+</p>
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/status.png" alt="Dashboard — Status tab" width="760"><br>
+  <em>The <strong>Status</strong> tab — Anthropic service status (Ok / Errors / Down) with every component listed (sample data)</em>
+</p>
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/settings.png" alt="Dashboard — Settings tab" width="760"><br>
+  <em>The <strong>Settings</strong> tab — show/hide the overlays, choose the HUD-bar fields, and pick which status components drive the indicator (sample data)</em>
 </p>
 
 ## Features
 
 - **Always-on-top overlays** — a frameless, draggable, **resizable** mini **widget** (5h,
   weekly, **context %**) with Refresh / Check-for-updates buttons and a **dropdown** to pick
-  which session's context to track; **and** a **minimal HUD bar** — a translucent, one-line,
-  FPS-counter-style strip (`dir  Ctx: 45%  5h: 11%  7d: 3%`) whose controls appear on hover.
+  which session's context to track; **and** a **minimal HUD bar** — a solid, one-line,
+  FPS-counter-style strip (`dir  Ctx: 73%  5h: 64%  7d: 41%  ● Ok`) whose controls appear on hover.
   Toggle either from the tray; they can be shown together. Drag any edge or corner to resize; size is remembered.
 - **Full dashboard** — animated ring gauges, live reset countdowns, a **burn-rate /
   time-to-limit projection** ("≈7%/h · hits 100% in ~1h 10m"), a usage history
