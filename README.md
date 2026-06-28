@@ -39,7 +39,7 @@ talks to nothing but that one Anthropic endpoint.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/settings.png" alt="Dashboard — Settings tab" width="760"><br>
-  <em>The <strong>Settings</strong> tab — show/hide the overlays, choose the HUD-bar fields, and pick which status components drive the indicator (sample data)</em>
+  <em>The <strong>Settings</strong> tab — show/hide the overlays, choose the HUD-bar fields, pick which status components drive the indicator, and pair an Android phone for end-to-end-encrypted remote access (sample data)</em>
 </p>
 
 ## Features
@@ -75,6 +75,10 @@ talks to nothing but that one Anthropic endpoint.
   status.anthropic.com) on the dashboard, widget, and bar, plus a **Status tab** listing every
   component (claude.ai / API / Claude Code / Console / …). Pick which components drive the
   indicator in Settings, or use the overall status.
+- **Remote (phone) access** *(optional, opt-in)* — view your stats and receive usage
+  alerts on an **Android** phone, **end-to-end encrypted**, via a tiny zero-knowledge
+  relay you deploy. Pair by scanning a QR in Settings; your Claude token never leaves
+  your PC. **Android only** (no iOS yet). See [docs/REMOTE.md](docs/REMOTE.md).
 - **Live tray icon** — two bars (left = 5h, right = weekly) that fill and change
   colour with usage.
 - **20% notifications** — a Windows toast each time the 5h or weekly window crosses
@@ -183,6 +187,9 @@ Edit `config.json` (created on first run, in the app's data dir), then restart:
 | `bar_fields` | `["dir","ctx","5h","7d"]` | HUD-bar fields, in order. |
 | `bar_opacity` | `85` | HUD-bar background opacity (30–100). |
 | `alltime_days` | `30` | Days shown in the All-time daily-usage chart. |
+| `remote_enabled` | `false` | Opt-in: relay an E2E-encrypted snapshot to your phone. |
+| `remote_relay_url` | `""` | Your Cloudflare Worker relay URL (see `docs/REMOTE.md`). |
+| `remote_sync_seconds` | `60` | How often to push the snapshot to the relay. |
 
 ## How it works
 
@@ -200,7 +207,23 @@ only ever read — never written, logged, or sent anywhere but that endpoint.
 
 Read-only and local. It reads your Claude login token and session logs from
 `~/.claude` and displays the numbers; it sends nothing anywhere except the Anthropic
-usage endpoint (using your own token). No telemetry, no analytics, no data collection.
+usage endpoint (using your own token) — and, **only if you opt in**, an
+**end-to-end-encrypted** snapshot to a relay you run (see *Remote / phone access*
+below). No telemetry, no analytics, no data collection.
+
+## Remote / phone access (optional)
+
+View your stats and get usage alerts on an **Android phone**, end-to-end encrypted.
+**Opt-in and off by default.** Because sessions/context/all-time only exist on the machine
+running Claude Code, the desktop relays an **encrypted** snapshot through a tiny
+**zero-knowledge relay** (a Cloudflare Worker you deploy) to the app — the relay only ever
+stores ciphertext, and your Claude token never leaves your PC. Push uses Firebase (FCM)
+with **data-only** messages decrypted on-device.
+
+Enable it in **Settings → Remote (phone)** and scan the pairing QR with the app. Live data
+and alerts arrive whenever your desktop is on and online. **Android only — no iOS yet.**
+Setup (Cloudflare Worker + optional Firebase + the app): see
+**[docs/REMOTE.md](docs/REMOTE.md)**, [`relay/`](relay/), and [`android/`](android/).
 
 ## Code signing
 
