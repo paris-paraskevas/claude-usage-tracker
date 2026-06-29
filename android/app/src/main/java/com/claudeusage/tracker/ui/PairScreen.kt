@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -49,7 +50,7 @@ fun PairScreen(onPaired: () -> Unit) {
     }
 
     Column(
-        modifier = Modifier.fillMaxSize().padding(28.dp),
+        modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(28.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
@@ -67,7 +68,7 @@ fun PairScreen(onPaired: () -> Unit) {
                 error = null
                 scanLauncher.launch(
                     ScanOptions()
-                        .setOrientationLocked(false)
+                        .setOrientationLocked(true)   // keep the scanner portrait — don't rotate the phone
                         .setBeepEnabled(false)
                         .setPrompt("Scan the pairing QR from the desktop")
                 )

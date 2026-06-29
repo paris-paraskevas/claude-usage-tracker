@@ -26,7 +26,9 @@ class RelayClient(private val p: Pairing) {
             .header("Authorization", "Bearer ${p.readToken}")
             .get().build()
         http.newCall(req).execute().use { resp ->
-            if (resp.code == 204) return@withContext null
+            // 204 = account exists but no snapshot; 404 = desktop hasn't pushed yet.
+            // Both mean "not synced yet" — surface a friendly waiting state, not an error.
+            if (resp.code == 204 || resp.code == 404) return@withContext null
             if (!resp.isSuccessful) throw IOException("relay ${resp.code}")
             val body = resp.body?.string() ?: return@withContext null
             val o = JSONObject(body)

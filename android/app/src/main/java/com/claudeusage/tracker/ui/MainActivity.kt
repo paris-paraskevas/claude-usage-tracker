@@ -5,8 +5,10 @@ import android.content.Context
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -24,6 +26,14 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // targetSdk 35 forces edge-to-edge. Opt in explicitly and pin both bars to the
+        // "dark" style (transparent scrim, light icons) so the clock/battery stay legible
+        // on our always-dark UI regardless of the phone's light/dark setting. The Compose
+        // roots inset themselves via WindowInsets.safeDrawing.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+        )
         // Allow pairing via a cutpair1: deep link (in addition to scanning the QR).
         intent?.dataString?.let { data -> Pairing.parse(data)?.let { Prefs.save(this, it) } }
         setContent {
