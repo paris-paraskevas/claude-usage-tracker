@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.27"
+__version__ = "0.1.28"
 
 
 def _data_dir() -> Path:
@@ -1186,8 +1186,13 @@ def make_icon_image(windows: dict, error: bool = False):
                             fill=(255, 255, 255, 26), outline=(255, 255, 255, 100), width=2)
         if pct > 0:
             ytop = bot - (bot - top) * pct / 100.0
-            box = [x0 + 2, max(top + 2, ytop), x1 - 2, bot - 2]
-            if box[3] - box[1] >= 8:
+            y1 = bot - 2
+            # Keep at least a 1px sliver for tiny non-zero pct (just after a window
+            # reset) and never let the top dip below the bottom — otherwise Pillow
+            # raises "y1 must be greater than or equal to y0" and the icon stops updating.
+            y0 = min(max(top + 2, ytop), y1 - 1)
+            box = [x0 + 2, y0, x1 - 2, y1]
+            if y1 - y0 >= 8:
                 d.rounded_rectangle(box, radius=3, fill=usage_rgba(pct))
             else:
                 d.rectangle(box, fill=usage_rgba(pct))

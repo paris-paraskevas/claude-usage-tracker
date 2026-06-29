@@ -135,6 +135,15 @@ def test_pretty_model():
     assert m.pretty_model(None) == "Other"
 
 
+def test_make_icon_image_small_pct():
+    # Regression: tiny non-zero pct (just after a window reset) used to invert the
+    # fill rectangle -> Pillow "y1 must be greater than or equal to y0" -> icon froze.
+    for pct in (0.0, 0.3, 0.5, 1, 2, 3, 3.9, 4, 50, 99.9, 100):
+        img = m.make_icon_image({"five_hour": {"pct": pct}, "seven_day": {"pct": pct}})
+        assert img.size == (64, 64) and img.mode == "RGBA"
+    assert m.make_icon_image({}, error=True).size == (64, 64)
+
+
 def test_scan_all_time(tmp_path, monkeypatch):
     proj = tmp_path / "C--Dev-foo"
     proj.mkdir()
