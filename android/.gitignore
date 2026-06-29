@@ -8,3 +8,6 @@ build/
 .idea/
 # Firebase config — operator-provided, never commit
 /app/google-services.json
+# Release signing — NEVER commit
+/keystore.properties
+/app/upload-keystore.jks
