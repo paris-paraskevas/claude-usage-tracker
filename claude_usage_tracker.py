@@ -1657,6 +1657,18 @@ DASHBOARD_HTML = r"""<!doctype html>
   .err .signin{background:var(--accent);color:#1c0f08;border:0;font:600 12px/1 var(--sans);
     padding:7px 13px;border-radius:6px;cursor:pointer;margin-left:auto}
   .err .signin:hover{filter:brightness(1.08)} .err .signin:disabled{opacity:.6;cursor:default}
+  /* sign-in card (auth-expired) */
+  .err.authcard{background:transparent;border:0;padding:0}
+  .signincard{display:flex;gap:14px;width:100%;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px}
+  .sc-mark{width:34px;height:34px;border-radius:8px;background:var(--accent);color:#1c0f08;display:grid;place-items:center;font:700 16px/1 var(--mono);flex:none}
+  .sc-body{flex:1;min-width:0}
+  .sc-title{font:600 15px/1.2 var(--sans);color:var(--ink)}
+  .sc-sub{color:var(--dim);font:12px/1.5 var(--sans);margin-top:3px}
+  .sc-row{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+  .sc-row input{flex:1;min-width:160px;background:var(--bg);border:1px solid var(--line);color:var(--ink);border-radius:7px;padding:9px 11px;font:13px/1 var(--sans)}
+  .sc-btn{background:var(--accent);color:#1c0f08;border:0;font:600 13px/1 var(--sans);padding:9px 18px;border-radius:7px;cursor:pointer}
+  .sc-btn:hover{filter:brightness(1.08)} .sc-btn:disabled{opacity:.6;cursor:default}
+  .sc-status{color:var(--faint);font:11px/1.5 var(--mono);margin-top:10px}
   /* all-time: sub-tabs, model legend, heatmap */
   .atbar{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
   #at-overview>*,#at-models-view>*{margin-bottom:14px}
@@ -1916,12 +1928,16 @@ const $=id=>document.getElementById(id);
 let WIN={};   // key -> {resets_at, color}
 let LASTH=null;   // last history payload, for resize reflow
 function esc(s){ return (s||"").replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
-async function doSignin(){
-  const b=$("signin");
-  if(b){ b.disabled=true; b.textContent="Opening sign-in…"; }
-  try{ await fetch("/api/login",{method:"POST"}); }catch(e){}
-  // claude auth login runs in its own console; the next poll picks up the new token.
-  setTimeout(()=>{ if(b){ b.disabled=false; b.textContent="Sign in to Claude"; } },4000);
+async function doSignin(email, terminal){
+  const b=$("signin"), st=$("signin-status");
+  if(typeof email!=="string"){ const inp=$("signin-email"); email=inp?inp.value.trim():""; }
+  if(b){ b.disabled=true; b.textContent=terminal?"Opening terminal…":"Opening browser…"; }
+  if(st){ st.textContent=terminal?"A terminal will open — finish signing in there.":
+    "Your browser is opening claude.ai — finish signing in there. This page updates automatically."; }
+  try{ await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({email:email||undefined,terminal:!!terminal})}); }catch(e){}
+  // Claude Code captures the token + writes the creds; the next poll picks it up.
+  setTimeout(()=>{ if(b){ b.disabled=false; b.textContent="Sign in"; } },5000);
 }
 const REL="https://github.com/paris-paraskevas/claude-usage-tracker/releases/latest";
 async function doRefresh(){
@@ -2220,8 +2236,18 @@ async function refresh(){
     if(!d.ok && (authBad || !wins.length)){
       err.className="err show";
       if(authBad){
-        err.innerHTML="⚠ "+esc(d.error||"sign-in needed")+" <button class='signin' id='signin'>Sign in to Claude</button>";
-        const b=$("signin"); if(b) b.onclick=doSignin;
+        err.className="err show authcard";
+        err.innerHTML=
+          "<div class='signincard'><div class='sc-mark'>C</div><div class='sc-body'>"+
+          "<div class='sc-title'>Sign in to Claude</div>"+
+          "<div class='sc-sub'>"+esc(d.error||"Your Claude login needs refreshing.")+" Signing in opens claude.ai in your browser.</div>"+
+          "<div class='sc-row'><input id='signin-email' type='email' placeholder='you@email.com (optional)' autocomplete='email'>"+
+          "<button class='sc-btn' id='signin'>Sign in</button></div>"+
+          "<div class='sc-status' id='signin-status'>The tracker never sees your password — Claude Code handles it. "+
+          "<button class='linkbtn' id='signin-term'>open a terminal instead</button></div>"+
+          "</div></div>";
+        $("signin").onclick=function(){ doSignin(undefined,false); };
+        var _t=$("signin-term"); if(_t) _t.onclick=function(e){ e.preventDefault(); doSignin(undefined,true); };
       }else{
         err.textContent="⚠ "+(d.error||"waiting for data")+" — retrying…";
       }
@@ -2289,7 +2315,7 @@ $("set-toggle-bar").onclick=function(){ const sh=this.textContent==="Hide"; this
 $("set-toggle-widget").onclick=function(){ const sh=this.textContent==="Hide"; this.textContent=sh?"Show":"Hide"; this.classList.toggle("on",!sh); postOverlay("widget"); };
 $("set-bar-start").onchange=function(){ postCfg({show_bar_on_start:this.checked}); };
 $("set-widget-start").onchange=function(){ postCfg({show_widget_on_start:this.checked}); };
-$("set-refresh").onclick=doRefresh; $("set-check").onclick=doCheckUpdate; $("set-login").onclick=doSignin;
+$("set-refresh").onclick=doRefresh; $("set-check").onclick=doCheckUpdate; $("set-login").onclick=function(){ doSignin("",false); };
 $("rm-enabled").onchange=function(){ postCfg({remote_enabled:this.checked}); setTimeout(refresh,300); };
 $("rm-save").onclick=function(){ postCfg({remote_relay_url:$("rm-url").value.trim()}); $("rm-qr").dataset.url=""; setTimeout(refresh,400); };
 $("rm-sync").onclick=function(){ postRemote("sync"); setTimeout(refresh,500); };
@@ -2551,7 +2577,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(403, "text/plain", b"forbidden")
             return
         if path == "/api/login":
-            threading.Thread(target=launch_login, daemon=True).start()
+            body = self._read_json() or {}
+            email = (body.get("email") or None)
+            visible = bool(body.get("terminal"))
+            threading.Thread(target=launch_login, kwargs={"email": email, "visible": visible},
+                             daemon=True).start()
             self._send(200, "application/json", b'{"ok":true}')
         elif path in ("/api/refresh", "/api/update"):
             fn = CONTROL.get("refresh" if path == "/api/refresh" else "update")
@@ -2905,25 +2935,32 @@ def _claude_cli():
     return None
 
 
-def launch_login() -> bool:
-    """Launch `claude auth login` (the CLI equivalent of /login) in a visible
-    console so the user can finish the browser sign-in. Returns True if started.
-    We never write the token ourselves — Claude Code owns
+def launch_login(email: str | None = None, visible: bool = False) -> bool:
+    """Trigger Claude Code's own sign-in (`claude auth login`), which opens claude.ai in
+    your browser. By default we launch it WITHOUT a console window (you only see the
+    browser); pass visible=True for a terminal (the fallback). `email` pre-fills the
+    login page. We never write the token ourselves — Claude Code owns
     ~/.claude/.credentials.json; the next poll picks up the refreshed login."""
     exe = _claude_cli()
     if not exe:
         notify("Claude Code not found",
                "Install Claude Code, then sign in — or run `claude auth login` in a terminal.")
         return False
+    args = [exe, "auth", "login"] + (["--email", email] if email else [])
     try:
-        if os.name == "nt":
+        if os.name == "nt" and visible:
             CREATE_NEW_CONSOLE = 0x00000010
-            # String (not list) command so cmd /k keeps the quoted exe + args intact.
-            subprocess.Popen(f'cmd /k "{exe}" auth login',
-                             creationflags=CREATE_NEW_CONSOLE, close_fds=True)
+            cmd = "cmd /k " + " ".join(f'"{a}"' for a in args)   # keep quoted exe + args intact
+            subprocess.Popen(cmd, creationflags=CREATE_NEW_CONSOLE, close_fds=True)
+            notify(APP_NAME, "Opening Claude sign-in — complete it in the terminal window.")
+        elif os.name == "nt":
+            CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            subprocess.Popen(args, creationflags=CREATE_NO_WINDOW, close_fds=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            notify(APP_NAME, "Opening Claude sign-in in your browser…")
         else:
-            subprocess.Popen([exe, "auth", "login"], close_fds=True)
-        notify(APP_NAME, "Opening Claude sign-in — complete it in the terminal window.")
+            subprocess.Popen(args, close_fds=True)
+            notify(APP_NAME, "Opening Claude sign-in in your browser…")
         return True
     except Exception as exc:
         log(f"login launch failed: {exc}")
