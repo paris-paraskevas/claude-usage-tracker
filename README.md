@@ -17,6 +17,12 @@ talks to nothing but that one Anthropic endpoint.
 > to describe compatibility.
 
 <p align="center">
+  <a href="https://play.google.com/store/apps/details?id=com.claudeusage.tracker"><img alt="Get the Android app on Google Play" src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" height="60"></a><br>
+  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/play-qr.png" width="150" alt="Scan to get the Android app on Google Play"><br>
+  <em>Companion <strong>Android</strong> app — view your usage + alerts on your phone (scan to install)</em>
+</p>
+
+<p align="center">
   <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/widget.png" alt="Always-on-top mini widget" width="392"><br>
   <em>The always-on-top mini <strong>widget</strong> — 5h / weekly / context %, with a session picker, verdict, and status dot (sample data)</em>
 </p>
