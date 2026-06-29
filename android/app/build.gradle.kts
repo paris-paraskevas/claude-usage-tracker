@@ -44,6 +44,7 @@ android {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             if (keystorePropsFile.exists()) signingConfig = signingConfigs.getByName("release")
+            ndk { debugSymbolLevel = "FULL" }   // bundle native debug symbols (libsodium/JNA) for Play
         }
     }
     buildFeatures {

@@ -44,3 +44,13 @@ Open source (MIT): github.com/paris-paraskevas/claude-usage-tracker
 - `icon-512.png` — 512×512 app icon (hi-res)
 - `feature-1024x500.png` — feature graphic
 - `01-pair.png`, `02-dashboard.png` — phone screenshots (1240×2400, under Play's 2:1 limit)
+
+## Release notes — v0.1.0 (first release)
+
+Play caps these at 500 chars/language. Paste into the track's **Release notes**:
+
+```
+First release. See your Claude Code usage on your phone — 5h & weekly limits with reset countdowns, per-session context %, and all-time stats (tokens, sessions, streaks, peak hour). Optional push alerts near a limit. Pairs with the free desktop app: Settings → Remote → scan the QR. End-to-end encrypted; your Claude login never leaves your computer.
+```
+
+(For future updates, replace with what changed in that version.)
