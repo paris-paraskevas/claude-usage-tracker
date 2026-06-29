@@ -1361,6 +1361,7 @@ def _relay_call(method: str, cfg: dict, path: str, body=None, timeout: int = 8):
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url + path, data=data, method=method)
     req.add_header("Authorization", "Bearer " + ident["read_token"])
+    req.add_header("User-Agent", f"claude-usage-tracker/{__version__}")  # avoid Cloudflare bot block (err 1010)
     if data is not None:
         req.add_header("Content-Type", "application/json")
     try:
