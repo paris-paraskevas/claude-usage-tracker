@@ -40,6 +40,18 @@
             </intent-filter>
         </service>
 
+        <!-- Home-screen (and lock-screen, where the launcher allows) usage widget. -->
+        <receiver
+            android:name=".widget.UsageWidgetReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/usage_widget_info" />
+        </receiver>
+
         <!-- Notification channel default; FCM data messages are E2EE so we never use
              notification-type messages (which Google could read). -->
         <meta-data
