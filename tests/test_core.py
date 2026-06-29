@@ -147,6 +147,28 @@ def test_make_icon_image_small_pct():
     assert m.make_icon_image({}, error=True).size == (64, 64)
 
 
+def test_read_transcript(tmp_path, monkeypatch):
+    proj = tmp_path / "C--Dev-foo"
+    proj.mkdir()
+    lines = [
+        json.dumps({"timestamp": "2026-06-26T12:00:00Z", "cwd": r"C:\Dev\foo",
+                    "message": {"role": "user", "content": "hello claude"}}),
+        json.dumps({"timestamp": "2026-06-26T12:00:01Z", "cwd": r"C:\Dev\foo",
+                    "message": {"role": "assistant", "content": [
+                        {"type": "text", "text": "hi there"}, {"type": "tool_use", "name": "Read"}]}}),
+        json.dumps({"timestamp": "2026-06-26T12:00:02Z", "cwd": r"C:\Dev\foo",
+                    "message": {"role": "user", "content": [{"type": "tool_result", "content": "x"}]}}),
+    ]
+    (proj / "s.jsonl").write_text("\n".join(lines), encoding="utf-8")
+    monkeypatch.setattr(m, "PROJECTS_DIR", tmp_path)
+
+    t = m.read_transcript()
+    assert t["name"] == "foo"
+    assert [x["role"] for x in t["messages"]] == ["user", "assistant"]   # tool_result-only msg skipped
+    assert t["messages"][0]["text"] == "hello claude"
+    assert "hi there" in t["messages"][1]["text"] and "[ran Read]" in t["messages"][1]["text"]
+
+
 def test_scan_all_time(tmp_path, monkeypatch):
     proj = tmp_path / "C--Dev-foo"
     proj.mkdir()
