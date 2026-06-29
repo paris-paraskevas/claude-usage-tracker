@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ViewList
+import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Speed
@@ -71,6 +72,7 @@ import androidx.glance.appwidget.updateAll
 import com.claudeusage.tracker.Pairing
 import com.claudeusage.tracker.Prefs
 import com.claudeusage.tracker.RelayClient
+import com.claudeusage.tracker.Msg
 import com.claudeusage.tracker.Sess
 import com.claudeusage.tracker.Snap
 import com.claudeusage.tracker.Win
@@ -169,7 +171,8 @@ fun DashboardScreen(onUnpair: () -> Unit) {
             0 -> OverviewPage(s, now, inner, accounts, activeId, switchTo, addAccount,
                 ctxSel, onCtxSel = { ctxSel = it }) { scope.launch { reload() } }
             1 -> SessionsPage(s, inner)
-            2 -> StatsPage(s, inner)
+            2 -> ChatPage(s, inner)
+            3 -> StatsPage(s, inner)
             else -> SettingsPage(s, Prefs.active(ctx), now, inner, accounts, activeId,
                 switchTo, addAccount, removeAccount) { scope.launch { reload() } }
         }
@@ -268,6 +271,41 @@ private fun SessionsPage(s: Snap, inner: PaddingValues) {
             Text("No active Claude Code sessions in the last 5 hours.", color = Dim, fontSize = 14.sp)
         } else {
             s.sessions.forEach { SessionCard(it); Spacer(Modifier.height(12.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun ChatPage(s: Snap, inner: PaddingValues) {
+    PageScroll(inner) {
+        val t = s.transcript
+        PageTitle("Conversation", t?.name)
+        Spacer(Modifier.height(16.dp))
+        if (t == null || t.messages.isEmpty()) {
+            Text(
+                "No conversation mirrored yet.\n\nOn the desktop: Settings → Remote (phone) → turn on " +
+                    "\"mirror the active conversation.\" Your latest session then appears here — " +
+                    "text only, end-to-end encrypted.",
+                color = Dim, fontSize = 14.sp,
+            )
+        } else {
+            t.messages.forEach { MsgBubble(it); Spacer(Modifier.height(10.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun MsgBubble(m: Msg) {
+    val user = m.role == "user"
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start) {
+        Column(
+            Modifier.fillMaxWidth(0.88f).clip(RoundedCornerShape(12.dp))
+                .background(if (user) Accent.copy(alpha = 0.16f) else Panel).padding(12.dp),
+        ) {
+            Text(if (user) "You" else "Claude", color = if (user) Accent else Dim,
+                fontSize = 11.sp, fontWeight = FontWeight.SemiBold, fontFamily = MONO)
+            Spacer(Modifier.height(4.dp))
+            Text(m.text, color = Ink, fontSize = 14.sp)
         }
     }
 }
@@ -567,8 +605,9 @@ private fun BottomNav(selected: Int, onSelect: (Int) -> Unit) {
         val items = listOf(
             Triple("Overview", Icons.Filled.Speed, 0),
             Triple("Sessions", Icons.AutoMirrored.Filled.ViewList, 1),
-            Triple("Stats", Icons.Filled.Insights, 2),
-            Triple("Settings", Icons.Filled.Settings, 3),
+            Triple("Chat", Icons.Filled.Forum, 2),
+            Triple("Stats", Icons.Filled.Insights, 3),
+            Triple("Settings", Icons.Filled.Settings, 4),
         )
         val colors = NavigationBarItemDefaults.colors(
             selectedIconColor = Accent, selectedTextColor = Accent, indicatorColor = Panel2,
