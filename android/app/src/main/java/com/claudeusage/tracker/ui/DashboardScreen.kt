@@ -156,14 +156,14 @@ private fun OverviewPage(
             GaugeStat(
                 label = "5-hour limit",
                 pct = five?.pct,
-                color = hexColor(five?.color, bandColor(five?.pct ?: 0.0)),
+                color = hexColor(five?.color, usageColor(five?.pct ?: 0.0)),
                 sub = five?.let { fmtCountdown(it.resetsAt, now) },
                 dim = 188.dp, big = true,
             )
         }
         Spacer(Modifier.height(28.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            GaugeStat("Weekly", week?.pct, hexColor(week?.color, bandColor(week?.pct ?: 0.0)),
+            GaugeStat("Weekly", week?.pct, hexColor(week?.color, usageColor(week?.pct ?: 0.0)),
                 week?.let { fmtCountdown(it.resetsAt, now) }, 128.dp, false)
             ContextGauge(s, ctxSel, onCtxSel)
         }
@@ -456,12 +456,6 @@ private fun BottomNav(selected: Int, onSelect: (Int) -> Unit) {
 }
 
 // ---- helpers --------------------------------------------------------------
-
-private fun bandColor(p: Double): Color = when {
-    p >= 80 -> hexColor("#d4694f")
-    p >= 60 -> hexColor("#cda24e")
-    else -> hexColor("#5e9e72")
-}
 
 private fun fmtCountdown(resetsAt: Long?, now: Long): String {
     if (resetsAt == null) return "—"
