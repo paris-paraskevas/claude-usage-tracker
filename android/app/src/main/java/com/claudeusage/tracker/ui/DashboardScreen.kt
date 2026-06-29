@@ -38,6 +38,8 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -64,12 +66,16 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.glance.appwidget.updateAll
 import com.claudeusage.tracker.Pairing
 import com.claudeusage.tracker.Prefs
 import com.claudeusage.tracker.RelayClient
 import com.claudeusage.tracker.Sess
 import com.claudeusage.tracker.Snap
 import com.claudeusage.tracker.Win
+import com.claudeusage.tracker.widget.UsageWidget
+import com.claudeusage.tracker.widget.WidgetData
+import com.claudeusage.tracker.widget.updateLockNotification
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -91,8 +97,14 @@ fun DashboardScreen(onUnpair: () -> Unit) {
         val p = pairing ?: return@reload
         try {
             val js = RelayClient(p).fetchSnapshot()
-            if (js == null) error = null                 // not synced yet — show the waiting state
-            else { snap = Snap.parse(js); error = null }
+            if (js == null) {
+                error = null                              // not synced yet — show the waiting state
+            } else {
+                snap = Snap.parse(js); error = null
+                WidgetData.saveSnap(ctx, js)              // keep the home-screen widget + lock-screen notif current
+                runCatching { UsageWidget().updateAll(ctx) }
+                updateLockNotification(ctx)
+            }
         } catch (e: Exception) {
             error = e.message ?: "Couldn't reach the relay"
         }
@@ -220,6 +232,8 @@ private fun SettingsPage(
     s: Snap, pairing: Pairing?, now: Long, inner: PaddingValues,
     onRefresh: () -> Unit, onUnpair: () -> Unit,
 ) {
+    val ctx = LocalContext.current
+    var lockOn by remember { mutableStateOf(WidgetData.lockscreen(ctx)) }
     PageScroll(inner) {
         PageTitle("Settings", null)
         Spacer(Modifier.height(16.dp))
@@ -238,6 +252,26 @@ private fun SettingsPage(
             KV("Last synced", syncedAgo(s.updatedAt, now))
             KV("Relay", pairing?.url?.substringAfter("://")?.substringBefore("/") ?: "—")
             s.statusWord?.let { KV("Anthropic", s.statusDesc ?: it) }
+        }
+        Spacer(Modifier.height(14.dp))
+        Card {
+            SectionLabel("LOCK SCREEN")
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Show usage on the lock screen", color = Ink, fontSize = 14.sp)
+                    Text("Ongoing notification · 5h / weekly / context", color = Faint, fontSize = 12.sp)
+                }
+                Switch(
+                    checked = lockOn,
+                    onCheckedChange = {
+                        lockOn = it
+                        WidgetData.setLockscreen(ctx, it)
+                        updateLockNotification(ctx)
+                    },
+                    colors = SwitchDefaults.colors(checkedTrackColor = Accent, checkedThumbColor = Ink),
+                )
+            }
         }
         Spacer(Modifier.height(18.dp))
         TextButton(onClick = onRefresh) { Text("Refresh now", color = Accent) }

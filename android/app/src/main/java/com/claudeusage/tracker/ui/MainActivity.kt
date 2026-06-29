@@ -18,6 +18,8 @@ import androidx.compose.runtime.setValue
 import com.claudeusage.tracker.Pairing
 import com.claudeusage.tracker.Prefs
 import com.claudeusage.tracker.RelayClient
+import com.claudeusage.tracker.widget.refreshWidgetsNow
+import com.claudeusage.tracker.widget.scheduleWidgetRefresh
 import com.google.firebase.messaging.FirebaseMessaging
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -36,6 +38,9 @@ class MainActivity : ComponentActivity() {
         )
         // Allow pairing via a cutpair1: deep link (in addition to scanning the QR).
         intent?.dataString?.let { data -> Pairing.parse(data)?.let { Prefs.save(this, it) } }
+        // Keep the home-screen widget + (opt-in) lock-screen notification fresh.
+        scheduleWidgetRefresh(this)
+        refreshWidgetsNow(this)
         setContent {
             AppTheme {
                 var paired by remember { mutableStateOf(Prefs.isPaired(this)) }
