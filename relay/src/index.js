@@ -46,7 +46,13 @@ async function handle(request, env, ctx) {
 
   // Trust-on-first-use: the very first snapshot PUT pins the readToken hash.
   const isFirstWrite = !storedHash && method === "PUT" && resource === "snapshot";
-  if (!storedHash && !isFirstWrite) return cors(json({ error: "unknown_account" }, 404));
+  if (!storedHash && !isFirstWrite) {
+    // A consumer GET before the desktop's first push isn't an error — the account
+    // simply has no snapshot yet. Answer 204 so the phone shows a "waiting to sync"
+    // state instead of a scary 404. Other verbs on an unknown account stay 404.
+    if (method === "GET" && resource === "snapshot") return cors(new Response(null, { status: 204 }));
+    return cors(json({ error: "unknown_account" }, 404));
+  }
   if (storedHash && !timingSafeEqual(storedHash, bearerHash)) {
     return cors(json({ error: "forbidden" }, 403));
   }

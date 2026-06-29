@@ -7,13 +7,16 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -22,6 +25,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -39,6 +43,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.claudeusage.tracker.Prefs
@@ -65,7 +70,7 @@ fun DashboardScreen(onUnpair: () -> Unit) {
         try {
             val js = RelayClient(p).fetchSnapshot()
             if (js == null) {
-                error = "Waiting for the desktop to sync…"
+                error = null            // not synced yet — show the waiting state, not an error
             } else {
                 snap = Snap.parse(js); error = null
             }
@@ -76,11 +81,17 @@ fun DashboardScreen(onUnpair: () -> Unit) {
         }
     }
 
-    LaunchedEffect(Unit) { while (true) { reload(); delay(20_000) } }
+    // Poll fast until the first snapshot lands (so it appears the moment the desktop pushes),
+    // then settle to a calm cadence.
+    LaunchedEffect(Unit) { while (true) { reload(); delay(if (snap == null) 5_000L else 20_000L) } }
     LaunchedEffect(Unit) { while (true) { delay(1_000); now = System.currentTimeMillis() } }
 
     Column(
-        Modifier.fillMaxSize().background(Bg).verticalScroll(rememberScrollState()).padding(16.dp)
+        // Bg fills edge-to-edge and stays fixed; the safeDrawing inset is applied inside the
+        // scroll so content clears the status/nav bars yet still scrolls under the (transparent)
+        // status bar for a native Android-15 feel.
+        Modifier.fillMaxSize().background(Bg).verticalScroll(rememberScrollState())
+            .windowInsetsPadding(WindowInsets.safeDrawing).padding(16.dp)
     ) {
         // header
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
@@ -128,8 +139,16 @@ fun DashboardScreen(onUnpair: () -> Unit) {
         }
 
         if (snap == null) {
-            Spacer(Modifier.height(40.dp))
-            Text(if (loading) "loading…" else (error ?: "no data"), color = Dim, fontSize = 14.sp)
+            if (error == null) {
+                WaitingForSync()
+            } else {
+                Spacer(Modifier.height(48.dp))
+                Text(error!!, color = hexColor("#d4694f"), fontSize = 14.sp,
+                    textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(12.dp))
+                TextButton(onClick = { scope.launch { reload() } },
+                    modifier = Modifier.align(Alignment.CenterHorizontally)) { Text("Try again", color = Accent) }
+            }
         } else if (error != null) {
             Spacer(Modifier.height(6.dp))
             Text(error!!, color = hexColor("#cda24e"), fontSize = 11.sp, fontFamily = FontFamily.Monospace)
@@ -145,6 +164,29 @@ private fun Card(content: @Composable () -> Unit) {
     Column(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Panel).padding(16.dp)
     ) { content() }
+}
+
+/** Friendly first-sync state: the account exists but the desktop hasn't pushed a snapshot
+ *  yet (it can take a few seconds). An indeterminate bar signals "working", not "stuck". */
+@Composable
+private fun WaitingForSync() {
+    Column(
+        Modifier.fillMaxWidth().padding(top = 64.dp, start = 8.dp, end = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text("Waiting for your desktop", color = Ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Syncing for the first time. Keep the desktop app open with Remote (phone) " +
+                "enabled — this usually takes a few seconds.",
+            color = Dim, fontSize = 13.sp, textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(24.dp))
+        LinearProgressIndicator(
+            modifier = Modifier.fillMaxWidth(0.62f).height(5.dp).clip(RoundedCornerShape(3.dp)),
+            color = Accent, trackColor = Panel2,
+        )
+    }
 }
 
 @Composable
