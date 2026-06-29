@@ -13,6 +13,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import com.claudeusage.tracker.Pairing
 import com.claudeusage.tracker.Prefs
 import com.claudeusage.tracker.RelayClient
 import com.google.firebase.messaging.FirebaseMessaging
@@ -23,6 +24,8 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Allow pairing via a cutpair1: deep link (in addition to scanning the QR).
+        intent?.dataString?.let { data -> Pairing.parse(data)?.let { Prefs.save(this, it) } }
         setContent {
             AppTheme {
                 var paired by remember { mutableStateOf(Prefs.isPaired(this)) }

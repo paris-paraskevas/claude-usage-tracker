@@ -3,6 +3,7 @@ package com.claudeusage.tracker.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -10,7 +11,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -32,20 +35,17 @@ import com.journeyapps.barcodescanner.ScanOptions
 fun PairScreen(onPaired: () -> Unit) {
     val ctx = LocalContext.current
     var error by remember { mutableStateOf<String?>(null) }
+    var code by remember { mutableStateOf("") }
+    var manual by remember { mutableStateOf(false) }
+
+    fun pairFrom(text: String) {
+        val p = Pairing.parse(text.trim())
+        if (p == null) error = "That isn't a valid pairing code." else { Prefs.save(ctx, p); onPaired() }
+    }
 
     val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
         val contents = result.contents
-        if (contents == null) {
-            error = "Scan cancelled."
-            return@rememberLauncherForActivityResult
-        }
-        val p = Pairing.parse(contents)
-        if (p == null) {
-            error = "That isn't a Claude Usage pairing QR."
-        } else {
-            Prefs.save(ctx, p)
-            onPaired()
-        }
+        if (contents == null) error = "Scan cancelled." else pairFrom(contents)
     }
 
     Column(
@@ -77,6 +77,25 @@ fun PairScreen(onPaired: () -> Unit) {
             Icon(Icons.Filled.QrCodeScanner, contentDescription = null, modifier = Modifier.size(20.dp))
             Text("  Scan pairing QR")
         }
+
+        TextButton(onClick = { manual = !manual; error = null }, modifier = Modifier.padding(top = 6.dp)) {
+            Text(if (manual) "Hide manual entry" else "Enter pairing code manually", color = Dim)
+        }
+        if (manual) {
+            OutlinedTextField(
+                value = code,
+                onValueChange = { code = it },
+                placeholder = { Text("cutpair1:…") },
+                singleLine = false,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Button(
+                onClick = { pairFrom(code) },
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.padding(top = 10.dp),
+            ) { Text("Pair from code") }
+        }
+
         error?.let {
             Text(it, color = hexColor("#d4694f"), fontSize = 13.sp,
                 modifier = Modifier.padding(top = 16.dp))
