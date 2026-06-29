@@ -1,5 +1,6 @@
 package com.claudeusage.tracker.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -76,6 +77,8 @@ import com.claudeusage.tracker.Win
 import com.claudeusage.tracker.widget.UsageWidget
 import com.claudeusage.tracker.widget.WidgetData
 import com.claudeusage.tracker.widget.updateLockNotification
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -84,9 +87,10 @@ private val MONO = FontFamily.Monospace
 @Composable
 fun DashboardScreen(onUnpair: () -> Unit) {
     val ctx = LocalContext.current
-    val pairing = remember { Prefs.load(ctx) }
     val scope = rememberCoroutineScope()
 
+    var accounts by remember { mutableStateOf(Prefs.all(ctx)) }
+    var activeId by remember { mutableStateOf(Prefs.activeId(ctx)) }
     var snap by remember { mutableStateOf<Snap?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -94,20 +98,51 @@ fun DashboardScreen(onUnpair: () -> Unit) {
     var ctxSel by rememberSaveable { mutableStateOf<String?>(null) }   // which session drives the Context gauge
 
     val reload: suspend () -> Unit = reload@{
-        val p = pairing ?: return@reload
+        val p = Prefs.active(ctx) ?: return@reload          // always the currently-active account
         try {
             val js = RelayClient(p).fetchSnapshot()
             if (js == null) {
-                error = null                              // not synced yet — show the waiting state
+                error = null                                // not synced yet — show the waiting state
             } else {
-                snap = Snap.parse(js); error = null
-                WidgetData.saveSnap(ctx, js)              // keep the home-screen widget + lock-screen notif current
+                val parsed = Snap.parse(js)
+                snap = parsed; error = null
+                // learn this account's label from its org so the switcher reads nicely
+                val cur = Prefs.all(ctx).firstOrNull { it.pairing.accountId == p.accountId }
+                if (cur?.label.isNullOrBlank() && parsed.org.isNotBlank()) {
+                    Prefs.setLabel(ctx, p.accountId, parsed.org); accounts = Prefs.all(ctx)
+                }
+                WidgetData.saveSnap(ctx, js)                // keep the home-screen widget + lock-screen notif current
                 runCatching { UsageWidget().updateAll(ctx) }
                 updateLockNotification(ctx)
             }
         } catch (e: Exception) {
             error = e.message ?: "Couldn't reach the relay"
         }
+    }
+
+    val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+        result.contents?.let { Pairing.parse(it.trim()) }?.let { p ->
+            Prefs.add(ctx, p); accounts = Prefs.all(ctx); activeId = p.accountId
+            snap = null; error = null
+            scope.launch { reload() }
+            registerFcmToken(ctx)                           // let the new desktop push this phone too
+        }
+    }
+    val addAccount: () -> Unit = {
+        scanLauncher.launch(
+            ScanOptions().setOrientationLocked(true).setBeepEnabled(false)
+                .setPrompt("Scan the pairing QR from another desktop"),
+        )
+    }
+    val switchTo: (String) -> Unit = { id ->
+        if (id != activeId) {
+            Prefs.setActive(ctx, id); activeId = id; snap = null; error = null
+            scope.launch { reload() }
+        }
+    }
+    val removeAccount: (String) -> Unit = { id ->
+        Prefs.remove(ctx, id); accounts = Prefs.all(ctx); activeId = Prefs.activeId(ctx)
+        if (accounts.isEmpty()) onUnpair() else { snap = null; error = null; scope.launch { reload() } }
     }
 
     // Poll fast until the first snapshot lands, then settle. 1s ticker drives countdowns.
@@ -131,10 +166,12 @@ fun DashboardScreen(onUnpair: () -> Unit) {
         bottomBar = { BottomNav(tab) { tab = it } },
     ) { inner ->
         when (tab) {
-            0 -> OverviewPage(s, now, inner, ctxSel, onCtxSel = { ctxSel = it }) { scope.launch { reload() } }
+            0 -> OverviewPage(s, now, inner, accounts, activeId, switchTo, addAccount,
+                ctxSel, onCtxSel = { ctxSel = it }) { scope.launch { reload() } }
             1 -> SessionsPage(s, inner)
             2 -> StatsPage(s, inner)
-            else -> SettingsPage(s, pairing, now, inner, onRefresh = { scope.launch { reload() } }, onUnpair = onUnpair)
+            else -> SettingsPage(s, Prefs.active(ctx), now, inner, accounts, activeId,
+                switchTo, addAccount, removeAccount) { scope.launch { reload() } }
         }
     }
 }
@@ -144,14 +181,12 @@ fun DashboardScreen(onUnpair: () -> Unit) {
 @Composable
 private fun OverviewPage(
     s: Snap, now: Long, inner: PaddingValues,
+    accounts: List<Prefs.Account>, activeId: String?, onSwitch: (String) -> Unit, onAddAccount: () -> Unit,
     ctxSel: String?, onCtxSel: (String?) -> Unit, onRefresh: () -> Unit,
 ) {
     PageScroll(inner) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.weight(1f)) {
-                Text(s.org.ifBlank { "Claude" }, color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                Text(s.subscription.ifBlank { "your plan" } + " plan", color = Faint, fontSize = 12.sp, fontFamily = MONO)
-            }
+            AccountSwitcher(s, accounts, activeId, onSwitch, onAddAccount, Modifier.weight(1f))
             s.statusWord?.let { StatusChip(it, hexColor(s.statusColor)) }
             IconButton(onClick = onRefresh) { Icon(Icons.Filled.Refresh, "Refresh", tint = Dim) }
         }
@@ -183,6 +218,44 @@ private fun OverviewPage(
         Spacer(Modifier.height(22.dp))
         Text(syncedAgo(s.updatedAt, now), color = Faint, fontSize = 11.sp, fontFamily = MONO,
             modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
+    }
+}
+
+/** Header title that doubles as the account switcher: tap to switch desktops or add one. */
+@Composable
+private fun AccountSwitcher(
+    s: Snap, accounts: List<Prefs.Account>, activeId: String?,
+    onSwitch: (String) -> Unit, onAddAccount: () -> Unit, modifier: Modifier = Modifier,
+) {
+    var open by remember { mutableStateOf(false) }
+    val name = accounts.firstOrNull { it.pairing.accountId == activeId }?.label?.ifBlank { null }
+        ?: s.org.ifBlank { null } ?: "Claude"
+    val multi = accounts.size > 1
+    Box(modifier) {
+        Column(Modifier.clip(RoundedCornerShape(8.dp)).clickable { open = true }) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(name, color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                Text("  ▾", color = Faint, fontSize = 15.sp)
+            }
+            Text(
+                if (multi) "${s.subscription.ifBlank { "plan" }} · ${accounts.size} accounts"
+                else s.subscription.ifBlank { "your plan" } + " plan",
+                color = Faint, fontSize = 12.sp, fontFamily = MONO,
+            )
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            accounts.forEach { acc ->
+                val lbl = acc.label?.ifBlank { null } ?: acc.pairing.accountId.take(8)
+                DropdownMenuItem(
+                    text = { Text(lbl, color = if (acc.pairing.accountId == activeId) Accent else Ink) },
+                    onClick = { open = false; onSwitch(acc.pairing.accountId) },
+                )
+            }
+            DropdownMenuItem(
+                text = { Text("+ Add account", color = Accent) },
+                onClick = { open = false; onAddAccount() },
+            )
+        }
     }
 }
 
@@ -230,13 +303,38 @@ private fun StatsPage(s: Snap, inner: PaddingValues) {
 @Composable
 private fun SettingsPage(
     s: Snap, pairing: Pairing?, now: Long, inner: PaddingValues,
-    onRefresh: () -> Unit, onUnpair: () -> Unit,
+    accounts: List<Prefs.Account>, activeId: String?,
+    onSwitch: (String) -> Unit, onAddAccount: () -> Unit, onRemove: (String) -> Unit,
+    onRefresh: () -> Unit,
 ) {
     val ctx = LocalContext.current
     var lockOn by remember { mutableStateOf(WidgetData.lockscreen(ctx)) }
     PageScroll(inner) {
         PageTitle("Settings", null)
         Spacer(Modifier.height(16.dp))
+        Card {
+            SectionLabel("ACCOUNTS")
+            Spacer(Modifier.height(4.dp))
+            accounts.forEach { acc ->
+                val id = acc.pairing.accountId
+                val lbl = acc.label?.ifBlank { null } ?: id.take(8)
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+                        .clickable { onSwitch(id) }.padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.size(8.dp).clip(CircleShape)
+                        .background(if (id == activeId) hexColor("#5e9e72") else Faint))
+                    Text(lbl, color = if (id == activeId) Ink else Dim, fontSize = 14.sp, maxLines = 1,
+                        modifier = Modifier.padding(start = 10.dp).weight(1f))
+                    TextButton(onClick = { onRemove(id) }) {
+                        Text("Remove", color = hexColor("#d4694f"), fontSize = 12.sp)
+                    }
+                }
+            }
+            TextButton(onClick = onAddAccount) { Text("+ Add account", color = Accent) }
+        }
+        Spacer(Modifier.height(14.dp))
         Card {
             SectionLabel("ACCOUNT")
             Spacer(Modifier.height(4.dp))
@@ -275,7 +373,6 @@ private fun SettingsPage(
         }
         Spacer(Modifier.height(18.dp))
         TextButton(onClick = onRefresh) { Text("Refresh now", color = Accent) }
-        TextButton(onClick = onUnpair) { Text("Unpair this device", color = hexColor("#d4694f")) }
         Spacer(Modifier.height(18.dp))
         Text(
             "Unofficial · not affiliated with Anthropic. \"Claude\" and \"Claude Code\" " +

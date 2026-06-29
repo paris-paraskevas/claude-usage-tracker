@@ -24,18 +24,29 @@ import org.json.JSONObject
 class PushService : FirebaseMessagingService() {
 
     override fun onNewToken(token: String) {
-        val p = Prefs.load(this) ?: return
-        CoroutineScope(Dispatchers.IO).launch { runCatching { RelayClient(p).registerPushToken(token) } }
+        // Register the token with every paired account so each desktop can push this phone.
+        val accounts = Prefs.all(this)
+        CoroutineScope(Dispatchers.IO).launch {
+            accounts.forEach { a -> runCatching { RelayClient(a.pairing).registerPushToken(token) } }
+        }
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
-        val p = Prefs.load(this) ?: return
         val nonce = message.data["nonce"] ?: return
         val ct = message.data["ct"] ?: return
-        val plain = Crypto.openString(p.e2eeKeyB64, nonce, ct) ?: return
+        // The push doesn't say which account it's for — try each paired key until one decrypts.
+        val accounts = Prefs.all(this)
+        var plain: String? = null
+        var label: String? = null
+        for (a in accounts) {
+            val s = Crypto.openString(a.pairing.e2eeKeyB64, nonce, ct)
+            if (s != null) { plain = s; label = a.label; break }
+        }
+        if (plain == null) return
         val o = runCatching { JSONObject(plain) }.getOrNull() ?: return
+        val title = o.optString("title", "Claude Usage")
         showNotification(
-            title = o.optString("title", "Claude Usage"),
+            title = if (accounts.size > 1 && !label.isNullOrBlank()) "$label · $title" else title,
             body = o.optString("body", ""),
             tag = o.optString("tag", ""),
         )
