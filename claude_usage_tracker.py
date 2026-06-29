@@ -124,7 +124,7 @@ DEFAULT_CONFIG = {
     "status_interval_seconds": 300,
     "status_components": [],                    # component names to watch ([] = overall status)
     "remote_enabled": False,                    # opt-in: relay an E2EE snapshot to your phone
-    "remote_relay_url": "",                     # your Cloudflare Worker relay URL (see docs/REMOTE.md)
+    "remote_relay_url": "https://claude-usage-relay.businessofzeus.workers.dev",  # default hosted relay; override in Settings
     "remote_sync_seconds": 60,                  # how often to push the snapshot to the relay
 }
 
@@ -919,6 +919,10 @@ def _heatmap(cache, today):
         return {"days": [], "max": 0}
     start = datetime.fromtimestamp(first).date()
     start = start - timedelta(days=(start.weekday() + 1) % 7)   # align to a Sunday
+    floor = today - timedelta(days=371)                          # keep it a tidy ~1-year block
+    floor = floor - timedelta(days=(floor.weekday() + 1) % 7)
+    if start < floor:
+        start = floor
     out, d = [], start
     while d <= today:
         t = toks.get(d.strftime("%Y-%m-%d"), 0)
@@ -1659,7 +1663,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   .mrow .mio{flex:1;text-align:right;color:var(--dim);font:12px/1 var(--mono)}
   .mrow .mshare{width:54px;text-align:right;font:600 12px/1 var(--mono)}
   .heatmap{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,1fr);gap:3px;overflow-x:auto;padding-bottom:3px}
-  .hm{width:11px;height:11px;border-radius:2px;background:var(--panel2)}
+  .hm{width:12px;height:12px;border-radius:2px;background:#2a2a31;box-shadow:inset 0 0 0 1px rgba(255,255,255,.035)}
   .hm.l1{background:#5a3526}.hm.l2{background:#8a4a33}.hm.l3{background:#b56043}.hm.l4{background:#d97757}
   /* header controls: refresh + update */
   .ic{background:var(--panel);border:1px solid var(--line);color:var(--dim);width:30px;height:30px;
@@ -2235,6 +2239,7 @@ async function refresh(){
     const sv=statusView(d), sp=$("statuspill");
     if(sp){ if(sv){ sp.hidden=false; sp.href=sv.url||"#"; sp.title="Anthropic status — "+sv.text; sp.innerHTML="<i style='background:"+sv.color+"'></i>"+esc(sv.word); } else { sp.hidden=true; } }
     if(!$("tab-status").hidden)renderStatusPage();
+    renderRemote();
     tickCountdowns();
   }catch(e){ $("err").className="err show"; $("err").textContent="⚠ cannot reach the tracker service."; }
 }
@@ -3137,6 +3142,7 @@ class TrayApp:
             except Exception as exc:
                 log(f"config save failed: {exc}")
             self._config_epoch += 1
+        self._wake.set()   # re-poll now so the snapshot (remote/ui) reflects the change quickly
 
     # ----- remote sync (optional, opt-in) -----
     def _remote_on(self) -> bool:
