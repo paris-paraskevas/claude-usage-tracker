@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.28"
+__version__ = "0.1.29"
 
 
 def _data_dir() -> Path:
@@ -129,6 +129,7 @@ DEFAULT_CONFIG = {
     "remote_relay_url": "https://claude-usage-relay.businessofzeus.workers.dev",  # default hosted relay; override in Settings
     "remote_sync_seconds": 60,                  # how often to push the snapshot to the relay
     "notify_session_waiting": False,            # opt-in: toast/push when a Claude Code session finishes a turn awaiting you
+    "remote_transcript": False,                 # opt-in: mirror the active conversation's text to your phone (E2EE)
 }
 
 # Settings the dashboard/settings UI may change at runtime (allowlist for POST /api/config).
@@ -137,7 +138,7 @@ CONFIG_ALLOW = {
     "bar_show_refresh", "widget_width", "widget_height", "bar_width", "bar_height",
     "open_as_window", "predictive_alerts", "update_check", "danger_alerts",
     "status_check", "status_components", "remote_enabled", "remote_relay_url",
-    "notify_session_waiting",
+    "notify_session_waiting", "remote_transcript",
 }
 
 LABELS = {
@@ -1118,6 +1119,67 @@ def fetch_status():
         return None
 
 
+def _extract_text(content) -> str:
+    """Readable text from a Claude message's `content` (string or block list)."""
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for b in content:
+        if isinstance(b, str):
+            parts.append(b)
+        elif isinstance(b, dict):
+            t = b.get("type")
+            if t == "text" and isinstance(b.get("text"), str):
+                parts.append(b["text"])
+            elif t == "tool_use":
+                parts.append(f"[ran {b.get('name', 'tool')}]")
+            # tool_result blocks (role=user) are skipped — not conversation text
+    return "\n".join(p for p in parts if p).strip()
+
+
+def read_transcript(max_msgs: int = 40, max_chars: int = 4000) -> dict | None:
+    """Recent messages (text only) from the most-recently-active session, for the optional
+    phone transcript. This is the ONLY place the app reads message *content*; it runs solely
+    when `remote_transcript` is enabled and the payload is end-to-end encrypted before it
+    leaves the machine. Returns {name, messages:[{role,text,ts}]} or None."""
+    try:
+        files = list(PROJECTS_DIR.glob("*/*.jsonl"))
+        f = max(files, key=lambda p: p.stat().st_mtime) if files else None
+    except Exception:
+        return None
+    if not f:
+        return None
+    msgs, cwd = [], None
+    try:
+        with open(f, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                if cwd is None and isinstance(o.get("cwd"), str):
+                    cwd = o["cwd"]
+                msg = o.get("message")
+                if not isinstance(msg, dict) or msg.get("role") not in ("user", "assistant"):
+                    continue
+                text = _extract_text(msg.get("content"))
+                if not text:
+                    continue
+                msgs.append({"role": msg["role"], "text": text[:max_chars],
+                             "ts": _parse_iso(o.get("timestamp"))})
+    except Exception:
+        return None
+    if not msgs:
+        return None
+    name = cwd.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1] if cwd else f.parent.name
+    return {"name": name, "messages": msgs[-max_msgs:]}
+
+
 def build_snapshot(r: FetchResult, hist: dict, cfg: dict) -> dict:
     now_s = time.time()
     oauth = read_oauth()
@@ -1909,6 +1971,8 @@ DASHBOARD_HTML = r"""<!doctype html>
           <button class="sbtn" id="rm-rotate">Rotate key</button>
           <button class="sbtn" id="rm-unpair">Unpair</button>
         </div>
+        <div class="setrow" style="margin-top:12px"><span class="setlbl">Conversation</span>
+          <label class="chk"><input type="checkbox" id="rm-transcript"> mirror the active conversation to your phone — sends message <b>text</b> (E2EE)</label></div>
       </div>
       <div class="csub" style="margin-top:8px">Android only (no iOS yet). The relay only stores ciphertext it can't read. See <code>docs/REMOTE.md</code>.</div>
     </div>
@@ -2175,6 +2239,7 @@ function renderSettings(){
   renderStatusPicker();
   renderRemote();
   $("set-sesswait").checked=!!ui.notify_session_waiting;
+  $("rm-transcript").checked=!!ui.remote_transcript;
 }
 const COMP_RANK={operational:0,under_maintenance:1,degraded_performance:2,partial_outage:3,major_outage:4};
 const IND_SEV={none:0,minor:2,major:4,critical:4};
@@ -2328,6 +2393,7 @@ $("rm-sync").onclick=function(){ postRemote("sync"); setTimeout(refresh,500); };
 $("rm-rotate").onclick=function(){ if(confirm("Rotate the key? Your phone must re-pair.")){ postRemote("rotate"); $("rm-qr").dataset.url=""; setTimeout(refresh,500); } };
 $("rm-unpair").onclick=function(){ if(confirm("Unpair and disable remote sync?")){ postRemote("unpair"); setTimeout(refresh,500); } };
 $("set-sesswait").onchange=function(){ postCfg({notify_session_waiting:this.checked}); };
+$("rm-transcript").onchange=function(){ postCfg({remote_transcript:this.checked}); };
 </script>
 </body>
 </html>"""
@@ -3223,6 +3289,10 @@ class TrayApp:
 
     def _remote_sync_now(self, snap: dict) -> None:
         try:
+            if self.cfg.get("remote_transcript"):   # opt-in: mirror the active conversation (E2EE)
+                t = read_transcript()
+                if t:
+                    snap = {**snap, "transcript": t}   # copy — never leak content into the local STORE snapshot
             self._remote_last_ok = remote_sync_snapshot(snap, self.cfg)
         except Exception:
             self._remote_last_ok = False
@@ -3548,7 +3618,7 @@ class TrayApp:
                 snap["ui"] = {k: self.cfg.get(k) for k in
                               ("bar_fields", "bar_opacity", "bar_show_refresh",
                                "show_widget_on_start", "show_bar_on_start", "status_components",
-                               "notify_session_waiting")}
+                               "notify_session_waiting", "remote_transcript")}
                 snap["config_epoch"] = self._config_epoch
                 snap["overlays_alive"] = {"widget": self._widget_alive(), "bar": self._bar_alive()}
                 snap["remote"] = {"enabled": bool(self.cfg.get("remote_enabled")),
