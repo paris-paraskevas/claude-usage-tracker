@@ -79,6 +79,11 @@ talks to nothing but that one Anthropic endpoint.
   alerts on an **Android** phone, **end-to-end encrypted**, via a tiny zero-knowledge
   relay you deploy. Pair by scanning a QR in Settings; your Claude token never leaves
   your PC. **Android only** (no iOS yet). See [docs/REMOTE.md](docs/REMOTE.md).
+- **Session-waiting alerts** *(optional, opt-in)* — get a toast (and, if remote is on, a
+  phone push) when a Claude Code session goes idle **awaiting your response**, with the
+  directory name. Enable it in **Settings → Alerts**; it installs a Claude Code idle hook
+  (`Notification` / `idle_prompt`) in `~/.claude/settings.json` (backed up, removable) and
+  fires only after you've stepped away.
 - **Live tray icon** — two bars (left = 5h, right = weekly) that fill and change
   colour with usage.
 - **20% notifications** — a Windows toast each time the 5h or weekly window crosses

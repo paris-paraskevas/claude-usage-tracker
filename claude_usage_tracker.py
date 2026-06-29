@@ -79,6 +79,8 @@ LOG_PATH = APP_DIR / "claude_usage_tracker.log"
 ICON_PATH = APP_DIR / "app_icon.png"
 ICO_PATH = APP_DIR / "app.ico"
 REMOTE_PATH = APP_DIR / "remote.json"   # remote-sync identity (accountId/readToken/e2eeKey) — secrets, opt-in
+PORT_PATH = APP_DIR / "server_port"     # the tray writes its live dashboard port here for the --session-hook
+CLAUDE_SETTINGS = Path(os.path.expanduser("~")) / ".claude" / "settings.json"   # where the idle hook installs
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
@@ -126,6 +128,7 @@ DEFAULT_CONFIG = {
     "remote_enabled": False,                    # opt-in: relay an E2EE snapshot to your phone
     "remote_relay_url": "https://claude-usage-relay.businessofzeus.workers.dev",  # default hosted relay; override in Settings
     "remote_sync_seconds": 60,                  # how often to push the snapshot to the relay
+    "notify_session_waiting": False,            # opt-in: toast/push when a Claude Code session goes idle awaiting you
 }
 
 # Settings the dashboard/settings UI may change at runtime (allowlist for POST /api/config).
@@ -134,6 +137,7 @@ CONFIG_ALLOW = {
     "bar_show_refresh", "widget_width", "widget_height", "bar_width", "bar_height",
     "open_as_window", "predictive_alerts", "update_check", "danger_alerts",
     "status_check", "status_components", "remote_enabled", "remote_relay_url",
+    "notify_session_waiting",
 }
 
 LABELS = {
@@ -1856,6 +1860,12 @@ DASHBOARD_HTML = r"""<!doctype html>
         <label class="chk"><input type="checkbox" id="set-widget-start"> open at startup</label></div>
     </div>
     <div class="card panel">
+      <div class="ptitle">Alerts</div>
+      <div class="setrow"><span class="setlbl">Session waiting</span>
+        <label class="chk"><input type="checkbox" id="set-sesswait"> notify me (desktop + phone) when a session is awaiting your response</label></div>
+      <div class="csub" style="margin-top:6px">Installs a Claude Code idle hook in <code>~/.claude/settings.json</code> (backed up; removable). Fires only after you've been idle.</div>
+    </div>
+    <div class="card panel">
       <div class="ptitle">Minimal bar — fields shown</div>
       <div id="set-fields" class="fields"></div>
     </div>
@@ -2142,6 +2152,7 @@ function renderSettings(){
   syncOverlayLabels();
   renderStatusPicker();
   renderRemote();
+  $("set-sesswait").checked=!!ui.notify_session_waiting;
 }
 const COMP_RANK={operational:0,under_maintenance:1,degraded_performance:2,partial_outage:3,major_outage:4};
 const IND_SEV={none:0,minor:2,major:4,critical:4};
@@ -2284,6 +2295,7 @@ $("rm-save").onclick=function(){ postCfg({remote_relay_url:$("rm-url").value.tri
 $("rm-sync").onclick=function(){ postRemote("sync"); setTimeout(refresh,500); };
 $("rm-rotate").onclick=function(){ if(confirm("Rotate the key? Your phone must re-pair.")){ postRemote("rotate"); $("rm-qr").dataset.url=""; setTimeout(refresh,500); } };
 $("rm-unpair").onclick=function(){ if(confirm("Unpair and disable remote sync?")){ postRemote("unpair"); setTimeout(refresh,500); } };
+$("set-sesswait").onchange=function(){ postCfg({notify_session_waiting:this.checked}); };
 </script>
 </body>
 </html>"""
@@ -2580,6 +2592,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if fn and action in ("rotate", "unpair", "sync"):
                 try:
                     fn(action)
+                except Exception:
+                    pass
+            self._send(200, "application/json", b'{"ok":true}')
+        elif path == "/api/session-waiting":
+            fn = CONTROL.get("session_waiting")
+            if fn:
+                try:
+                    fn(self._read_json() or {})
                 except Exception:
                     pass
             self._send(200, "application/json", b'{"ok":true}')
@@ -3018,6 +3038,7 @@ class TrayApp:
         self._started_notified = False
         self._last_remote_sync = 0.0
         self._remote_last_ok = None
+        self._session_waiting_last = {}   # session_id -> last-notified ts (rate-limit)
 
     def build_menu(self):
         import pystray
@@ -3044,6 +3065,10 @@ class TrayApp:
         import pystray
         ensure_app_icon()
         httpd, self.port = start_server(self.port)
+        try:
+            PORT_PATH.write_text(str(self.port), encoding="utf-8")   # so --session-hook can find us
+        except Exception:
+            pass
         # Preload the last-known snapshot so the UI shows data immediately, even if
         # the first poll is rate-limited (marked stale until the first good poll).
         prev = load_json(SNAPSHOT_PATH, None)
@@ -3061,6 +3086,7 @@ class TrayApp:
         CONTROL["set_config"] = self._set_config       # the tray is the single config writer
         CONTROL["toggle_overlay"] = self._toggle_overlay
         CONTROL["remote_action"] = self._remote_action
+        CONTROL["session_waiting"] = self._on_session_waiting
         global REMOTE_PUSH
         REMOTE_PUSH = self._remote_push                # mirror toasts to the paired phone
         threading.Thread(target=self._poll_loop, daemon=True).start()
@@ -3143,6 +3169,9 @@ class TrayApp:
                 log(f"config save failed: {exc}")
             self._config_epoch += 1
         self._wake.set()   # re-poll now so the snapshot (remote/ui) reflects the change quickly
+        if "notify_session_waiting" in patch:   # toggle installs/removes the Claude Code idle hook
+            target = install_session_hook if patch["notify_session_waiting"] else remove_session_hook
+            threading.Thread(target=target, daemon=True).start()
 
     # ----- remote sync (optional, opt-in) -----
     def _remote_on(self) -> bool:
@@ -3161,6 +3190,21 @@ class TrayApp:
             return
         threading.Thread(target=remote_push, args=(self.cfg, title, msg, title[:40]),
                          daemon=True).start()
+
+    def _on_session_waiting(self, payload: dict) -> None:
+        """A Claude Code session went idle awaiting the user (from the --session-hook).
+        Fire a toast (which the REMOTE_PUSH hook also mirrors to the phone), rate-limited
+        per session so repeated idle pings don't spam."""
+        if not self.cfg.get("notify_session_waiting", False):
+            return
+        cwd = (payload or {}).get("cwd") or ""
+        sid = (payload or {}).get("session_id") or cwd or "session"
+        name = cwd.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1] or "session"
+        now = time.time()
+        if now - self._session_waiting_last.get(sid, 0) < 90:
+            return
+        self._session_waiting_last[sid] = now
+        notify("Claude is waiting", f"{name} · session awaiting your response")
 
     def _remote_action(self, action: str) -> None:
         """Driven by POST /api/remote: rotate the key, unpair, or force a sync."""
@@ -3457,7 +3501,8 @@ class TrayApp:
                 snap["status"] = self._status
                 snap["ui"] = {k: self.cfg.get(k) for k in
                               ("bar_fields", "bar_opacity", "bar_show_refresh",
-                               "show_widget_on_start", "show_bar_on_start", "status_components")}
+                               "show_widget_on_start", "show_bar_on_start", "status_components",
+                               "notify_session_waiting")}
                 snap["config_epoch"] = self._config_epoch
                 snap["overlays_alive"] = {"widget": self._widget_alive(), "bar": self._bar_alive()}
                 snap["remote"] = {"enabled": bool(self.cfg.get("remote_enabled")),
@@ -3515,6 +3560,117 @@ def run_once(debug: bool) -> int:
     return 0 if r.ok else 1
 
 
+# ---------------------------------------------------------------------------
+# Session-waiting alerts (Claude Code idle hook -> tray -> toast/push)
+# ---------------------------------------------------------------------------
+
+def _read_server_port():
+    try:
+        return int(PORT_PATH.read_text(encoding="utf-8").strip())
+    except Exception:
+        return None
+
+
+def run_session_hook() -> int:
+    """Entry point for the Claude Code Notification[idle_prompt] hook. Reads the hook
+    JSON on stdin and POSTs {cwd, session_id} to the running tray. Fast + best-effort;
+    never blocks Claude Code."""
+    try:
+        raw = sys.stdin.read()
+    except Exception:
+        raw = ""
+    try:
+        d = json.loads(raw) if raw.strip() else {}
+    except Exception:
+        d = {}
+    port = _read_server_port()
+    if not port:
+        return 0
+    body = json.dumps({"cwd": d.get("cwd"), "session_id": d.get("session_id"),
+                       "notification_type": d.get("notification_type"),
+                       "message": d.get("message")}).encode("utf-8")
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/api/session-waiting",
+                                     data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        urllib.request.urlopen(req, timeout=3).read()
+    except Exception:
+        pass
+    return 0
+
+
+def _session_hook_command() -> str:
+    """Shell command Claude Code runs for the idle hook."""
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}" --session-hook'
+    return f'"{_pythonw()}" "{Path(__file__).resolve()}" --session-hook'
+
+
+def _save_claude_settings(data: dict) -> None:
+    try:
+        if CLAUDE_SETTINGS.exists():
+            CLAUDE_SETTINGS.with_name(CLAUDE_SETTINGS.name + ".cut-bak").write_text(
+                CLAUDE_SETTINGS.read_text(encoding="utf-8"), encoding="utf-8")
+        save_json(CLAUDE_SETTINGS, data)   # atomic tmp+replace
+    except Exception as exc:
+        log(f"write claude settings failed: {exc}")
+
+
+def install_session_hook() -> bool:
+    """Merge our Notification[idle_prompt] hook into ~/.claude/settings.json (idempotent;
+    backs the file up first). Returns True on success."""
+    try:
+        data = load_json(CLAUDE_SETTINGS, {})
+        if not isinstance(data, dict):
+            data = {}
+        hooks = data.setdefault("hooks", {})
+        groups = hooks.setdefault("Notification", [])
+        if not isinstance(groups, list):
+            groups = hooks["Notification"] = []
+        cmd = _session_hook_command()
+        for g in groups:                                   # already present -> refresh path
+            for h in (g.get("hooks") or []) if isinstance(g, dict) else []:
+                if isinstance(h, dict) and "--session-hook" in str(h.get("command", "")):
+                    h["command"] = cmd
+                    _save_claude_settings(data)
+                    return True
+        groups.append({"matcher": "idle_prompt",
+                       "hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
+        _save_claude_settings(data)
+        log("installed session-waiting hook")
+        return True
+    except Exception as exc:
+        log(f"install session hook failed: {exc}")
+        return False
+
+
+def remove_session_hook() -> None:
+    """Strip our hook back out of ~/.claude/settings.json, leaving any others intact."""
+    try:
+        data = load_json(CLAUDE_SETTINGS, None)
+        if not isinstance(data, dict):
+            return
+        hooks = data.get("hooks")
+        if not isinstance(hooks, dict) or not isinstance(hooks.get("Notification"), list):
+            return
+        out = []
+        for g in hooks["Notification"]:
+            kept = [h for h in (g.get("hooks") or [])
+                    if not (isinstance(h, dict) and "--session-hook" in str(h.get("command", "")))]
+            if kept:
+                g = dict(g); g["hooks"] = kept; out.append(g)
+        if out:
+            hooks["Notification"] = out
+        else:
+            hooks.pop("Notification", None)
+        if not hooks:
+            data.pop("hooks", None)
+        _save_claude_settings(data)
+        log("removed session-waiting hook")
+    except Exception as exc:
+        log(f"remove session hook failed: {exc}")
+
+
 def main() -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -3534,8 +3690,12 @@ def main() -> int:
     ap.add_argument("--install-autostart", action="store_true", help="add the Startup shortcut only")
     ap.add_argument("--uninstall-autostart", action="store_true")
     ap.add_argument("--version", action="store_true")
+    ap.add_argument("--session-hook", action="store_true",
+                    help="(internal) Claude Code idle hook: forward the session to the tray")
     args = ap.parse_args()
 
+    if args.session_hook:
+        return run_session_hook()
     if args.version:
         print(f"{APP_NAME} {__version__}")
         return 0
