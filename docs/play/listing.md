@@ -1,6 +1,6 @@
 # Play Store listing copy
 
-**App name** (≤30): `Claude Usage Tracker`
+**App name** (≤30): `Usage Tracker for Claude`
 
 **Short description** (≤80):
 `Watch your Claude Code 5h & weekly limits, sessions and context on your phone.`
@@ -33,6 +33,9 @@ REQUIREMENTS
 • Works while your desktop is running and online.
 
 Open source (MIT): github.com/paris-paraskevas/claude-usage-tracker
+
+DISCLAIMER
+Independent, open-source project — not affiliated with, endorsed by, or sponsored by Anthropic. "Claude" and "Claude Code" are trademarks of Anthropic, used only to describe compatibility.
 ```
 
 **App category:** Tools

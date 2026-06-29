@@ -12,6 +12,10 @@ It reads the OAuth token Claude Code already stores on your machine and calls th
 same endpoint `/usage` uses. **Read-only** — it never modifies your credentials and
 talks to nothing but that one Anthropic endpoint.
 
+> **Unofficial.** An independent, open-source project — not affiliated with, endorsed by, or
+> sponsored by Anthropic. "Claude" and "Claude Code" are trademarks of Anthropic, used only
+> to describe compatibility.
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/widget.png" alt="Always-on-top mini widget" width="392"><br>
   <em>The always-on-top mini <strong>widget</strong> — 5h / weekly / context %, with a session picker, verdict, and status dot (sample data)</em>

@@ -85,7 +85,7 @@ fun DashboardScreen(onUnpair: () -> Unit) {
         // header
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Column(Modifier.weight(1f)) {
-                Text("Claude Usage", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Text("Usage Tracker for Claude", color = Ink, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
                 Text(snap?.org?.ifBlank { "—" } ?: "connecting…", color = Faint, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
             }
             snap?.statusWord?.let { StatusChip(it, hexColor(snap?.statusColor)) }

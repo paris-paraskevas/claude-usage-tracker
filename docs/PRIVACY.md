@@ -55,6 +55,12 @@ between your desktop and phone via the pairing QR.
 The App, relay, and desktop are open source (MIT):
 https://github.com/paris-paraskevas/claude-usage-tracker
 
+## Disclaimer
+
+This is an independent, open-source project and is **not affiliated with, endorsed by, or
+sponsored by Anthropic**. "Claude" and "Claude Code" are trademarks of Anthropic, used only
+to describe compatibility.
+
 ## Contact
 
 Questions: &lt;your-contact-email&gt;
