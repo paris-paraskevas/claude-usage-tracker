@@ -72,12 +72,15 @@ class MainActivity : ComponentActivity() {
 /** Best-effort: send our FCM token to the relay so the desktop can push us alerts.
  *  No-ops cleanly if Firebase isn't configured (no google-services.json). */
 fun registerFcmToken(ctx: Context) {
-    val p = Prefs.load(ctx) ?: return
+    val accounts = Prefs.all(ctx)
+    if (accounts.isEmpty()) return
     try {
         FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
-            CoroutineScope(Dispatchers.IO).launch { runCatching { RelayClient(p).registerPushToken(token) } }
+            accounts.forEach { a ->
+                CoroutineScope(Dispatchers.IO).launch { runCatching { RelayClient(a.pairing).registerPushToken(token) } }
+            }
         }
     } catch (_: Exception) {
-        // Firebase not initialized — push disabled, Phase-1 viewing still works.
+        // Firebase not initialized — push disabled, viewing still works.
     }
 }
