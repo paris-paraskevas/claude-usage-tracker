@@ -48,6 +48,15 @@ def test_two_blobs_use_distinct_nonces(tmp_identity):
     assert b1["nonce"] != b2["nonce"] and b1["ct"] != b2["ct"]    # random nonce per message
 
 
+def test_remote_command_decrypt_roundtrip(tmp_identity):
+    # The phone enqueues an E2EE command; the desktop decrypts it with the shared key.
+    m.load_remote_identity(create=True)
+    blob = m.remote_encrypt({"type": "prompt", "text": "hello claude"})
+    assert m.remote_decrypt(blob) == {"type": "prompt", "text": "hello claude"}
+    assert m.remote_decrypt({"nonce": "AA", "ct": "AA"}) is None  # garbage -> None
+    assert m.remote_decrypt({}) is None
+
+
 def test_pair_uri(tmp_identity):
     uri = m.remote_pair_uri({"remote_relay_url": "https://w.example.dev/"})
     assert uri.startswith("cutpair1:")

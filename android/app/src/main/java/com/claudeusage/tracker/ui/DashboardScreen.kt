@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -31,6 +32,7 @@ import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -39,6 +41,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -277,19 +280,62 @@ private fun SessionsPage(s: Snap, inner: PaddingValues) {
 
 @Composable
 private fun ChatPage(s: Snap, inner: PaddingValues) {
-    PageScroll(inner) {
-        val t = s.transcript
-        PageTitle("Conversation", t?.name)
-        Spacer(Modifier.height(16.dp))
-        if (t == null || t.messages.isEmpty()) {
-            Text(
-                "No conversation mirrored yet.\n\nOn the desktop: Settings → Remote (phone) → turn on " +
-                    "\"mirror the active conversation.\" Your latest session then appears here — " +
-                    "text only, end-to-end encrypted.",
-                color = Dim, fontSize = 14.sp,
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val pairing = remember { Prefs.active(ctx) }
+    var draft by remember { mutableStateOf("") }
+    var sending by remember { mutableStateOf(false) }
+    var sent by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxSize().padding(inner).imePadding()) {
+        Column(
+            Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp).padding(top = 12.dp, bottom = 12.dp),
+        ) {
+            val t = s.transcript
+            PageTitle("Conversation", t?.name)
+            Spacer(Modifier.height(16.dp))
+            if (t == null || t.messages.isEmpty()) {
+                Text(
+                    "No conversation mirrored yet.\n\nOn the desktop: Settings → Remote (phone) → turn on " +
+                        "\"mirror the active conversation\" to see it here. To run prompts from here, also arm " +
+                        "\"run prompts sent from your phone\" (restricted to planning + read-only).",
+                    color = Dim, fontSize = 14.sp,
+                )
+            } else {
+                t.messages.forEach { MsgBubble(it); Spacer(Modifier.height(10.dp)) }
+            }
+            if (sent) {
+                Spacer(Modifier.height(6.dp))
+                Text("Sent — your desktop runs it if armed (planning / read-only). Reply appears here on the next sync.",
+                    color = Faint, fontSize = 11.sp, fontFamily = MONO)
+            }
+        }
+        Row(
+            Modifier.fillMaxWidth().background(Panel).padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedTextField(
+                value = draft,
+                onValueChange = { draft = it; sent = false },
+                modifier = Modifier.weight(1f),
+                placeholder = { Text("Send a prompt…", color = Faint) },
+                maxLines = 4,
             )
-        } else {
-            t.messages.forEach { MsgBubble(it); Spacer(Modifier.height(10.dp)) }
+            Spacer(Modifier.width(8.dp))
+            Button(
+                onClick = {
+                    val txt = draft.trim()
+                    if (txt.isEmpty() || pairing == null) return@Button
+                    sending = true
+                    scope.launch {
+                        val ok = RelayClient(pairing).sendCommand(txt)
+                        sending = false
+                        if (ok) { sent = true; draft = "" }
+                    }
+                },
+                enabled = !sending && draft.isNotBlank() && pairing != null,
+                shape = RoundedCornerShape(10.dp),
+            ) { Text(if (sending) "…" else "Send") }
         }
     }
 }
