@@ -11,6 +11,7 @@ data class Sess(val name: String, val pct: Double, val tokens: Long, val active:
 data class Snap(
     val ok: Boolean,
     val org: String,
+    val email: String,
     val subscription: String,
     val updatedAt: Long,
     val verdictText: String?,
@@ -21,6 +22,7 @@ data class Snap(
     val sessions: List<Sess>,
     val statusWord: String?,
     val statusColor: String?,
+    val statusDesc: String?,
     val atSessions: Long?,
     val atMessages: Long?,
     val atTokens: Long?,
@@ -77,6 +79,7 @@ data class Snap(
             return Snap(
                 ok = o.optBoolean("ok", false),
                 org = acc?.optString("org").orEmptyAcct(acc),
+                email = acc?.optString("email")?.takeIf { it.isNotBlank() && it != "null" } ?: "",
                 subscription = o.optString("subscription", ""),
                 updatedAt = o.optLong("updated_at", 0),
                 verdictText = verdict?.optString("text"),
@@ -87,6 +90,7 @@ data class Snap(
                 sessions = sessions,
                 statusWord = sv?.first,
                 statusColor = sv?.second,
+                statusDesc = o.optJSONObject("status")?.optString("description")?.takeIf { it.isNotBlank() && it != "null" },
                 atSessions = period?.optLong("sessions"),
                 atMessages = period?.optLong("messages"),
                 atTokens = period?.optLong("tokens"),
