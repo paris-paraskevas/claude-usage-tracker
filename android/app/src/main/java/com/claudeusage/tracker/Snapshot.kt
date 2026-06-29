@@ -5,6 +5,8 @@ import org.json.JSONObject
 
 data class Win(val key: String, val label: String, val pct: Double, val resetsAt: Long?, val color: String)
 data class Sess(val name: String, val pct: Double, val tokens: Long, val active: Boolean)
+data class Msg(val role: String, val text: String, val ts: Long?)
+data class Transcript(val name: String, val messages: List<Msg>)
 
 /** A parsed, UI-ready view of the desktop snapshot. Parsing is defensive — any field
  *  may be missing on an early/stale snapshot. */
@@ -29,6 +31,7 @@ data class Snap(
     val atStreak: Int?,
     val atPeak: String?,
     val favModel: String?,
+    val transcript: Transcript?,
 ) {
     companion object {
         fun parse(jsonStr: String): Snap {
@@ -76,6 +79,20 @@ data class Snap(
             val at = o.optJSONObject("alltime")
             val period = at?.optJSONObject("periods")?.optJSONObject("all")
 
+            val transcript = o.optJSONObject("transcript")?.let { tj ->
+                val ma = tj.optJSONArray("messages") ?: JSONArray()
+                val ms = ArrayList<Msg>()
+                for (i in 0 until ma.length()) {
+                    val mo = ma.getJSONObject(i)
+                    ms.add(Msg(
+                        role = mo.optString("role"),
+                        text = mo.optString("text"),
+                        ts = if (mo.isNull("ts")) null else (mo.optDouble("ts") * 1000).toLong(),
+                    ))
+                }
+                Transcript(tj.optString("name"), ms)
+            }
+
             return Snap(
                 ok = o.optBoolean("ok", false),
                 org = acc?.optString("org").orEmptyAcct(acc),
@@ -97,6 +114,7 @@ data class Snap(
                 atStreak = at?.optInt("streak_current"),
                 atPeak = at?.optString("peak_hour")?.takeIf { it.isNotBlank() && it != "null" },
                 favModel = period?.optString("fav_model")?.takeIf { it.isNotBlank() && it != "null" },
+                transcript = transcript,
             )
         }
 
