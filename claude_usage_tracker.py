@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.29"
+__version__ = "0.1.30"
 
 
 def _data_dir() -> Path:
@@ -130,6 +130,7 @@ DEFAULT_CONFIG = {
     "remote_sync_seconds": 60,                  # how often to push the snapshot to the relay
     "notify_session_waiting": False,            # opt-in: toast/push when a Claude Code session finishes a turn awaiting you
     "remote_transcript": False,                 # opt-in: mirror the active conversation's text to your phone (E2EE)
+    "remote_accept_prompts": False,             # opt-in (ARMED): run prompts sent from the phone, restricted (plan + read-only tools)
 }
 
 # Settings the dashboard/settings UI may change at runtime (allowlist for POST /api/config).
@@ -138,7 +139,7 @@ CONFIG_ALLOW = {
     "bar_show_refresh", "widget_width", "widget_height", "bar_width", "bar_height",
     "open_as_window", "predictive_alerts", "update_check", "danger_alerts",
     "status_check", "status_components", "remote_enabled", "remote_relay_url",
-    "notify_session_waiting", "remote_transcript",
+    "notify_session_waiting", "remote_transcript", "remote_accept_prompts",
 }
 
 LABELS = {
@@ -1462,6 +1463,80 @@ def remote_push(cfg: dict, title: str, body: str, tag: str = "") -> None:
         _relay_call("POST", cfg, f"/v1/acct/{ident['account_id']}/push", blob)
 
 
+def remote_decrypt(blob: dict):
+    """Decrypt a {nonce, ct} blob the phone sent, with our shared e2ee key. Returns obj|None."""
+    import base64
+    from nacl.secret import SecretBox
+    ident = load_remote_identity(create=False)
+    if not ident or not isinstance(blob, dict):
+        return None
+    try:
+        box = SecretBox(base64.b64decode(ident["e2ee_key"]))
+        plain = box.decrypt(base64.b64decode(blob["ct"]), base64.b64decode(blob["nonce"]))
+        return json.loads(plain.decode("utf-8"))
+    except Exception:
+        return None
+
+
+def remote_get_command(cfg: dict):
+    """Fetch + decrypt a pending command the phone enqueued on the relay (or None)."""
+    url = (cfg.get("remote_relay_url") or "").rstrip("/")
+    ident = load_remote_identity(create=False)
+    if not url or not ident:
+        return None
+    req = urllib.request.Request(url + f"/v1/acct/{ident['account_id']}/command", method="GET")
+    req.add_header("Authorization", "Bearer " + ident["read_token"])
+    req.add_header("User-Agent", f"claude-usage-tracker/{__version__}")
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            if r.status == 204:
+                return None
+            blob = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None
+    return remote_decrypt(blob)
+
+
+def remote_clear_command(cfg: dict) -> None:
+    ident = load_remote_identity(create=False)
+    if ident:
+        _relay_call("DELETE", cfg, f"/v1/acct/{ident['account_id']}/command")
+
+
+# Restricted tools for remotely-triggered prompts: read + research only, never edit/run.
+REMOTE_PROMPT_TOOLS = "Read,Glob,Grep,WebSearch,WebFetch"
+
+
+def run_remote_prompt(prompt: str, cwd: str | None = None, timeout: int = 180) -> str:
+    """Run a phone-sent prompt through Claude Code headless, locked to planning + read-only
+    tools (no edits, no shell), in a FRESH session so it never disturbs the interactive one.
+    Returns the assistant's reply text (or a short error). The timeout is a hang safety-net."""
+    cli = _claude_cli()
+    if not cli:
+        return "Claude Code CLI not found on this machine."
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return ""
+    cmd = [cli, "-p", prompt, "--output-format", "json",
+           "--permission-mode", "plan",
+           "--allowedTools", REMOTE_PROMPT_TOOLS,
+           "--disallowedTools", "Edit,Write,Bash,NotebookEdit"]
+    try:
+        import subprocess
+        proc = subprocess.run(cmd, cwd=cwd or None, capture_output=True, text=True,
+                              timeout=timeout, encoding="utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        return "Timed out — the prompt took too long."
+    except Exception as exc:
+        return f"Couldn't run Claude: {exc}"
+    out = (proc.stdout or "").strip()
+    try:
+        data = json.loads(out)
+        return (str(data.get("result") or data.get("text") or out))[:6000]
+    except Exception:
+        return (out or (proc.stderr or "").strip() or "No output.")[:6000]
+
+
 # ---------------------------------------------------------------------------
 # Notifications
 # ---------------------------------------------------------------------------
@@ -1973,6 +2048,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         </div>
         <div class="setrow" style="margin-top:12px"><span class="setlbl">Conversation</span>
           <label class="chk"><input type="checkbox" id="rm-transcript"> mirror the active conversation to your phone — sends message <b>text</b> (E2EE)</label></div>
+        <div class="setrow" style="margin-top:10px"><span class="setlbl">Remote prompts</span>
+          <label class="chk"><input type="checkbox" id="rm-accept"> <b>arm:</b> run prompts sent from your phone — restricted to planning + read-only tools (no edits, no shell), in a fresh session</label></div>
       </div>
       <div class="csub" style="margin-top:8px">Android only (no iOS yet). The relay only stores ciphertext it can't read. See <code>docs/REMOTE.md</code>.</div>
     </div>
@@ -2240,6 +2317,7 @@ function renderSettings(){
   renderRemote();
   $("set-sesswait").checked=!!ui.notify_session_waiting;
   $("rm-transcript").checked=!!ui.remote_transcript;
+  $("rm-accept").checked=!!ui.remote_accept_prompts;
 }
 const COMP_RANK={operational:0,under_maintenance:1,degraded_performance:2,partial_outage:3,major_outage:4};
 const IND_SEV={none:0,minor:2,major:4,critical:4};
@@ -2394,6 +2472,7 @@ $("rm-rotate").onclick=function(){ if(confirm("Rotate the key? Your phone must r
 $("rm-unpair").onclick=function(){ if(confirm("Unpair and disable remote sync?")){ postRemote("unpair"); setTimeout(refresh,500); } };
 $("set-sesswait").onchange=function(){ postCfg({notify_session_waiting:this.checked}); };
 $("rm-transcript").onchange=function(){ postCfg({remote_transcript:this.checked}); };
+$("rm-accept").onchange=function(){ postCfg({remote_accept_prompts:this.checked}); };
 </script>
 </body>
 </html>"""
@@ -3298,6 +3377,25 @@ class TrayApp:
             self._remote_last_ok = False
             log("remote: sync error:\n" + traceback.format_exc())
 
+    def _handle_remote_command(self) -> None:
+        """ARMED-only: pull one phone-sent prompt, run it restricted (plan + read-only),
+        and push the reply back. Off unless `remote_accept_prompts` is on."""
+        try:
+            cmd = remote_get_command(self.cfg)
+            if not isinstance(cmd, dict) or cmd.get("type") != "prompt":
+                return
+            remote_clear_command(self.cfg)        # consume first so it can't re-run
+            text = (cmd.get("text") or "").strip()
+            if not text:
+                return
+            cwd = cmd.get("cwd") or self._cwd or None
+            log(f"remote prompt from phone: {text[:80]!r}")
+            notify("Phone prompt", text[:90])
+            reply = run_remote_prompt(text, cwd)
+            remote_push(self.cfg, "Claude replied", reply[:400], "remote-reply")
+        except Exception:
+            log("remote command failed:\n" + traceback.format_exc())
+
     def _remote_push(self, title: str, msg: str) -> None:
         if not self._remote_on():
             return
@@ -3618,7 +3716,7 @@ class TrayApp:
                 snap["ui"] = {k: self.cfg.get(k) for k in
                               ("bar_fields", "bar_opacity", "bar_show_refresh",
                                "show_widget_on_start", "show_bar_on_start", "status_components",
-                               "notify_session_waiting", "remote_transcript")}
+                               "notify_session_waiting", "remote_transcript", "remote_accept_prompts")}
                 snap["config_epoch"] = self._config_epoch
                 snap["overlays_alive"] = {"widget": self._widget_alive(), "bar": self._bar_alive()}
                 snap["remote"] = {"enabled": bool(self.cfg.get("remote_enabled")),
@@ -3636,6 +3734,9 @@ class TrayApp:
                     if now - self._last_remote_sync >= iv:
                         self._last_remote_sync = now
                         threading.Thread(target=self._remote_sync_now, args=(snap,), daemon=True).start()
+                    # ARMED: also pull + run any phone-sent prompt (restricted), off-thread.
+                    if self.cfg.get("remote_accept_prompts"):
+                        threading.Thread(target=self._handle_remote_command, daemon=True).start()
                 # Fold newly-written session bytes into lifetime totals. Runs after
                 # the live snapshot is published so the first (full-history) backfill
                 # never delays first paint; the result lands in the next snapshot.

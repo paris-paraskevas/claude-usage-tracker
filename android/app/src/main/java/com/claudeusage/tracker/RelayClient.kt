@@ -46,4 +46,19 @@ class RelayClient(private val p: Pairing) {
             .build()
         runCatching { http.newCall(req).execute().use { it.isSuccessful } }.getOrDefault(false)
     }
+
+    /** Seal {type:"prompt", text} with the pairing key and enqueue it on the relay for the
+     *  desktop to run (if armed). Returns true on success. */
+    suspend fun sendCommand(text: String): Boolean = withContext(Dispatchers.IO) {
+        val cmd = JSONObject().put("type", "prompt").put("text", text).toString()
+        val sealed = Crypto.sealString(p.e2eeKeyB64, cmd) ?: return@withContext false
+        val payload = JSONObject().put("v", 1).put("nonce", sealed.first).put("ct", sealed.second)
+            .put("ts", System.currentTimeMillis() / 1000).toString()
+        val req = Request.Builder()
+            .url("${base()}/command")
+            .header("Authorization", "Bearer ${p.readToken}")
+            .put(payload.toRequestBody("application/json".toMediaType()))
+            .build()
+        runCatching { http.newCall(req).execute().use { it.isSuccessful } }.getOrDefault(false)
+    }
 }

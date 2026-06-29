@@ -32,7 +32,7 @@ async function handle(request, env, ctx) {
   }
 
   // /v1/acct/{accountId}/{resource}
-  const m = url.pathname.match(/^\/v1\/acct\/([A-Za-z0-9_-]{8,64})\/(snapshot|push-token|push)$/);
+  const m = url.pathname.match(/^\/v1\/acct\/([A-Za-z0-9_-]{8,64})\/(snapshot|push-token|push|command)$/);
   if (!m) return cors(json({ error: "not_found" }, 404));
   const accountId = m[1];
   const resource = m[2];
@@ -117,6 +117,27 @@ async function handle(request, env, ctx) {
       await env.KV.put(setKey, JSON.stringify(left), { expirationTtl: SNAPSHOT_TTL_S });
     }
     return cors(json({ sent }));
+  }
+
+  // Phone -> desktop command channel (E2EE blob; e.g. a prompt to run). The phone PUTs a
+  // command, the desktop GETs then DELETEs it. One pending command at a time; 5-min TTL.
+  if (resource === "command") {
+    const key = `cmd:${accountId}`;
+    if (method === "PUT") {
+      const blob = await readBlob(request);
+      if (!blob) return cors(json({ error: "bad_blob" }, 400));
+      await env.KV.put(key, JSON.stringify(blob), { expirationTtl: 300 });
+      return cors(new Response(null, { status: 204 }));
+    }
+    if (method === "GET") {
+      const v = await env.KV.get(key);
+      if (!v) return cors(new Response(null, { status: 204 }));
+      return cors(new Response(v, { status: 200, headers: { "content-type": "application/json" } }));
+    }
+    if (method === "DELETE") {
+      await env.KV.delete(key);
+      return cors(new Response(null, { status: 204 }));
+    }
   }
 
   return cors(json({ error: "method_not_allowed" }, 405));
