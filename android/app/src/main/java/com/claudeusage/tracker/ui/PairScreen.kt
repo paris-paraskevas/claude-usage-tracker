@@ -53,7 +53,7 @@ fun PairScreen(onPaired: () -> Unit) {
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text("Claude Usage", color = Ink, fontSize = 26.sp)
+        Text("Usage Tracker for Claude", color = Ink, fontSize = 24.sp, textAlign = TextAlign.Center)
         Text("Track your plan limits on your phone", color = Dim, fontSize = 14.sp,
             textAlign = TextAlign.Center, modifier = Modifier.padding(top = 6.dp))
         Text(
@@ -100,5 +100,10 @@ fun PairScreen(onPaired: () -> Unit) {
             Text(it, color = hexColor("#d4694f"), fontSize = 13.sp,
                 modifier = Modifier.padding(top = 16.dp))
         }
+        Text(
+            "Unofficial · not affiliated with Anthropic. \"Claude\" and \"Claude Code\" are trademarks of Anthropic.",
+            color = Faint, fontSize = 11.sp, textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 28.dp),
+        )
     }
 }
