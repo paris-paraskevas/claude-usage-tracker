@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.27"
+__version__ = "0.1.28"
 
 
 def _data_dir() -> Path:
@@ -128,7 +128,7 @@ DEFAULT_CONFIG = {
     "remote_enabled": False,                    # opt-in: relay an E2EE snapshot to your phone
     "remote_relay_url": "https://claude-usage-relay.businessofzeus.workers.dev",  # default hosted relay; override in Settings
     "remote_sync_seconds": 60,                  # how often to push the snapshot to the relay
-    "notify_session_waiting": False,            # opt-in: toast/push when a Claude Code session goes idle awaiting you
+    "notify_session_waiting": False,            # opt-in: toast/push when a Claude Code session finishes a turn awaiting you
 }
 
 # Settings the dashboard/settings UI may change at runtime (allowlist for POST /api/config).
@@ -1186,8 +1186,13 @@ def make_icon_image(windows: dict, error: bool = False):
                             fill=(255, 255, 255, 26), outline=(255, 255, 255, 100), width=2)
         if pct > 0:
             ytop = bot - (bot - top) * pct / 100.0
-            box = [x0 + 2, max(top + 2, ytop), x1 - 2, bot - 2]
-            if box[3] - box[1] >= 8:
+            y1 = bot - 2
+            # Keep at least a 1px sliver for tiny non-zero pct (just after a window
+            # reset) and never let the top dip below the bottom — otherwise Pillow
+            # raises "y1 must be greater than or equal to y0" and the icon stops updating.
+            y0 = min(max(top + 2, ytop), y1 - 1)
+            box = [x0 + 2, y0, x1 - 2, y1]
+            if y1 - y0 >= 8:
                 d.rounded_rectangle(box, radius=3, fill=usage_rgba(pct))
             else:
                 d.rectangle(box, fill=usage_rgba(pct))
@@ -1875,8 +1880,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="card panel">
       <div class="ptitle">Alerts</div>
       <div class="setrow"><span class="setlbl">Session waiting</span>
-        <label class="chk"><input type="checkbox" id="set-sesswait"> notify me (desktop + phone) when a session is awaiting your response</label></div>
-      <div class="csub" style="margin-top:6px">Installs a Claude Code idle hook in <code>~/.claude/settings.json</code> (backed up; removable). Fires only after you've been idle.</div>
+        <label class="chk"><input type="checkbox" id="set-sesswait"> notify me (desktop + phone) every time Claude finishes and is waiting for me</label></div>
+      <div class="csub" style="margin-top:6px">Off by default. Installs a Claude Code <b>Stop</b> hook in <code>~/.claude/settings.json</code> (backed up; removable) that fires the moment Claude finishes a turn — so you get pinged on your phone the instant a session needs you.</div>
     </div>
     <div class="card panel">
       <div class="ptitle">Minimal bar — fields shown</div>
@@ -3230,19 +3235,22 @@ class TrayApp:
                          daemon=True).start()
 
     def _on_session_waiting(self, payload: dict) -> None:
-        """A Claude Code session went idle awaiting the user (from the --session-hook).
-        Fire a toast (which the REMOTE_PUSH hook also mirrors to the phone), rate-limited
-        per session so repeated idle pings don't spam."""
+        """A Claude Code session finished its turn and is awaiting the user (Stop hook, via
+        --session-hook). Fire a toast (the REMOTE_PUSH hook also mirrors it to the phone),
+        lightly de-duped per session so a single turn can't double-fire."""
         if not self.cfg.get("notify_session_waiting", False):
             return
-        cwd = (payload or {}).get("cwd") or ""
-        sid = (payload or {}).get("session_id") or cwd or "session"
+        payload = payload or {}
+        if payload.get("stop_hook_active"):     # a stop-hook-induced continuation, not a real wait
+            return
+        cwd = payload.get("cwd") or ""
+        sid = payload.get("session_id") or cwd or "session"
         name = cwd.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1] or "session"
         now = time.time()
-        if now - self._session_waiting_last.get(sid, 0) < 90:
+        if now - self._session_waiting_last.get(sid, 0) < 10:   # collapse rapid duplicates only
             return
         self._session_waiting_last[sid] = now
-        notify("Claude is waiting", f"{name} · session awaiting your response")
+        notify("Claude is waiting", f"{name} · finished — your turn to respond")
 
     def _remote_action(self, action: str) -> None:
         """Driven by POST /api/remote: rotate the key, unpair, or force a sync."""
@@ -3625,6 +3633,7 @@ def run_session_hook() -> int:
     if not port:
         return 0
     body = json.dumps({"cwd": d.get("cwd"), "session_id": d.get("session_id"),
+                       "stop_hook_active": d.get("stop_hook_active"),
                        "notification_type": d.get("notification_type"),
                        "message": d.get("message")}).encode("utf-8")
     try:
@@ -3654,28 +3663,50 @@ def _save_claude_settings(data: dict) -> None:
         log(f"write claude settings failed: {exc}")
 
 
+def _strip_session_hook(groups) -> list:
+    """Return `groups` with our --session-hook command removed (drops now-empty groups)."""
+    out = []
+    for g in groups if isinstance(groups, list) else []:
+        if not isinstance(g, dict):
+            continue
+        kept = [h for h in (g.get("hooks") or [])
+                if not (isinstance(h, dict) and "--session-hook" in str(h.get("command", "")))]
+        if kept:
+            g = dict(g); g["hooks"] = kept; out.append(g)
+    return out
+
+
 def install_session_hook() -> bool:
-    """Merge our Notification[idle_prompt] hook into ~/.claude/settings.json (idempotent;
-    backs the file up first). Returns True on success."""
+    """Install our session-waiting hook on the **Stop** event in ~/.claude/settings.json —
+    Stop fires the moment Claude finishes a turn (i.e. it's now awaiting you), so you get
+    pinged every time. (The old Notification[idle_prompt] hook only fired after Claude Code's
+    own ~60s idle debounce, which is why pings were missed — we migrate off it here.)
+    Idempotent; backs the file up first. Returns True on success."""
     try:
         data = load_json(CLAUDE_SETTINGS, {})
         if not isinstance(data, dict):
             data = {}
         hooks = data.setdefault("hooks", {})
-        groups = hooks.setdefault("Notification", [])
-        if not isinstance(groups, list):
-            groups = hooks["Notification"] = []
         cmd = _session_hook_command()
+        # migrate: remove any prior Notification[idle_prompt] hook of ours
+        if isinstance(hooks.get("Notification"), list):
+            cleaned = _strip_session_hook(hooks["Notification"])
+            if cleaned:
+                hooks["Notification"] = cleaned
+            else:
+                hooks.pop("Notification", None)
+        groups = hooks.setdefault("Stop", [])
+        if not isinstance(groups, list):
+            groups = hooks["Stop"] = []
         for g in groups:                                   # already present -> refresh path
             for h in (g.get("hooks") or []) if isinstance(g, dict) else []:
                 if isinstance(h, dict) and "--session-hook" in str(h.get("command", "")):
                     h["command"] = cmd
                     _save_claude_settings(data)
                     return True
-        groups.append({"matcher": "idle_prompt",
-                       "hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
+        groups.append({"hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
         _save_claude_settings(data)
-        log("installed session-waiting hook")
+        log("installed session-waiting (Stop) hook")
         return True
     except Exception as exc:
         log(f"install session hook failed: {exc}")
@@ -3683,24 +3714,22 @@ def install_session_hook() -> bool:
 
 
 def remove_session_hook() -> None:
-    """Strip our hook back out of ~/.claude/settings.json, leaving any others intact."""
+    """Strip our hook out of ~/.claude/settings.json — from the Stop event and the legacy
+    Notification event — leaving any other hooks intact."""
     try:
         data = load_json(CLAUDE_SETTINGS, None)
         if not isinstance(data, dict):
             return
         hooks = data.get("hooks")
-        if not isinstance(hooks, dict) or not isinstance(hooks.get("Notification"), list):
+        if not isinstance(hooks, dict):
             return
-        out = []
-        for g in hooks["Notification"]:
-            kept = [h for h in (g.get("hooks") or [])
-                    if not (isinstance(h, dict) and "--session-hook" in str(h.get("command", "")))]
-            if kept:
-                g = dict(g); g["hooks"] = kept; out.append(g)
-        if out:
-            hooks["Notification"] = out
-        else:
-            hooks.pop("Notification", None)
+        for event in ("Stop", "Notification"):
+            if isinstance(hooks.get(event), list):
+                cleaned = _strip_session_hook(hooks[event])
+                if cleaned:
+                    hooks[event] = cleaned
+                else:
+                    hooks.pop(event, None)
         if not hooks:
             data.pop("hooks", None)
         _save_claude_settings(data)
