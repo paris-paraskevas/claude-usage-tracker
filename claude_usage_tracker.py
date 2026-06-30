@@ -120,8 +120,6 @@ DEFAULT_CONFIG = {
     "bar_width": 340,
     "bar_height": 30,
     "bar_fields": ["dir", "ctx", "5h", "7d", "status"],   # which fields the HUD bar shows, in order
-    "bar_opacity": 85,                          # bar background opacity, 30-100 (%)
-    "bar_show_refresh": "hover",                # "hover" | "always" | "never"
     "status_check": True,                       # poll status.anthropic.com
     "status_interval_seconds": 300,
     "status_components": [],                    # component names to watch ([] = overall status)
@@ -135,8 +133,8 @@ DEFAULT_CONFIG = {
 
 # Settings the dashboard/settings UI may change at runtime (allowlist for POST /api/config).
 CONFIG_ALLOW = {
-    "show_widget_on_start", "show_bar_on_start", "bar_fields", "bar_opacity",
-    "bar_show_refresh", "widget_width", "widget_height", "bar_width", "bar_height",
+    "show_widget_on_start", "show_bar_on_start", "bar_fields",
+    "widget_width", "widget_height", "bar_width", "bar_height",
     "open_as_window", "predictive_alerts", "update_check", "danger_alerts",
     "status_check", "status_components", "remote_enabled", "remote_relay_url",
     "notify_session_waiting", "remote_transcript", "remote_accept_prompts",
@@ -343,14 +341,13 @@ def read_token() -> tuple[str | None, str]:
 
 class FetchResult:
     def __init__(self, ok, windows=None, extra=None, raw=None, error=None,
-                 token_state=TokenState.OK, retry_after=None):
+                 token_state=TokenState.OK):
         self.ok = ok
         self.windows = windows or {}     # key -> {"pct": float, "resets_at": datetime|None}
         self.extra = extra               # overage credits dict or None
         self.raw = raw
         self.error = error
         self.token_state = token_state
-        self.retry_after = retry_after   # seconds to back off (HTTP 429)
 
 
 def _coerce_pct(value) -> float | None:
@@ -462,11 +459,7 @@ def fetch_usage(timeout: int) -> FetchResult:
             return FetchResult(False, error=f"Auth rejected (HTTP {exc.code})",
                                token_state=TokenState.EXPIRED)
         if exc.code == 429:
-            try:
-                ra = int(exc.headers.get("retry-after", ""))
-            except (TypeError, ValueError):
-                ra = 300
-            return FetchResult(False, error="Rate limited by API (429)", retry_after=max(60, ra))
+            return FetchResult(False, error="Rate limited by API (429)")
         return FetchResult(False, error=f"HTTP {exc.code}")
     except Exception as exc:
         return FetchResult(False, error=f"{type(exc).__name__}: {exc}")
@@ -1224,12 +1217,6 @@ def read_transcripts(limit: int = 6, max_msgs: int = 30, max_chars: int = 2500) 
     return out
 
 
-def read_transcript(max_msgs: int = 40, max_chars: int = 4000) -> dict | None:
-    """The single most-recently-active conversation (back-compat for older phone builds)."""
-    ts = read_transcripts(limit=1, max_msgs=max_msgs, max_chars=max_chars)
-    return ts[0] if ts else None
-
-
 def build_snapshot(r: FetchResult, hist: dict, cfg: dict) -> dict:
     now_s = time.time()
     oauth = read_oauth()
@@ -1240,7 +1227,6 @@ def build_snapshot(r: FetchResult, hist: dict, cfg: dict) -> dict:
         "updated_at": int(now_s),
         "subscription": oauth.get("subscriptionType", ""),
         "account": read_account(),
-        "poll_interval": int(cfg.get("poll_interval_seconds", 60)),
         "windows": [],
         "extra": r.extra,
         "history": {},
@@ -1541,6 +1527,10 @@ def remote_get_command(cfg: dict):
             if r.status == 204:
                 return None
             blob = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 403:    # don't fail silently: the relay rejected our token
+            log("remote: command fetch got 403 — relay rejected our token (re-pair?)")
+        return None
     except Exception:
         return None
     return remote_decrypt(blob)
@@ -1554,6 +1544,20 @@ def remote_clear_command(cfg: dict) -> None:
 
 # Restricted tools for remotely-triggered prompts: read + research only, never edit/run.
 REMOTE_PROMPT_TOOLS = "Read,Glob,Grep,WebSearch,WebFetch"
+
+
+def _allowed_remote_cwd(requested: str | None, sessions_cache: dict | None,
+                        active: str | None) -> str | None:
+    """The directory a phone-sent prompt may run in. Honor the phone's requested `cwd` only if
+    it's a project we're already tracking (or the active session); otherwise fall back to the
+    active session. Stops a crafted command from pointing the read-only runner at an arbitrary
+    path (e.g. ~/.ssh) and exfiltrating it via the reply."""
+    allowed = {e.get("cwd") for e in (sessions_cache or {}).values() if e.get("cwd")}
+    if active:
+        allowed.add(active)
+    if requested and requested in allowed:
+        return requested
+    return active or None
 
 
 def run_remote_prompt(prompt: str, cwd: str | None = None, timeout: int = 180) -> str:
@@ -3028,25 +3032,6 @@ def run_overlay(port: int, kind: str = "panel") -> int:
                     except Exception:
                         pass
 
-            def resize(self, w, h):
-                try:
-                    webview.windows[0].resize(int(w), int(h))
-                except Exception:
-                    pass
-
-            def resize_fix(self, w, h, edge):  # resize from any edge: anchor the opposite side
-                try:
-                    from webview.window import FixPoint as F
-                    keep = {"n": F.SOUTH, "s": F.NORTH, "e": F.WEST, "w": F.EAST,
-                            "se": F.NORTH | F.WEST, "sw": F.NORTH | F.EAST,
-                            "ne": F.SOUTH | F.WEST, "nw": F.SOUTH | F.EAST}.get(edge, F.NORTH | F.WEST)
-                    webview.windows[0].resize(int(w), int(h), fix_point=keep)
-                except Exception:
-                    try:
-                        webview.windows[0].resize(int(w), int(h))
-                    except Exception:
-                        pass
-
             def save_size(self, w, h):  # remember size via the tray (single config writer)
                 kw, kh = ("bar_width", "bar_height") if bar else ("widget_width", "widget_height")
                 lo = (200, 30) if bar else (280, 150)
@@ -3437,8 +3422,12 @@ class TrayApp:
             log("remote: sync error:\n" + traceback.format_exc())
 
     def _handle_remote_command(self) -> None:
-        """ARMED-only: pull one phone-sent prompt, run it restricted (plan + read-only),
-        and push the reply back. Off unless `remote_accept_prompts` is on."""
+        """ARMED-only: pull one phone-sent prompt, run it restricted (read-only), and push the
+        reply back. Off unless `remote_accept_prompts` is on. The poll loop spawns this every
+        tick; a non-blocking lock ensures a second run can't start while one is still in flight
+        (otherwise a slow `claude -p` could overlap with the next tick's run)."""
+        if not self._remote_cmd_lock.acquire(blocking=False):
+            return
         try:
             cmd = remote_get_command(self.cfg)
             if not isinstance(cmd, dict) or cmd.get("type") != "prompt":
@@ -3447,13 +3436,15 @@ class TrayApp:
             text = (cmd.get("text") or "").strip()
             if not text:
                 return
-            cwd = cmd.get("cwd") or self._cwd or None
+            cwd = _allowed_remote_cwd(cmd.get("cwd"), self._sessions_cache, self._cwd)
             log(f"remote prompt from phone: {text[:80]!r}")
             notify("Phone prompt", text[:90])
             reply = run_remote_prompt(text, cwd)
             remote_push(self.cfg, "Claude replied", reply[:400], "remote-reply")
         except Exception:
             log("remote command failed:\n" + traceback.format_exc())
+        finally:
+            self._remote_cmd_lock.release()
 
     def _remote_push(self, title: str, msg: str) -> None:
         if not self._remote_on():
@@ -3676,6 +3667,7 @@ class TrayApp:
         self._alltime_cache = getattr(self, "_alltime_cache", load_json(ALLTIME_PATH, {}))
         self._context = getattr(self, "_context", None)
         self._cwd = getattr(self, "_cwd", None)
+        self._remote_cmd_lock = getattr(self, "_remote_cmd_lock", threading.Lock())
         self._verdict = getattr(self, "_verdict", "")
         self._update_available = getattr(self, "_update_available", None)
         self._update_url = getattr(self, "_update_url", None)
@@ -3773,7 +3765,7 @@ class TrayApp:
                 snap["update"] = {"available": self._update_available, "url": self._update_url}
                 snap["status"] = self._status
                 snap["ui"] = {k: self.cfg.get(k) for k in
-                              ("bar_fields", "bar_opacity", "bar_show_refresh",
+                              ("bar_fields",
                                "show_widget_on_start", "show_bar_on_start", "status_components",
                                "notify_session_waiting", "remote_transcript", "remote_accept_prompts")}
                 snap["config_epoch"] = self._config_epoch

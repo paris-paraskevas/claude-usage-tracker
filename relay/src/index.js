@@ -202,7 +202,7 @@ async function googleAccessToken(env) {
 }
 
 async function signJwt(claim, pem) {
-  const enc = (obj) => b64url(new TextEncoder().encode(JSON.stringify(obj)));
+  const enc = (obj) => b64urlBytes(new TextEncoder().encode(JSON.stringify(obj)));
   const head = enc({ alg: "RS256", typ: "JWT" });
   const body = enc(claim);
   const data = `${head}.${body}`;
@@ -252,9 +252,6 @@ function timingSafeEqual(a, b) {
   let r = 0;
   for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return r === 0;
-}
-function b64url(bytes) {
-  return b64urlBytes(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
 }
 function b64urlBytes(bytes) {
   let s = "";

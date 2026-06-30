@@ -32,7 +32,6 @@ data class Snap(
     val atPeak: String?,
     val favModel: String?,
     val transcripts: List<Transcript>,
-    val transcript: Transcript?,    // the active one (transcripts.firstOrNull()) — kept for convenience
 ) {
     companion object {
         fun parse(jsonStr: String): Snap {
@@ -110,7 +109,6 @@ data class Snap(
                 atPeak = at?.optString("peak_hour")?.takeIf { it.isNotBlank() && it != "null" },
                 favModel = period?.optString("fav_model")?.takeIf { it.isNotBlank() && it != "null" },
                 transcripts = transcripts,
-                transcript = transcripts.firstOrNull(),
             )
         }
 
