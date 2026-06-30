@@ -1,6 +1,9 @@
 package com.claudeusage.tracker.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -106,8 +109,12 @@ fun DashboardScreen(onUnpair: () -> Unit) {
 
     val reload: suspend () -> Unit = reload@{
         val p = Prefs.active(ctx) ?: return@reload          // always the currently-active account
+        val reqId = p.accountId
         try {
             val js = RelayClient(p).fetchSnapshot()
+            // If the user switched accounts while this request was in flight, drop the result so
+            // the previous account's data can't bleed into the now-active one.
+            if (Prefs.activeId(ctx) != reqId) return@reload
             if (js == null) {
                 error = null                                // not synced yet — show the waiting state
             } else {
@@ -123,6 +130,7 @@ fun DashboardScreen(onUnpair: () -> Unit) {
                 updateLockNotification(ctx)
             }
         } catch (e: Exception) {
+            if (Prefs.activeId(ctx) != reqId) return@reload  // switched mid-flight — ignore this account's error
             error = e.message ?: "Couldn't reach the relay"
         }
     }
@@ -152,9 +160,20 @@ fun DashboardScreen(onUnpair: () -> Unit) {
         if (accounts.isEmpty()) onUnpair() else { snap = null; error = null; scope.launch { reload() } }
     }
 
-    // Poll fast until the first snapshot lands, then settle. 1s ticker drives countdowns.
-    LaunchedEffect(Unit) { while (true) { reload(); delay(if (snap == null) 5_000L else 20_000L) } }
-    LaunchedEffect(Unit) { while (true) { delay(1_000); now = System.currentTimeMillis() } }
+    // Poll fast until the first snapshot lands, then settle; the 1s ticker drives countdowns.
+    // Both are gated to STARTED so they pause when the app is backgrounded (no battery/network
+    // drain off-screen — the WorkManager job keeps the widget fresh meanwhile).
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(Unit) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) { reload(); delay(if (snap == null) 5_000L else 20_000L) }
+        }
+    }
+    LaunchedEffect(Unit) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) { delay(1_000); now = System.currentTimeMillis() }
+        }
+    }
 
     val s = snap
     if (s == null) {
@@ -284,7 +303,7 @@ private fun SessionsPage(s: Snap, inner: PaddingValues) {
 private fun ChatPage(s: Snap, inner: PaddingValues, chatSel: String?, onChatSel: (String?) -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
-    val pairing = remember { Prefs.active(ctx) }
+    val pairing = remember(Prefs.activeId(ctx)) { Prefs.active(ctx) }   // re-read if the account switched
     var draft by remember { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
     var sent by remember { mutableStateOf(false) }
