@@ -571,6 +571,42 @@ def _parse_iso(s):
         return None
 
 
+def project_name(cwd: str | None, fallback: str) -> str:
+    """Platform-independent basename of a session's cwd (the cwd uses Windows '\\' even when a
+    log is scanned elsewhere); `fallback` when there's no usable cwd. The one place every
+    session-log reader derives a project name."""
+    if cwd:
+        base = cwd.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1]
+        if base:
+            return base
+    return fallback
+
+
+def _usage_of(o: dict) -> dict | None:
+    """The token-usage dict on a session-log record — under `message.usage` or top-level
+    `usage` — or None if absent/malformed."""
+    msg = o.get("message")
+    u = msg.get("usage") if isinstance(msg, dict) else o.get("usage")
+    return u if isinstance(u, dict) else None
+
+
+def _read_appended(path: Path, offset: int):
+    """Stream parsed JSON records appended to `path` since byte `offset`, skipping blank or
+    unparseable lines. Streams line-by-line (a first-run backfill can be hundreds of MB, so we
+    never materialize it). The caller handles stat/rotation and persists the new offset
+    (= the file size it read up to)."""
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        fh.seek(offset)
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except Exception:
+                continue
+
+
 def scan_sessions(cache: dict, now: float, window_s: int = 5 * 3600,
                   active_s: int = 600, top_n: int = 8):
     """Per-project Claude Code token usage over the last `window_s`, read
@@ -600,34 +636,25 @@ def scan_sessions(cache: dict, now: float, window_s: int = 5 * 3600,
             ent = {"size": 0, "mtime": 0, "cwd": ent.get("cwd"), "events": []}
         if st.st_size > ent["size"]:
             try:
-                with open(f, "r", encoding="utf-8", errors="replace") as fh:
-                    fh.seek(ent["size"])
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            o = json.loads(line)
-                        except Exception:
-                            continue
-                        if ent["cwd"] is None and isinstance(o.get("cwd"), str):
-                            ent["cwd"] = o["cwd"]
-                        msg = o.get("message")
-                        u = msg.get("usage") if isinstance(msg, dict) else o.get("usage")
-                        if isinstance(u, dict):
-                            inp = int(u.get("input_tokens", 0) or 0)
-                            out = int(u.get("output_tokens", 0) or 0)
-                            cc = int(u.get("cache_creation_input_tokens", 0) or 0)
-                            cr = int(u.get("cache_read_input_tokens", 0) or 0)
-                            ts = _parse_iso(o.get("timestamp")) or st.st_mtime
-                            # 5h burn excludes cheap cache-reads; context fill is the full prompt.
-                            tok = inp + out + cc
-                            if tok > 0:
-                                ent["events"].append((ts, tok))
-                            ctx = inp + cc + cr
-                            if ctx > 0:
-                                ent["ctx"], ent["ctx_ts"] = ctx, ts
-                                ent["max_ctx"] = max(ent.get("max_ctx", 0), ctx)
+                for o in _read_appended(f, ent["size"]):
+                    if ent["cwd"] is None and isinstance(o.get("cwd"), str):
+                        ent["cwd"] = o["cwd"]
+                    u = _usage_of(o)
+                    if not u:
+                        continue
+                    inp = int(u.get("input_tokens", 0) or 0)
+                    out = int(u.get("output_tokens", 0) or 0)
+                    cc = int(u.get("cache_creation_input_tokens", 0) or 0)
+                    cr = int(u.get("cache_read_input_tokens", 0) or 0)
+                    ts = _parse_iso(o.get("timestamp")) or st.st_mtime
+                    # 5h burn excludes cheap cache-reads; context fill is the full prompt.
+                    tok = inp + out + cc
+                    if tok > 0:
+                        ent["events"].append((ts, tok))
+                    ctx = inp + cc + cr
+                    if ctx > 0:
+                        ent["ctx"], ent["ctx_ts"] = ctx, ts
+                        ent["max_ctx"] = max(ent.get("max_ctx", 0), ctx)
                 ent["size"] = st.st_size
             except Exception:
                 pass
@@ -644,9 +671,7 @@ def scan_sessions(cache: dict, now: float, window_s: int = 5 * 3600,
         toks = sum(k for (_, k) in ent["events"])
         if toks <= 0:
             continue
-        cwd = ent.get("cwd")
-        # platform-independent basename (cwd uses Windows '\' even when scanned elsewhere)
-        name = cwd.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1] if cwd else Path(key).parent.name
+        name = project_name(ent.get("cwd"), Path(key).parent.name)
         a = agg.setdefault(name, {"name": name, "tokens": 0, "last": 0,
                                   "ctx": 0, "ctx_ts": 0, "max_ctx": 0})
         a["tokens"] += toks
@@ -764,51 +789,42 @@ def scan_all_time(cache: dict, now: float, top_n: int = 8, days: int = 30) -> di
             consumed = 0
         cwd = None
         try:
-            with open(f, "r", encoding="utf-8", errors="replace") as fh:
-                fh.seek(consumed)
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        o = json.loads(line)
-                    except Exception:
-                        continue
-                    if cwd is None and isinstance(o.get("cwd"), str):
-                        cwd = o["cwd"]
-                    msg = o.get("message")
-                    u = msg.get("usage") if isinstance(msg, dict) else o.get("usage")
-                    if not isinstance(u, dict):
-                        continue
-                    inp = int(u.get("input_tokens", 0) or 0)
-                    out = int(u.get("output_tokens", 0) or 0)
-                    cw = int(u.get("cache_creation_input_tokens", 0) or 0)
-                    cr = int(u.get("cache_read_input_tokens", 0) or 0)
-                    if inp == out == cw == cr == 0:
-                        continue
-                    model = pretty_model(msg.get("model") if isinstance(msg, dict) else None)
-                    name = cwd.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1] if cwd else Path(key).parent.name
-                    _acc(cache["models"], model, inp, out, cw, cr)
-                    _acc(cache["projects"], name, inp, out, cw, cr)
-                    ts = _parse_iso(o.get("timestamp"))
-                    if ts:
-                        dt = datetime.fromtimestamp(ts)
-                        ds = dt.strftime("%Y-%m-%d")
-                        _acc(cache["days"], ds, inp, out, cw, cr)
-                        dm = cache["day_models"].setdefault(ds, {})
-                        dr = dm.get(model)
-                        if dr is None:
-                            dr = dm[model] = {"in": 0, "out": 0, "cw": 0}
-                        dr["in"] += inp; dr["out"] += out; dr["cw"] += cw
-                        hk = str(dt.hour)
-                        cache["hours"][hk] = cache["hours"].get(hk, 0) + inp + out + cw
-                        sid = o.get("sessionId")
-                        if isinstance(sid, str):
-                            prev = cache["sessions"].get(sid, 0)
-                            if ts > prev:
-                                cache["sessions"][sid] = ts
-                        cache["first_ts"] = ts if cache["first_ts"] is None else min(cache["first_ts"], ts)
-                        cache["last_ts"] = ts if cache["last_ts"] is None else max(cache["last_ts"], ts)
+            for o in _read_appended(f, consumed):
+                if cwd is None and isinstance(o.get("cwd"), str):
+                    cwd = o["cwd"]
+                u = _usage_of(o)
+                if not u:
+                    continue
+                inp = int(u.get("input_tokens", 0) or 0)
+                out = int(u.get("output_tokens", 0) or 0)
+                cw = int(u.get("cache_creation_input_tokens", 0) or 0)
+                cr = int(u.get("cache_read_input_tokens", 0) or 0)
+                if inp == out == cw == cr == 0:
+                    continue
+                msg = o.get("message")
+                model = pretty_model(msg.get("model") if isinstance(msg, dict) else None)
+                name = project_name(cwd, Path(key).parent.name)
+                _acc(cache["models"], model, inp, out, cw, cr)
+                _acc(cache["projects"], name, inp, out, cw, cr)
+                ts = _parse_iso(o.get("timestamp"))
+                if ts:
+                    dt = datetime.fromtimestamp(ts)
+                    ds = dt.strftime("%Y-%m-%d")
+                    _acc(cache["days"], ds, inp, out, cw, cr)
+                    dm = cache["day_models"].setdefault(ds, {})
+                    dr = dm.get(model)
+                    if dr is None:
+                        dr = dm[model] = {"in": 0, "out": 0, "cw": 0}
+                    dr["in"] += inp; dr["out"] += out; dr["cw"] += cw
+                    hk = str(dt.hour)
+                    cache["hours"][hk] = cache["hours"].get(hk, 0) + inp + out + cw
+                    sid = o.get("sessionId")
+                    if isinstance(sid, str):
+                        prev = cache["sessions"].get(sid, 0)
+                        if ts > prev:
+                            cache["sessions"][sid] = ts
+                    cache["first_ts"] = ts if cache["first_ts"] is None else min(cache["first_ts"], ts)
+                    cache["last_ts"] = ts if cache["last_ts"] is None else max(cache["last_ts"], ts)
             files[key] = st.st_size
         except Exception:
             log("all-time scan error on a file:\n" + traceback.format_exc())
@@ -1183,7 +1199,7 @@ def _read_one_transcript(f: Path, max_msgs: int, max_chars: int,
         return None
     if not msgs:
         return None
-    name = cwd.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1] if cwd else f.parent.name
+    name = project_name(cwd, f.parent.name)
     return {"name": name, "cwd": cwd, "messages": msgs[-max_msgs:]}
 
 
@@ -1709,7 +1725,7 @@ def check_alerts(snap: dict, state: dict, cfg: dict) -> None:
     if isinstance(ctx, (int, float)) and not isinstance(ctx, bool):
         if ctx >= 90 and not al.get("context"):
             cwd = snap.get("cwd") or ""
-            name = cwd.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1] if cwd else "session"
+            name = project_name(cwd, "session")
             notify("Context almost full", f"{name} at {ctx:.0f}% — consider /compact")
             al["context"] = True
         elif ctx < 80:
@@ -3463,7 +3479,7 @@ class TrayApp:
             return
         cwd = payload.get("cwd") or ""
         sid = payload.get("session_id") or cwd or "session"
-        name = cwd.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1] or "session"
+        name = project_name(cwd, "session")
         now = time.time()
         if now - self._session_waiting_last.get(sid, 0) < 10:   # collapse rapid duplicates only
             return
