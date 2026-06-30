@@ -331,7 +331,7 @@ private fun ChatPage(s: Snap, inner: PaddingValues, chatSel: String?, onChatSel:
             }
             if (sent) {
                 Spacer(Modifier.height(6.dp))
-                Text("Sent — your desktop runs it if armed (planning / read-only). Reply appears here on the next sync.",
+                Text("Sent — your desktop continues this conversation (read-only) and the reply appears here on the next sync.",
                     color = Faint, fontSize = 11.sp, fontFamily = MONO)
             }
         }
@@ -355,7 +355,7 @@ private fun ChatPage(s: Snap, inner: PaddingValues, chatSel: String?, onChatSel:
                     if (txt.isEmpty() || pairing == null) return@Button
                     sending = true
                     scope.launch {
-                        val ok = RelayClient(pairing).sendCommand(txt, chosen?.cwd)
+                        val ok = RelayClient(pairing).sendCommand(txt, chosen?.cwd, chosen?.sessionId)
                         sending = false
                         if (ok) { sent = true; draft = "" }
                     }

@@ -315,8 +315,8 @@ def test_run_remote_prompt_nonhanging_readonly(monkeypatch):
         return FakeProc()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    out = m.run_remote_prompt("what does foo() do?", cwd=None)
-    assert out == "hi from claude"
+    reply, _sid = m.run_remote_prompt("what does foo() do?", cwd=None)
+    assert reply == "hi from claude"
 
     cmd = captured["cmd"]
     assert "plan" not in cmd                                    # the hang cause — gone
@@ -324,3 +324,36 @@ def test_run_remote_prompt_nonhanging_readonly(monkeypatch):
     assert "--bare" in cmd and "-p" in cmd
     assert m.REMOTE_PROMPT_TOOLS in cmd                         # still read-only
     assert captured["kwargs"].get("stdin") == subprocess.DEVNULL
+
+
+def test_run_remote_prompt_resume(monkeypatch):
+    """A phone prompt continues a SPECIFIC session: --resume <id> is passed, and the session_id
+    from the JSON result is returned so the conversation can keep going."""
+    import subprocess
+    monkeypatch.setattr(m, "_claude_cli", lambda: "claude")
+    captured = {}
+
+    class FakeProc:
+        stdout = '{"type":"result","result":"ok","session_id":"sess-123"}'
+        stderr = ""
+        returncode = 0
+
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (captured.update(cmd=cmd) or FakeProc()))
+    reply, sid = m.run_remote_prompt("continue", cwd=r"C:\Dev\foo", resume_id="sess-123")
+    assert reply == "ok" and sid == "sess-123"
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--resume") + 1] == "sess-123"         # resumed that exact session
+
+
+def test_read_transcripts_exposes_session_id(tmp_path, monkeypatch):
+    """Each mirrored conversation carries its session_id (the .jsonl stem) so the phone can
+    send it back to resume that exact session."""
+    monkeypatch.setattr(m, "PROJECTS_DIR", tmp_path)
+    d = tmp_path / "proj"; d.mkdir()
+    (d / "abc123.jsonl").write_text(
+        json.dumps({"cwd": r"C:\Dev\foo", "timestamp": "2026-06-30T10:00:00.000Z",
+                    "message": {"role": "user", "content": "hi"}}), encoding="utf-8")
+    ts = m.read_transcripts(limit=1)
+    assert ts and ts[0]["session_id"] == "abc123"
+    sid, cwd = m._latest_session_id(r"C:\Dev\foo")
+    assert sid == "abc123" and cwd == r"C:\Dev\foo"
