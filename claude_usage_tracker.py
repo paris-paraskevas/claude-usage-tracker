@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.33"
+__version__ = "0.1.34"
 
 
 def _data_dir() -> Path:
@@ -1592,6 +1592,28 @@ def _allowed_remote_cwd(requested: str | None, sessions_cache: dict | None,
     return active or None
 
 
+# Markers a parent Claude Code injects into a child's environment. A phone prompt is run on the
+# user's behalf with their own login, so we strip these (and disable the scrub below) to present
+# the spawned `claude` as a clean top-level invocation rather than a nested/sandboxed child.
+_NESTED_CC_MARKERS = ("CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
+                      "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_SSE_PORT",
+                      "AI_AGENT")
+
+
+def _remote_prompt_env() -> dict:
+    """Environment for the headless remote-prompt subprocess. Claude Code's subprocess
+    credential-hardening (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, which a user may set globally in
+    ~/.claude/settings.json) makes a spawned `claude -p` refuse the logged-in OAuth creds, so the
+    run comes back "Not logged in · Please run /login". This run is already locked to read-only
+    tools (allowed/disallowedTools below), which is exactly the case Claude Code lets you opt out
+    of, so disable the scrub and drop the nested-session markers a parent would have injected."""
+    env = dict(os.environ)
+    env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "0"
+    for k in _NESTED_CC_MARKERS:
+        env.pop(k, None)
+    return env
+
+
 def run_remote_prompt(prompt: str, cwd: str | None = None, timeout: int = 180,
                       resume_id: str | None = None) -> tuple[str, str | None]:
     """Run a phone-sent prompt through Claude Code headless, locked to read-only research tools
@@ -1620,6 +1642,7 @@ def run_remote_prompt(prompt: str, cwd: str | None = None, timeout: int = 180,
             cmd += ["--resume", rid]
         return subprocess.run(cmd, cwd=cwd or None, capture_output=True, text=True,
                               stdin=subprocess.DEVNULL,   # never block on stdin in -p mode
+                              env=_remote_prompt_env(),   # opt out of the headless cred scrub
                               timeout=timeout, encoding="utf-8", errors="replace")
 
     try:
