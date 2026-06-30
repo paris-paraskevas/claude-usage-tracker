@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-usage-tracker"
-version = "0.1.30"
+version = "0.1.31"
 description = "Windows tray widget + dashboard for Claude plan usage (5-hour & weekly limits)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,9 +23,14 @@ dependencies = [
     "Pillow>=10",
     "winotify>=1.1",
     "pywebview>=5.0",
+    # Remote/phone sync (E2EE + pairing QR) is now a headline feature, so its crypto deps
+    # ship by default — keeping them optional meant `pip install claude-usage-tracker` and the
+    # frozen installer both reported the feature "unavailable". See docs/REMOTE.md.
+    "PyNaCl>=1.5",
+    "qrcode>=7.0",
 ]
 
-# Optional: remote/phone sync (end-to-end encryption + pairing QR). See docs/REMOTE.md.
+# Back-compat alias: `claude-usage-tracker[remote]` still resolves (deps are now core).
 [project.optional-dependencies]
 remote = [
     "PyNaCl>=1.5",
