@@ -10,6 +10,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import android.content.Intent
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -26,6 +31,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    // A pairing parsed from a cutpair1: deep link, awaiting the user's explicit confirmation.
+    private val pendingPair = mutableStateOf<Pairing?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // targetSdk 35 forces edge-to-edge. Opt in explicitly and pin both bars to the
@@ -36,8 +44,7 @@ class MainActivity : ComponentActivity() {
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
         )
-        // Allow pairing via a cutpair1: deep link (in addition to scanning the QR).
-        intent?.dataString?.let { data -> Pairing.parse(data)?.let { Prefs.save(this, it) } }
+        capturePairLink(intent)   // a cutpair1: link only stages a pairing; the user confirms it
         // Keep the home-screen widget + (opt-in) lock-screen notification fresh.
         scheduleWidgetRefresh(this)
         refreshWidgetsNow(this)
@@ -64,9 +71,52 @@ class MainActivity : ComponentActivity() {
                 } else {
                     PairScreen(onPaired = { paired = true })
                 }
+
+                pendingPair.value?.let { p ->
+                    PairConfirmDialog(
+                        pairing = p,
+                        onConfirm = {
+                            Prefs.add(this@MainActivity, p)   // add + make active
+                            pendingPair.value = null
+                            paired = true
+                            registerFcmToken(this@MainActivity)
+                        },
+                        onDismiss = { pendingPair.value = null },
+                    )
+                }
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        capturePairLink(intent)
+    }
+
+    /** Stage a cutpair1: deep link for confirmation — never auto-pair. An untrusted link could
+     *  otherwise silently add an attacker's account and capture prompts sent from the Chat tab. */
+    private fun capturePairLink(intent: Intent?) {
+        intent?.dataString?.let { Pairing.parse(it) }?.let { pendingPair.value = it }
+    }
+}
+
+@Composable
+private fun PairConfirmDialog(pairing: Pairing, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    val host = pairing.url.substringAfter("://").substringBefore("/")
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Pair this device?") },
+        text = {
+            Text(
+                "This links a desktop at \"$host\". Its usage will sync here, and prompts you " +
+                    "send from the Chat tab will run on it. Only continue if you opened this from " +
+                    "your own desktop's pairing QR.",
+            )
+        },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Pair") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 /** Best-effort: send our FCM token to the relay so the desktop can push us alerts.
