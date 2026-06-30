@@ -29,6 +29,10 @@ data class Pairing(
                     readToken = o.getString("t"),
                     e2eeKeyB64 = o.getString("k"),
                 )
+                // Require HTTPS — the relay carries the bearer read-token, which would be
+                // sniffable over plain HTTP (the payload itself stays E2EE). The hosted relay is
+                // HTTPS; a self-hoster should front their relay with TLS.
+                if (!p.url.startsWith("https://")) return null
                 if (p.url.isBlank() || p.accountId.isBlank() || p.readToken.isBlank() || p.e2eeKeyB64.isBlank()) null else p
             } catch (e: Exception) {
                 null

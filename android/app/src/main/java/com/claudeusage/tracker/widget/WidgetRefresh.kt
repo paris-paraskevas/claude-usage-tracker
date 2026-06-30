@@ -22,17 +22,29 @@ import com.claudeusage.tracker.Prefs
 import com.claudeusage.tracker.R
 import com.claudeusage.tracker.RelayClient
 import com.claudeusage.tracker.Snap
+import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-/** Small on-device cache shared by the widget + the ongoing notification (no secrets — the
- *  pairing keys stay in [Prefs]'s EncryptedSharedPreferences; this only holds usage numbers). */
+/** Small on-device cache shared by the widget + the ongoing notification. Usage numbers only:
+ *  the mirrored conversation (transcripts) and the account email are stripped before caching
+ *  (see [stripSensitive]), and pairing keys live in [Prefs]'s EncryptedSharedPreferences — so
+ *  nothing sensitive sits in these plaintext prefs. */
 object WidgetData {
     private const val FILE = "cut_widget"
     private const val K_SNAP = "snap"
     private const val K_LOCK = "lockscreen"
 
     private fun sp(ctx: Context) = ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE)
-    fun saveSnap(ctx: Context, json: String) = sp(ctx).edit().putString(K_SNAP, json).apply()
+    fun saveSnap(ctx: Context, json: String) = sp(ctx).edit().putString(K_SNAP, stripSensitive(json)).apply()
+
+    /** The widget + lock-screen notification render only usage numbers, so drop the mirrored
+     *  conversation and the account email before this string lands in plaintext prefs. */
+    private fun stripSensitive(json: String): String = runCatching {
+        val o = JSONObject(json)
+        o.remove("transcripts"); o.remove("transcript")
+        o.optJSONObject("account")?.remove("email")
+        o.toString()
+    }.getOrDefault("{}")
     fun loadSnap(ctx: Context): String? = sp(ctx).getString(K_SNAP, null)
     fun lockscreen(ctx: Context): Boolean = sp(ctx).getBoolean(K_LOCK, false)
     fun setLockscreen(ctx: Context, on: Boolean) = sp(ctx).edit().putBoolean(K_LOCK, on).apply()
