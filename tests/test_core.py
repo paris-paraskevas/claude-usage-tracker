@@ -162,7 +162,7 @@ def test_read_transcript(tmp_path, monkeypatch):
     (proj / "s.jsonl").write_text("\n".join(lines), encoding="utf-8")
     monkeypatch.setattr(m, "PROJECTS_DIR", tmp_path)
 
-    t = m.read_transcript()
+    t = m.read_transcripts(limit=1)[0]
     assert t["name"] == "foo"
     assert [x["role"] for x in t["messages"]] == ["user", "assistant"]   # tool_result-only msg skipped
     assert t["messages"][0]["text"] == "hello claude"
@@ -246,7 +246,17 @@ def test_read_transcripts_lists_recent_conversations(tmp_path, monkeypatch):
     assert [t["name"] for t in ts] == ["projB", "projA"]        # newest first
     assert ts[0]["cwd"] == r"C:\Dev\projB"
     assert ts[0]["messages"][0]["text"] == "hello B"
-    assert m.read_transcript()["name"] == "projB"               # back-compat single reader
+
+
+def test_allowed_remote_cwd_blocks_arbitrary_paths():
+    """A phone-sent prompt may only run in a project we're already tracking (or the active
+    session); an arbitrary path is rejected and falls back to the active session."""
+    cache = {r"p\a.jsonl": {"cwd": r"C:\Dev\projA"}, r"p\b.jsonl": {"cwd": r"C:\Dev\projB"}}
+    active = r"C:\Dev\projA"
+    assert m._allowed_remote_cwd(r"C:\Dev\projB", cache, active) == r"C:\Dev\projB"  # tracked → ok
+    assert m._allowed_remote_cwd(r"C:\Users\me\.ssh", cache, active) == active        # arbitrary → active
+    assert m._allowed_remote_cwd(None, cache, active) == active                       # none → active
+    assert m._allowed_remote_cwd(r"C:\x", {}, None) is None                           # nothing known → None
 
 
 def test_run_remote_prompt_nonhanging_readonly(monkeypatch):
