@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.32"
+__version__ = "0.1.33"
 
 
 def _data_dir() -> Path:
@@ -1200,7 +1200,8 @@ def _read_one_transcript(f: Path, max_msgs: int, max_chars: int,
     if not msgs:
         return None
     name = project_name(cwd, f.parent.name)
-    return {"name": name, "cwd": cwd, "messages": msgs[-max_msgs:]}
+    # session_id = the .jsonl filename stem; the phone sends it back to resume THIS conversation.
+    return {"name": name, "cwd": cwd, "session_id": f.stem, "messages": msgs[-max_msgs:]}
 
 
 def read_transcripts(limit: int = 6, max_msgs: int = 30, max_chars: int = 2500) -> list[dict]:
@@ -1231,6 +1232,21 @@ def read_transcripts(limit: int = 6, max_msgs: int = 30, max_chars: int = 2500) 
             t["active"] = False
         out.append(t)
     return out
+
+
+def _latest_session_id(cwd: str | None = None) -> tuple[str | None, str | None]:
+    """(session_id, cwd) of the most-recently-active Claude Code session — optionally only those
+    whose recorded cwd matches `cwd`. Used to resume the session a phone prompt should continue
+    when the phone didn't name one. session_id is the .jsonl filename stem."""
+    try:
+        files = sorted(PROJECTS_DIR.glob("*/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except Exception:
+        return None, None
+    for f in files:
+        t = _read_one_transcript(f, max_msgs=1, max_chars=1)
+        if t and (cwd is None or t.get("cwd") == cwd):
+            return f.stem, t.get("cwd")
+    return None, None
 
 
 def build_snapshot(r: FetchResult, hist: dict, cfg: dict) -> dict:
@@ -1576,42 +1592,52 @@ def _allowed_remote_cwd(requested: str | None, sessions_cache: dict | None,
     return active or None
 
 
-def run_remote_prompt(prompt: str, cwd: str | None = None, timeout: int = 180) -> str:
-    """Run a phone-sent prompt through Claude Code headless, locked to read-only research
-    tools (no edits, no shell), in a FRESH session so it never disturbs the interactive one.
-    Returns the assistant's reply text (or a short error). The timeout is a hang safety-net.
+def run_remote_prompt(prompt: str, cwd: str | None = None, timeout: int = 180,
+                      resume_id: str | None = None) -> tuple[str, str | None]:
+    """Run a phone-sent prompt through Claude Code headless, locked to read-only research tools
+    (no edits, no shell). Returns (reply_text, session_id). Pass the previous reply's session_id
+    as `resume_id` to continue the SAME conversation — so the phone thread is a real discussion
+    with memory, not isolated one-offs; a stale/failed resume falls back to a fresh session.
 
-    Permission mode is `dontAsk`, NOT `plan`: in headless `-p` mode plan mode ends by asking
-    the user to approve the plan, and with no TTY to answer it just hangs until the timeout
-    (the bug behind the "prompt took too long" replies). `dontAsk` auto-denies anything not in
-    the allowlist instead of prompting, so the run stays read-only AND non-interactive. `--bare`
-    skips hooks/plugins/CLAUDE.md so a remote prompt can't trigger the tracker's own Stop hook
-    or other side effects."""
+    Permission mode is `dontAsk`, NOT `plan`: in headless `-p` mode plan mode ends by asking the
+    user to approve the plan, and with no TTY it just hangs until the timeout (the old "prompt
+    took too long"). `--bare` skips hooks/plugins/CLAUDE.md so a remote prompt can't trigger the
+    tracker's own Stop hook."""
     cli = _claude_cli()
     if not cli:
-        return "Claude Code CLI not found on this machine."
+        return "Claude Code CLI not found on this machine.", None
     prompt = (prompt or "").strip()
     if not prompt:
-        return ""
-    cmd = [cli, "-p", prompt, "--output-format", "json", "--bare",
-           "--permission-mode", "dontAsk",
-           "--allowedTools", REMOTE_PROMPT_TOOLS,
-           "--disallowedTools", "Edit,Write,Bash,NotebookEdit"]
-    try:
-        import subprocess
-        proc = subprocess.run(cmd, cwd=cwd or None, capture_output=True, text=True,
-                              stdin=subprocess.DEVNULL,   # never block waiting on stdin in -p mode
+        return "", resume_id
+    import subprocess
+
+    def _run(rid):
+        cmd = [cli, "-p", prompt, "--output-format", "json", "--bare",
+               "--permission-mode", "dontAsk",
+               "--allowedTools", REMOTE_PROMPT_TOOLS,
+               "--disallowedTools", "Edit,Write,Bash,NotebookEdit"]
+        if rid:
+            cmd += ["--resume", rid]
+        return subprocess.run(cmd, cwd=cwd or None, capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL,   # never block on stdin in -p mode
                               timeout=timeout, encoding="utf-8", errors="replace")
+
+    try:
+        proc = _run(resume_id)
+        if resume_id and proc.returncode != 0:   # stale/unknown session -> retry in a fresh one
+            log("remote prompt: --resume failed, starting a fresh session")
+            proc = _run(None)
     except subprocess.TimeoutExpired:
-        return "Timed out — the prompt took too long."
+        return "Timed out — the prompt took too long.", resume_id
     except Exception as exc:
-        return f"Couldn't run Claude: {exc}"
+        return f"Couldn't run Claude: {exc}", resume_id
     out = (proc.stdout or "").strip()
     try:
         data = json.loads(out)
-        return (str(data.get("result") or data.get("text") or out))[:6000]
+        reply = str(data.get("result") or data.get("text") or out)[:6000]
+        return reply, (data.get("session_id") or resume_id)
     except Exception:
-        return (out or (proc.stderr or "").strip() or "No output.")[:6000]
+        return (out or (proc.stderr or "").strip() or "No output.")[:6000], resume_id
 
 
 class RemoteSync:
@@ -1665,11 +1691,24 @@ class RemoteSync:
             text = (cmd.get("text") or "").strip()
             if not text:
                 return
-            cwd = _allowed_remote_cwd(cmd.get("cwd"), sessions_cache, active_cwd)
-            log(f"remote prompt from phone: {text[:80]!r}")
+            req_cwd = _allowed_remote_cwd(cmd.get("cwd"), sessions_cache, active_cwd)
+            # Resume the session the phone targeted (or the most-recent one) so the reply has that
+            # conversation's full context and is appended back into its own transcript — i.e. it
+            # continues your real session, not a separate bot thread.
+            sid = cmd.get("session_id")
+            run_cwd = req_cwd
+            if not sid:
+                sid, run_cwd = _latest_session_id(req_cwd)
+            if sid:                                         # never resume a session a live terminal
+                sf = next(PROJECTS_DIR.glob(f"*/{sid}.jsonl"), None)   # is actively writing — that
+                if sf and (time.time() - sf.stat().st_mtime) < 20:    # would risk a torn .jsonl
+                    log(f"target session {sid} looks active; running fresh to avoid a concurrent write")
+                    sid = None
+            log(f"remote prompt from phone -> session {sid or 'new'}: {text[:80]!r}")
             notify("Phone prompt", text[:90])
-            reply = run_remote_prompt(text, cwd)
+            reply, _ = run_remote_prompt(text, run_cwd or req_cwd, resume_id=sid)
             remote_push(cfg, "Claude replied", reply[:400], "remote-reply")
+            self.reset_throttle()                           # re-mirror the updated session promptly
         except Exception:
             log("remote command failed:\n" + traceback.format_exc())
         finally:

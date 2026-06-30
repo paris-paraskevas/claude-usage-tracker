@@ -6,7 +6,7 @@ import org.json.JSONObject
 data class Win(val key: String, val label: String, val pct: Double, val resetsAt: Long?, val color: String)
 data class Sess(val name: String, val pct: Double, val tokens: Long, val active: Boolean)
 data class Msg(val role: String, val text: String, val ts: Long?)
-data class Transcript(val name: String, val cwd: String?, val active: Boolean, val messages: List<Msg>)
+data class Transcript(val name: String, val cwd: String?, val sessionId: String?, val active: Boolean, val messages: List<Msg>)
 
 /** A parsed, UI-ready view of the desktop snapshot. Parsing is defensive — any field
  *  may be missing on an early/stale snapshot. */
@@ -126,6 +126,7 @@ data class Snap(
             return Transcript(
                 name = tj.optString("name"),
                 cwd = tj.optString("cwd").takeIf { it.isNotBlank() && it != "null" },
+                sessionId = tj.optString("session_id").takeIf { it.isNotBlank() && it != "null" },
                 active = tj.optBoolean("active", false),
                 messages = ms,
             )

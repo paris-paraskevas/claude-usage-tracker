@@ -47,12 +47,16 @@ class RelayClient(private val p: Pairing) {
         runCatching { http.newCall(req).execute().use { it.isSuccessful } }.getOrDefault(false)
     }
 
-    /** Seal {type:"prompt", text, cwd?} with the pairing key and enqueue it on the relay for
-     *  the desktop to run (if armed). `cwd` picks which project the prompt runs in (the chosen
-     *  session); null lets the desktop use the active one. Returns true on success. */
-    suspend fun sendCommand(text: String, cwd: String? = null): Boolean = withContext(Dispatchers.IO) {
+    /** Seal {type:"prompt", text, cwd?, session_id?} with the pairing key and enqueue it on the
+     *  relay for the desktop to run (if armed). `sessionId` (+ `cwd`) tells the desktop which
+     *  conversation to RESUME, so the reply has that session's full context and lands back in it;
+     *  null lets the desktop use the most-recent session. Returns true on success. */
+    suspend fun sendCommand(text: String, cwd: String? = null, sessionId: String? = null): Boolean = withContext(Dispatchers.IO) {
         val cmd = JSONObject().put("type", "prompt").put("text", text)
-            .apply { if (!cwd.isNullOrBlank()) put("cwd", cwd) }.toString()
+            .apply {
+                if (!cwd.isNullOrBlank()) put("cwd", cwd)
+                if (!sessionId.isNullOrBlank()) put("session_id", sessionId)
+            }.toString()
         val sealed = Crypto.sealString(p.e2eeKeyB64, cmd) ?: return@withContext false
         val payload = JSONObject().put("v", 1).put("nonce", sealed.first).put("ct", sealed.second)
             .put("ts", System.currentTimeMillis() / 1000).toString()
