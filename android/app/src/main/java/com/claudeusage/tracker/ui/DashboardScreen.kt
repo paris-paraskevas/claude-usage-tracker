@@ -68,10 +68,17 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.glance.appwidget.updateAll
@@ -417,7 +424,119 @@ private fun MsgBubble(m: Msg) {
             Text(if (user) "You" else "Claude", color = if (user) Accent else Dim,
                 fontSize = 11.sp, fontWeight = FontWeight.SemiBold, fontFamily = MONO)
             Spacer(Modifier.height(4.dp))
-            Text(m.text, color = Ink, fontSize = 14.sp)
+            MarkdownText(m.text, Ink)
+        }
+    }
+}
+
+/** Minimal, dependency-free Markdown renderer for the mirrored conversation. Claude's replies are
+ *  Markdown; without this the bubbles showed raw "**bold**", "# heading", "- item", `code`. Covers
+ *  the common subset — fenced code blocks, ATX headings, bullet/numbered lists, blockquotes, and
+ *  inline **bold** / *italic* / `code` / [links]. Anything unrecognized stays literal. */
+@Composable
+private fun MarkdownText(text: String, color: Color) {
+    val lines = text.split("\n")
+    Column(Modifier.fillMaxWidth()) {
+        var i = 0
+        while (i < lines.size) {
+            val raw = lines[i]
+            val line = raw.trimStart()
+            if (line.startsWith("```")) {
+                val code = StringBuilder()
+                i++
+                while (i < lines.size && !lines[i].trimStart().startsWith("```")) {
+                    code.append(lines[i]).append('\n'); i++
+                }
+                i++  // consume the closing fence
+                CodeBlock(code.toString().trimEnd('\n'))
+                continue
+            }
+            val ordered = ORDERED.find(line)
+            when {
+                line.startsWith("### ") -> MdLine(inlineMd(line.removePrefix("### ")), color, 15.sp, FontWeight.SemiBold)
+                line.startsWith("## ") -> MdLine(inlineMd(line.removePrefix("## ")), color, 17.sp, FontWeight.Bold)
+                line.startsWith("# ") -> MdLine(inlineMd(line.removePrefix("# ")), color, 19.sp, FontWeight.Bold)
+                line.startsWith("> ") -> MdLine(inlineMd(line.removePrefix("> ")), Dim, 14.sp)
+                line.startsWith("- ") || line.startsWith("* ") || line.startsWith("+ ") ->
+                    BulletLine("•", inlineMd(line.drop(2)), color)
+                ordered != null ->
+                    BulletLine(ordered.groupValues[1] + ".", inlineMd(line.removePrefix(ordered.value)), color)
+                raw.isBlank() -> Spacer(Modifier.height(6.dp))
+                else -> MdLine(inlineMd(raw), color, 14.sp)
+            }
+            i++
+        }
+    }
+}
+
+private val ORDERED = Regex("^(\\d+)\\. ")
+
+@Composable
+private fun MdLine(text: AnnotatedString, color: Color, size: TextUnit, weight: FontWeight? = null) {
+    Text(text, color = color, fontSize = size, fontWeight = weight, lineHeight = 20.sp,
+        modifier = Modifier.padding(vertical = 1.dp))
+}
+
+@Composable
+private fun BulletLine(marker: String, text: AnnotatedString, color: Color) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
+        Text("$marker ", color = Dim, fontSize = 14.sp, fontFamily = MONO)
+        Text(text, color = color, fontSize = 14.sp, lineHeight = 20.sp, modifier = Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun CodeBlock(code: String) {
+    Text(
+        code, color = Ink, fontSize = 13.sp, fontFamily = MONO, lineHeight = 18.sp,
+        modifier = Modifier.padding(vertical = 4.dp).fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp)).background(Bg).padding(10.dp),
+    )
+}
+
+/** Inline Markdown → styled text: **bold**, *italic*, `code`, [text](url). Underscores are left
+ *  literal on purpose so snake_case / file_names aren't mangled. Unbalanced markers stay literal. */
+private fun inlineMd(src: String): AnnotatedString = buildAnnotatedString {
+    var i = 0
+    while (i < src.length) {
+        val c = src[i]
+        when {
+            c == '*' && i + 1 < src.length && src[i + 1] == '*' -> {
+                val end = src.indexOf("**", i + 2)
+                if (end > i + 1) {
+                    withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(src.substring(i + 2, end)) }
+                    i = end + 2
+                } else { append(c); i++ }
+            }
+            c == '*' -> {
+                val end = src.indexOf('*', i + 1)
+                if (end > i) {
+                    withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(src.substring(i + 1, end)) }
+                    i = end + 1
+                } else { append(c); i++ }
+            }
+            c == '`' -> {
+                val end = src.indexOf('`', i + 1)
+                if (end > i) {
+                    withStyle(SpanStyle(fontFamily = MONO, background = Panel2, color = Ink)) {
+                        append(" " + src.substring(i + 1, end) + " ")
+                    }
+                    i = end + 1
+                } else { append(c); i++ }
+            }
+            c == '[' -> {
+                val close = src.indexOf(']', i + 1)
+                if (close > i && close + 1 < src.length && src[close + 1] == '(') {
+                    val urlEnd = src.indexOf(')', close + 2)
+                    if (urlEnd > close) {
+                        withStyle(SpanStyle(color = Accent, textDecoration = TextDecoration.Underline)) {
+                            append(src.substring(i + 1, close))
+                        }
+                        i = urlEnd + 1
+                    } else { append(c); i++ }
+                } else { append(c); i++ }
+            }
+            else -> { append(c); i++ }
         }
     }
 }

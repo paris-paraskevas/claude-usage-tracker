@@ -28,8 +28,8 @@ android {
         applicationId = "com.claudeusage.tracker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 12
-        versionName = "0.1.8"
+        versionCode = 13
+        versionName = "0.1.9"
     }
     signingConfigs {
         if (keystorePropsFile.exists()) create("release") {
