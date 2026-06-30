@@ -259,6 +259,16 @@ def test_allowed_remote_cwd_blocks_arbitrary_paths():
     assert m._allowed_remote_cwd(r"C:\x", {}, None) is None                           # nothing known → None
 
 
+def test_project_name():
+    """The shared basename helper now feeds 6 call sites — lock its edge cases."""
+    assert m.project_name(r"C:\Dev\foo", "fb") == "foo"          # Windows path
+    assert m.project_name("/home/u/bar", "fb") == "bar"          # POSIX path
+    assert m.project_name("C:\\Dev\\foo\\", "fb") == "foo"       # trailing separator
+    assert m.project_name("", "fb") == "fb"                       # no cwd → fallback
+    assert m.project_name(None, "fb") == "fb"
+    assert m.project_name("/", "sess") == "sess"                  # empty basename → fallback
+
+
 def test_run_remote_prompt_nonhanging_readonly(monkeypatch):
     """Bug 2 ("prompt took too long"): headless plan mode hangs waiting for plan approval.
     The command must use dontAsk (auto-deny, never prompt) + --bare, keep the read-only
