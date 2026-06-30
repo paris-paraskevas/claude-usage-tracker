@@ -3144,6 +3144,20 @@ def _claude_cli():
     return None
 
 
+# Address-safe characters for a sign-in email. Anything else (quotes, spaces, &, |, <, >, ^…)
+# is rejected so a value from the localhost /api/login endpoint can't inject shell metacharacters
+# into the visible `cmd /k` launch path in launch_login().
+_EMAIL_SAFE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@._%+-")
+
+
+def _safe_login_email(email: str | None) -> str | None:
+    """An address-safe email, or None. Rejects anything containing shell metacharacters so a
+    value from the localhost /api/login endpoint can't inject into the visible `cmd /k` path."""
+    if email and not (set(email) - _EMAIL_SAFE_CHARS) and "@" in email:
+        return email
+    return None
+
+
 def launch_login(email: str | None = None, visible: bool = False) -> bool:
     """Trigger Claude Code's own sign-in (`claude auth login`), which opens claude.ai in
     your browser. By default we launch it WITHOUT a console window (you only see the
@@ -3155,6 +3169,7 @@ def launch_login(email: str | None = None, visible: bool = False) -> bool:
         notify("Claude Code not found",
                "Install Claude Code, then sign in — or run `claude auth login` in a terminal.")
         return False
+    email = _safe_login_email(email)      # injection guard (the visible path shells out via cmd /k)
     args = [exe, "auth", "login"] + (["--email", email] if email else [])
     try:
         if os.name == "nt" and visible:
