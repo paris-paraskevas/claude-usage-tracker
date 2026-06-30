@@ -1614,6 +1614,73 @@ def run_remote_prompt(prompt: str, cwd: str | None = None, timeout: int = 180) -
         return (out or (proc.stderr or "").strip() or "No output.")[:6000]
 
 
+class RemoteSync:
+    """Owns the opt-in phone-relay side effects and their shared state, so the poll loop
+    doesn't have to: throttled snapshot sync, the armed prompt runner (with an in-flight guard
+    so a slow `claude -p` can't overlap the next tick), and push. Pulled out of TrayApp so the
+    throttle/in-flight decisions are unit-testable in isolation."""
+
+    def __init__(self):
+        self._last_sync = 0.0
+        self._cmd_lock = threading.Lock()
+        self.last_ok: bool | None = None        # surfaced in the snapshot's remote.last_sync_ok
+
+    @staticmethod
+    def enabled(cfg: dict) -> bool:
+        return bool(cfg.get("remote_enabled") and cfg.get("remote_relay_url") and remote_available())
+
+    def due(self, now: float, interval: float) -> bool:
+        """True (and arms the next window) when a throttled sync is due."""
+        if now - self._last_sync >= interval:
+            self._last_sync = now
+            return True
+        return False
+
+    def reset_throttle(self) -> None:
+        self._last_sync = 0.0                    # force the next due() to fire (manual "sync now")
+
+    def sync(self, snap: dict, cfg: dict) -> None:
+        try:
+            if cfg.get("remote_transcript"):     # opt-in: mirror conversations to the phone (E2EE)
+                ts = read_transcripts()
+                if ts:
+                    # copy — never leak content into the local STORE snapshot. `transcripts`
+                    # (list, pickable on the phone) + `transcript` (active one) for older builds.
+                    snap = {**snap, "transcripts": ts, "transcript": ts[0]}
+            self.last_ok = remote_sync_snapshot(snap, cfg)
+        except Exception:
+            self.last_ok = False
+            log("remote: sync error:\n" + traceback.format_exc())
+
+    def handle_command(self, cfg: dict, sessions_cache: dict, active_cwd: str | None) -> None:
+        """ARMED-only: pull one phone-sent prompt, run it restricted (read-only), push the reply
+        back. The non-blocking lock means re-spawning every poll tick can't start overlapping runs."""
+        if not self._cmd_lock.acquire(blocking=False):
+            return
+        try:
+            cmd = remote_get_command(cfg)
+            if not isinstance(cmd, dict) or cmd.get("type") != "prompt":
+                return
+            remote_clear_command(cfg)            # consume first so it can't re-run
+            text = (cmd.get("text") or "").strip()
+            if not text:
+                return
+            cwd = _allowed_remote_cwd(cmd.get("cwd"), sessions_cache, active_cwd)
+            log(f"remote prompt from phone: {text[:80]!r}")
+            notify("Phone prompt", text[:90])
+            reply = run_remote_prompt(text, cwd)
+            remote_push(cfg, "Claude replied", reply[:400], "remote-reply")
+        except Exception:
+            log("remote command failed:\n" + traceback.format_exc())
+        finally:
+            self._cmd_lock.release()
+
+    def push(self, cfg: dict, title: str, msg: str) -> None:
+        if not self.enabled(cfg):
+            return
+        threading.Thread(target=remote_push, args=(cfg, title, msg, title[:40]), daemon=True).start()
+
+
 # ---------------------------------------------------------------------------
 # Notifications
 # ---------------------------------------------------------------------------
@@ -3297,8 +3364,7 @@ class TrayApp:
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._started_notified = False
-        self._last_remote_sync = 0.0
-        self._remote_last_ok = None
+        self._remote = RemoteSync()       # owns relay sync/command/push + their shared state
         self._session_waiting_last = {}   # session_id -> last-notified ts (rate-limit)
 
     def build_menu(self):
@@ -3349,7 +3415,7 @@ class TrayApp:
         CONTROL["remote_action"] = self._remote_action
         CONTROL["session_waiting"] = self._on_session_waiting
         global REMOTE_PUSH
-        REMOTE_PUSH = self._remote_push                # mirror toasts to the paired phone
+        REMOTE_PUSH = lambda title, msg: self._remote.push(self.cfg, title, msg)  # mirror toasts to the phone
         threading.Thread(target=self._poll_loop, daemon=True).start()
         if self.cfg.get("show_widget_on_start", True):
             self.widget_proc = self._spawn_mode("--widget")
@@ -3435,54 +3501,6 @@ class TrayApp:
             threading.Thread(target=target, daemon=True).start()
 
     # ----- remote sync (optional, opt-in) -----
-    def _remote_on(self) -> bool:
-        return bool(self.cfg.get("remote_enabled") and self.cfg.get("remote_relay_url")
-                    and remote_available())
-
-    def _remote_sync_now(self, snap: dict) -> None:
-        try:
-            if self.cfg.get("remote_transcript"):   # opt-in: mirror conversations to the phone (E2EE)
-                ts = read_transcripts()
-                if ts:
-                    # copy — never leak content into the local STORE snapshot. `transcripts`
-                    # (list, pickable on the phone) + `transcript` (active one) for older builds.
-                    snap = {**snap, "transcripts": ts, "transcript": ts[0]}
-            self._remote_last_ok = remote_sync_snapshot(snap, self.cfg)
-        except Exception:
-            self._remote_last_ok = False
-            log("remote: sync error:\n" + traceback.format_exc())
-
-    def _handle_remote_command(self) -> None:
-        """ARMED-only: pull one phone-sent prompt, run it restricted (read-only), and push the
-        reply back. Off unless `remote_accept_prompts` is on. The poll loop spawns this every
-        tick; a non-blocking lock ensures a second run can't start while one is still in flight
-        (otherwise a slow `claude -p` could overlap with the next tick's run)."""
-        if not self._remote_cmd_lock.acquire(blocking=False):
-            return
-        try:
-            cmd = remote_get_command(self.cfg)
-            if not isinstance(cmd, dict) or cmd.get("type") != "prompt":
-                return
-            remote_clear_command(self.cfg)        # consume first so it can't re-run
-            text = (cmd.get("text") or "").strip()
-            if not text:
-                return
-            cwd = _allowed_remote_cwd(cmd.get("cwd"), self._sessions_cache, self._cwd)
-            log(f"remote prompt from phone: {text[:80]!r}")
-            notify("Phone prompt", text[:90])
-            reply = run_remote_prompt(text, cwd)
-            remote_push(self.cfg, "Claude replied", reply[:400], "remote-reply")
-        except Exception:
-            log("remote command failed:\n" + traceback.format_exc())
-        finally:
-            self._remote_cmd_lock.release()
-
-    def _remote_push(self, title: str, msg: str) -> None:
-        if not self._remote_on():
-            return
-        threading.Thread(target=remote_push, args=(self.cfg, title, msg, title[:40]),
-                         daemon=True).start()
-
     def _on_session_waiting(self, payload: dict) -> None:
         """A Claude Code session finished its turn and is awaiting the user (Stop hook, via
         --session-hook). Fire a toast (the REMOTE_PUSH hook also mirrors it to the phone),
@@ -3512,9 +3530,9 @@ class TrayApp:
         elif action == "sync":
             with STORE_LOCK:
                 snap = dict(STORE.get("snapshot", {}))
-            self._last_remote_sync = 0.0
+            self._remote.reset_throttle()
             if snap:
-                threading.Thread(target=self._remote_sync_now, args=(snap,), daemon=True).start()
+                threading.Thread(target=self._remote.sync, args=(snap, self.cfg), daemon=True).start()
 
     # menu handlers
     def _on_open(self, icon, item):
@@ -3698,7 +3716,6 @@ class TrayApp:
         self._alltime_cache = getattr(self, "_alltime_cache", load_json(ALLTIME_PATH, {}))
         self._context = getattr(self, "_context", None)
         self._cwd = getattr(self, "_cwd", None)
-        self._remote_cmd_lock = getattr(self, "_remote_cmd_lock", threading.Lock())
         self._verdict = getattr(self, "_verdict", "")
         self._update_available = getattr(self, "_update_available", None)
         self._update_url = getattr(self, "_update_url", None)
@@ -3805,20 +3822,20 @@ class TrayApp:
                                   "relay_url": self.cfg.get("remote_relay_url", ""),
                                   "available": remote_available(),
                                   "paired": load_remote_identity(create=False) is not None,
-                                  "last_sync_ok": self._remote_last_ok}
+                                  "last_sync_ok": self._remote.last_ok}
                 self._verdict = (snap.get("verdict") or {}).get("text", "")
                 with STORE_LOCK:
                     STORE["snapshot"] = snap
                 self._refresh_visual(r)
                 # Relay the snapshot to the phone (opt-in, E2EE), throttled + off-thread.
-                if self._remote_on():
+                if RemoteSync.enabled(self.cfg):
                     iv = max(15, int(self.cfg.get("remote_sync_seconds", 60)))
-                    if now - self._last_remote_sync >= iv:
-                        self._last_remote_sync = now
-                        threading.Thread(target=self._remote_sync_now, args=(snap,), daemon=True).start()
+                    if self._remote.due(now, iv):
+                        threading.Thread(target=self._remote.sync, args=(snap, self.cfg), daemon=True).start()
                     # ARMED: also pull + run any phone-sent prompt (restricted), off-thread.
                     if self.cfg.get("remote_accept_prompts"):
-                        threading.Thread(target=self._handle_remote_command, daemon=True).start()
+                        threading.Thread(target=self._remote.handle_command,
+                                         args=(self.cfg, self._sessions_cache, self._cwd), daemon=True).start()
                 # Fold newly-written session bytes into lifetime totals. Runs after
                 # the live snapshot is published so the first (full-history) backfill
                 # never delays first paint; the result lands in the next snapshot.
