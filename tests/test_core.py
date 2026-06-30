@@ -345,6 +345,33 @@ def test_run_remote_prompt_resume(monkeypatch):
     assert cmd[cmd.index("--resume") + 1] == "sess-123"         # resumed that exact session
 
 
+def test_run_remote_prompt_opts_out_of_cred_scrub(monkeypatch):
+    """The headless `claude -p` must opt out of Claude Code's subprocess credential-hardening
+    (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB) or the run comes back "Not logged in · Please run /login".
+    The run already locks tools to read-only, so disabling the scrub + dropping the nested-session
+    markers a parent injects is the documented opt-out."""
+    import subprocess
+    monkeypatch.setattr(m, "_claude_cli", lambda: "claude")
+    monkeypatch.setenv("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1")   # as a global setting would
+    monkeypatch.setenv("CLAUDE_CODE_CHILD_SESSION", "1")          # nested markers a parent injects
+    monkeypatch.setenv("CLAUDECODE", "1")
+    monkeypatch.setenv("PATH", "/keep/me")                        # unrelated vars must survive
+    captured = {}
+
+    class FakeProc:
+        stdout = '{"type":"result","result":"ok"}'
+        stderr = ""
+        returncode = 0
+
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (captured.update(kw) or FakeProc()))
+    m.run_remote_prompt("hi", cwd=None)
+    env = captured["env"]
+    assert env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "0"         # scrub disabled -> creds usable
+    assert "CLAUDE_CODE_CHILD_SESSION" not in env                 # nested markers stripped
+    assert "CLAUDECODE" not in env
+    assert env.get("PATH") == "/keep/me"                          # unrelated env preserved
+
+
 def test_read_transcripts_exposes_session_id(tmp_path, monkeypatch):
     """Each mirrored conversation carries its session_id (the .jsonl stem) so the phone can
     send it back to resume that exact session."""
