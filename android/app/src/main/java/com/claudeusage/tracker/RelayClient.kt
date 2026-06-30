@@ -47,10 +47,12 @@ class RelayClient(private val p: Pairing) {
         runCatching { http.newCall(req).execute().use { it.isSuccessful } }.getOrDefault(false)
     }
 
-    /** Seal {type:"prompt", text} with the pairing key and enqueue it on the relay for the
-     *  desktop to run (if armed). Returns true on success. */
-    suspend fun sendCommand(text: String): Boolean = withContext(Dispatchers.IO) {
-        val cmd = JSONObject().put("type", "prompt").put("text", text).toString()
+    /** Seal {type:"prompt", text, cwd?} with the pairing key and enqueue it on the relay for
+     *  the desktop to run (if armed). `cwd` picks which project the prompt runs in (the chosen
+     *  session); null lets the desktop use the active one. Returns true on success. */
+    suspend fun sendCommand(text: String, cwd: String? = null): Boolean = withContext(Dispatchers.IO) {
+        val cmd = JSONObject().put("type", "prompt").put("text", text)
+            .apply { if (!cwd.isNullOrBlank()) put("cwd", cwd) }.toString()
         val sealed = Crypto.sealString(p.e2eeKeyB64, cmd) ?: return@withContext false
         val payload = JSONObject().put("v", 1).put("nonce", sealed.first).put("ct", sealed.second)
             .put("ts", System.currentTimeMillis() / 1000).toString()

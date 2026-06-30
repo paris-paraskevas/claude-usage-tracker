@@ -78,6 +78,7 @@ import com.claudeusage.tracker.RelayClient
 import com.claudeusage.tracker.Msg
 import com.claudeusage.tracker.Sess
 import com.claudeusage.tracker.Snap
+import com.claudeusage.tracker.Transcript
 import com.claudeusage.tracker.Win
 import com.claudeusage.tracker.widget.UsageWidget
 import com.claudeusage.tracker.widget.WidgetData
@@ -101,6 +102,7 @@ fun DashboardScreen(onUnpair: () -> Unit) {
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var tab by rememberSaveable { mutableStateOf(0) }
     var ctxSel by rememberSaveable { mutableStateOf<String?>(null) }   // which session drives the Context gauge
+    var chatSel by rememberSaveable { mutableStateOf<String?>(null) }  // which conversation the Chat tab shows
 
     val reload: suspend () -> Unit = reload@{
         val p = Prefs.active(ctx) ?: return@reload          // always the currently-active account
@@ -174,7 +176,7 @@ fun DashboardScreen(onUnpair: () -> Unit) {
             0 -> OverviewPage(s, now, inner, accounts, activeId, switchTo, addAccount,
                 ctxSel, onCtxSel = { ctxSel = it }) { scope.launch { reload() } }
             1 -> SessionsPage(s, inner)
-            2 -> ChatPage(s, inner)
+            2 -> ChatPage(s, inner, chatSel, onChatSel = { chatSel = it })
             3 -> StatsPage(s, inner)
             else -> SettingsPage(s, Prefs.active(ctx), now, inner, accounts, activeId,
                 switchTo, addAccount, removeAccount) { scope.launch { reload() } }
@@ -279,22 +281,26 @@ private fun SessionsPage(s: Snap, inner: PaddingValues) {
 }
 
 @Composable
-private fun ChatPage(s: Snap, inner: PaddingValues) {
+private fun ChatPage(s: Snap, inner: PaddingValues, chatSel: String?, onChatSel: (String?) -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val pairing = remember { Prefs.active(ctx) }
     var draft by remember { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
     var sent by remember { mutableStateOf(false) }
+
+    // The chosen conversation (defaults to the active/most-recent one).
+    val chosen = chatSel?.let { sel -> s.transcripts.firstOrNull { (it.cwd ?: it.name) == sel } }
+        ?: s.transcripts.firstOrNull()
+
     Column(Modifier.fillMaxSize().padding(inner).imePadding()) {
         Column(
             Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp).padding(top = 12.dp, bottom = 12.dp),
         ) {
-            val t = s.transcript
-            PageTitle("Conversation", t?.name)
+            ConversationPicker(s.transcripts, chosen, onChatSel)
             Spacer(Modifier.height(16.dp))
-            if (t == null || t.messages.isEmpty()) {
+            if (chosen == null || chosen.messages.isEmpty()) {
                 Text(
                     "No conversation mirrored yet.\n\nOn the desktop: Settings → Remote (phone) → turn on " +
                         "\"mirror the active conversation\" to see it here. To run prompts from here, also arm " +
@@ -302,7 +308,7 @@ private fun ChatPage(s: Snap, inner: PaddingValues) {
                     color = Dim, fontSize = 14.sp,
                 )
             } else {
-                t.messages.forEach { MsgBubble(it); Spacer(Modifier.height(10.dp)) }
+                chosen.messages.forEach { MsgBubble(it); Spacer(Modifier.height(10.dp)) }
             }
             if (sent) {
                 Spacer(Modifier.height(6.dp))
@@ -318,7 +324,9 @@ private fun ChatPage(s: Snap, inner: PaddingValues) {
                 value = draft,
                 onValueChange = { draft = it; sent = false },
                 modifier = Modifier.weight(1f),
-                placeholder = { Text("Send a prompt…", color = Faint) },
+                placeholder = {
+                    Text(chosen?.name?.let { "Send a prompt to $it…" } ?: "Send a prompt…", color = Faint)
+                },
                 maxLines = 4,
             )
             Spacer(Modifier.width(8.dp))
@@ -328,7 +336,7 @@ private fun ChatPage(s: Snap, inner: PaddingValues) {
                     if (txt.isEmpty() || pairing == null) return@Button
                     sending = true
                     scope.launch {
-                        val ok = RelayClient(pairing).sendCommand(txt)
+                        val ok = RelayClient(pairing).sendCommand(txt, chosen?.cwd)
                         sending = false
                         if (ok) { sent = true; draft = "" }
                     }
@@ -336,6 +344,45 @@ private fun ChatPage(s: Snap, inner: PaddingValues) {
                 enabled = !sending && draft.isNotBlank() && pairing != null,
                 shape = RoundedCornerShape(10.dp),
             ) { Text(if (sending) "…" else "Send") }
+        }
+    }
+}
+
+/** Title for the Chat tab that doubles as a conversation picker: tap to choose which mirrored
+ *  session to view and send prompts into (defaults to the active one). */
+@Composable
+private fun ConversationPicker(transcripts: List<Transcript>, chosen: Transcript?, onSel: (String?) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    val pickable = transcripts.size > 1
+    val selKey = chosen?.let { it.cwd ?: it.name }
+    Box {
+        Column(
+            Modifier.clip(RoundedCornerShape(8.dp))
+                .then(if (pickable) Modifier.clickable { open = true } else Modifier)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Conversation", color = Ink, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                if (pickable) Text("  ▾", color = Faint, fontSize = 17.sp)
+            }
+            Text(
+                chosen?.name?.let { if (pickable) "$it · tap to switch" else it } ?: "—",
+                color = Faint, fontSize = 13.sp, fontFamily = MONO,
+            )
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            transcripts.forEach { t ->
+                val key = t.cwd ?: t.name
+                DropdownMenuItem(
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(7.dp).clip(CircleShape)
+                                .background(if (t.active) hexColor("#5e9e72") else Faint))
+                            Text("  ${t.name}", color = if (key == selKey) Accent else Ink)
+                        }
+                    },
+                    onClick = { onSel(key); open = false },
+                )
+            }
         }
     }
 }

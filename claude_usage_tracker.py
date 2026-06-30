@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.1.30"
+__version__ = "0.1.31"
 
 
 def _data_dir() -> Path:
@@ -1140,27 +1140,40 @@ def _extract_text(content) -> str:
     return "\n".join(p for p in parts if p).strip()
 
 
-def read_transcript(max_msgs: int = 40, max_chars: int = 4000) -> dict | None:
-    """Recent messages (text only) from the most-recently-active session, for the optional
-    phone transcript. This is the ONLY place the app reads message *content*; it runs solely
-    when `remote_transcript` is enabled and the payload is end-to-end encrypted before it
-    leaves the machine. Returns {name, messages:[{role,text,ts}]} or None."""
+def _read_one_transcript(f: Path, max_msgs: int, max_chars: int,
+                         tail_bytes: int = 400_000) -> dict | None:
+    """One session file -> {name, cwd, messages:[{role,text,ts}]} (or None if it has no
+    conversation text). Reads `cwd` from the first lines (it's recorded early) and the
+    messages from only the file's tail, so a huge session log stays cheap to mirror."""
     try:
-        files = list(PROJECTS_DIR.glob("*/*.jsonl"))
-        f = max(files, key=lambda p: p.stat().st_mtime) if files else None
+        size = f.stat().st_size
     except Exception:
         return None
-    if not f:
-        return None
-    msgs, cwd = [], None
+    cwd, msgs = None, []
     try:
         with open(f, "r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
+            for _ in range(8):                       # cwd is on an early line
+                ln = fh.readline()
+                if not ln:
+                    break
+                try:
+                    o = json.loads(ln)
+                except Exception:
+                    continue
+                if isinstance(o.get("cwd"), str):
+                    cwd = o["cwd"]
+                    break
+            if size > tail_bytes:                    # only mirror the recent tail of big logs
+                fh.seek(size - tail_bytes)
+                fh.readline()                        # drop the partial first line
+            else:
+                fh.seek(0)
+            for ln in fh:
+                ln = ln.strip()
+                if not ln:
                     continue
                 try:
-                    o = json.loads(line)
+                    o = json.loads(ln)
                 except Exception:
                     continue
                 if cwd is None and isinstance(o.get("cwd"), str):
@@ -1178,7 +1191,43 @@ def read_transcript(max_msgs: int = 40, max_chars: int = 4000) -> dict | None:
     if not msgs:
         return None
     name = cwd.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1] if cwd else f.parent.name
-    return {"name": name, "messages": msgs[-max_msgs:]}
+    return {"name": name, "cwd": cwd, "messages": msgs[-max_msgs:]}
+
+
+def read_transcripts(limit: int = 6, max_msgs: int = 30, max_chars: int = 2500) -> list[dict]:
+    """Recent conversations (text only), newest first, so the phone can PICK which session
+    to view/chat in. This is the ONLY place the app reads message *content*; it runs solely
+    when `remote_transcript` is enabled and the payload is end-to-end encrypted before it
+    leaves the machine. One entry per project dir (newest file wins); each is
+    {name, cwd, active, messages:[{role,text,ts}]}."""
+    try:
+        files = sorted(PROJECTS_DIR.glob("*/*.jsonl"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+    except Exception:
+        return []
+    now, out, seen = time.time(), [], set()
+    for f in files:
+        if len(out) >= max(1, limit):
+            break
+        t = _read_one_transcript(f, max_msgs, max_chars)
+        if not t:
+            continue
+        key = t.get("cwd") or str(f)                 # collapse multiple terminals in one project
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            t["active"] = (now - f.stat().st_mtime) <= 600
+        except Exception:
+            t["active"] = False
+        out.append(t)
+    return out
+
+
+def read_transcript(max_msgs: int = 40, max_chars: int = 4000) -> dict | None:
+    """The single most-recently-active conversation (back-compat for older phone builds)."""
+    ts = read_transcripts(limit=1, max_msgs=max_msgs, max_chars=max_chars)
+    return ts[0] if ts else None
 
 
 def build_snapshot(r: FetchResult, hist: dict, cfg: dict) -> dict:
@@ -1508,22 +1557,30 @@ REMOTE_PROMPT_TOOLS = "Read,Glob,Grep,WebSearch,WebFetch"
 
 
 def run_remote_prompt(prompt: str, cwd: str | None = None, timeout: int = 180) -> str:
-    """Run a phone-sent prompt through Claude Code headless, locked to planning + read-only
+    """Run a phone-sent prompt through Claude Code headless, locked to read-only research
     tools (no edits, no shell), in a FRESH session so it never disturbs the interactive one.
-    Returns the assistant's reply text (or a short error). The timeout is a hang safety-net."""
+    Returns the assistant's reply text (or a short error). The timeout is a hang safety-net.
+
+    Permission mode is `dontAsk`, NOT `plan`: in headless `-p` mode plan mode ends by asking
+    the user to approve the plan, and with no TTY to answer it just hangs until the timeout
+    (the bug behind the "prompt took too long" replies). `dontAsk` auto-denies anything not in
+    the allowlist instead of prompting, so the run stays read-only AND non-interactive. `--bare`
+    skips hooks/plugins/CLAUDE.md so a remote prompt can't trigger the tracker's own Stop hook
+    or other side effects."""
     cli = _claude_cli()
     if not cli:
         return "Claude Code CLI not found on this machine."
     prompt = (prompt or "").strip()
     if not prompt:
         return ""
-    cmd = [cli, "-p", prompt, "--output-format", "json",
-           "--permission-mode", "plan",
+    cmd = [cli, "-p", prompt, "--output-format", "json", "--bare",
+           "--permission-mode", "dontAsk",
            "--allowedTools", REMOTE_PROMPT_TOOLS,
            "--disallowedTools", "Edit,Write,Bash,NotebookEdit"]
     try:
         import subprocess
         proc = subprocess.run(cmd, cwd=cwd or None, capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL,   # never block waiting on stdin in -p mode
                               timeout=timeout, encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
         return "Timed out — the prompt took too long."
@@ -2031,7 +2088,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
     <div class="card panel">
       <div class="ptitle"><span>Remote (phone) · Android</span><span class="legend" id="rm-state"></span></div>
-      <div id="rm-unavail" class="csub" hidden>Install the optional dependency first: <code>pip install "claude-usage-tracker[remote]"</code></div>
+      <div id="rm-unavail" class="csub" hidden>Remote needs the encryption library (it ships by default now). Update to the latest version and restart — or, if you installed with pip, run <code>pip install "claude-usage-tracker[remote]"</code>.</div>
       <div class="setrow"><span class="setlbl">Enable</span>
         <label class="chk"><input type="checkbox" id="rm-enabled"> relay an end-to-end-encrypted snapshot to your phone</label></div>
       <div class="setrow"><span class="setlbl">Relay URL</span>
@@ -3368,10 +3425,12 @@ class TrayApp:
 
     def _remote_sync_now(self, snap: dict) -> None:
         try:
-            if self.cfg.get("remote_transcript"):   # opt-in: mirror the active conversation (E2EE)
-                t = read_transcript()
-                if t:
-                    snap = {**snap, "transcript": t}   # copy — never leak content into the local STORE snapshot
+            if self.cfg.get("remote_transcript"):   # opt-in: mirror conversations to the phone (E2EE)
+                ts = read_transcripts()
+                if ts:
+                    # copy — never leak content into the local STORE snapshot. `transcripts`
+                    # (list, pickable on the phone) + `transcript` (active one) for older builds.
+                    snap = {**snap, "transcripts": ts, "transcript": ts[0]}
             self._remote_last_ok = remote_sync_snapshot(snap, self.cfg)
         except Exception:
             self._remote_last_ok = False

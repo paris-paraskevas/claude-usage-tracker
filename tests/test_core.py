@@ -222,3 +222,58 @@ def test_scan_all_time(tmp_path, monkeypatch):
     a3 = m.scan_all_time(cache, now)
     assert a3["periods"]["all"]["tokens"] == a2["periods"]["all"]["tokens"]
     assert a3["total"]["msgs"] == 4
+
+
+def test_read_transcripts_lists_recent_conversations(tmp_path, monkeypatch):
+    """Bug 1 (phone "can't pick which session to chat in"): the desktop must mirror the
+    recent conversations newest-first, each with its cwd, so the phone can pick one."""
+    import os
+    monkeypatch.setattr(m, "PROJECTS_DIR", tmp_path)
+
+    def write(proj, cwd, msgs, mtime):
+        d = tmp_path / proj
+        d.mkdir()
+        f = d / "session.jsonl"
+        lines = [{"cwd": cwd, "timestamp": "2026-06-30T10:00:00.000Z",
+                  "message": {"role": r, "content": c}} for (r, c) in msgs]
+        f.write_text("\n".join(json.dumps(x) for x in lines), encoding="utf-8")
+        os.utime(f, (mtime, mtime))
+
+    write("a", r"C:\Dev\projA", [("user", "hello A"), ("assistant", "hi A")], 1000)
+    write("b", r"C:\Dev\projB", [("user", "hello B")], 2000)   # more recently active
+
+    ts = m.read_transcripts(limit=6)
+    assert [t["name"] for t in ts] == ["projB", "projA"]        # newest first
+    assert ts[0]["cwd"] == r"C:\Dev\projB"
+    assert ts[0]["messages"][0]["text"] == "hello B"
+    assert m.read_transcript()["name"] == "projB"               # back-compat single reader
+
+
+def test_run_remote_prompt_nonhanging_readonly(monkeypatch):
+    """Bug 2 ("prompt took too long"): headless plan mode hangs waiting for plan approval.
+    The command must use dontAsk (auto-deny, never prompt) + --bare, keep the read-only
+    allowlist, and never block on stdin."""
+    import subprocess
+    monkeypatch.setattr(m, "_claude_cli", lambda: "claude")
+    captured = {}
+
+    class FakeProc:
+        stdout = '{"type":"result","result":"hi from claude"}'
+        stderr = ""
+        returncode = 0
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return FakeProc()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    out = m.run_remote_prompt("what does foo() do?", cwd=None)
+    assert out == "hi from claude"
+
+    cmd = captured["cmd"]
+    assert "plan" not in cmd                                    # the hang cause — gone
+    assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
+    assert "--bare" in cmd and "-p" in cmd
+    assert m.REMOTE_PROMPT_TOOLS in cmd                         # still read-only
+    assert captured["kwargs"].get("stdin") == subprocess.DEVNULL
