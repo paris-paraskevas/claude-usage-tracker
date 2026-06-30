@@ -28,3 +28,13 @@ docs/HANDOFF.md
 /dash-*.png
 /widget-*.png
 /icon-montage.png
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example
+
+# Local npm lockfile for the relay (devDeps only; intentionally not committed)
+relay/package-lock.json
