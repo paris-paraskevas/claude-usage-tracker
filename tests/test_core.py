@@ -269,6 +269,17 @@ def test_project_name():
     assert m.project_name("/", "sess") == "sess"                  # empty basename → fallback
 
 
+def test_safe_login_email_blocks_shell_injection():
+    """`email` reaches launch_login from the localhost endpoint; only a plain address survives,
+    so it can't inject shell metacharacters into the visible `cmd /k` path."""
+    assert m._safe_login_email("user@example.com") == "user@example.com"
+    assert m._safe_login_email('x" & calc.exe & "y@e.com') is None    # quotes + & → rejected
+    assert m._safe_login_email("a b@e.com") is None                   # space → rejected
+    assert m._safe_login_email("no-at-sign") is None
+    assert m._safe_login_email(None) is None
+    assert m._safe_login_email("") is None
+
+
 def test_run_remote_prompt_nonhanging_readonly(monkeypatch):
     """Bug 2 ("prompt took too long"): headless plan mode hangs waiting for plan approval.
     The command must use dontAsk (auto-deny, never prompt) + --bare, keep the read-only
