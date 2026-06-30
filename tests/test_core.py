@@ -280,6 +280,22 @@ def test_safe_login_email_blocks_shell_injection():
     assert m._safe_login_email("") is None
 
 
+def test_remote_sync_throttle_and_inflight():
+    """The RemoteSync coordinator's throttle + in-flight decisions are now unit-testable
+    (they used to be tangled into the poll loop)."""
+    rs = m.RemoteSync()
+    assert rs.due(100.0, 60) is True       # first call → due, arms the window at t=100
+    assert rs.due(130.0, 60) is False      # +30s, under the 60s interval
+    assert rs.due(170.0, 60) is True       # +70s from the armed window → due again
+    rs.reset_throttle()
+    assert rs.due(171.0, 60) is True       # manual "sync now" forces the next window
+    # in-flight guard: while the lock is held, handle_command returns at once (no work, no raise)
+    assert rs._cmd_lock.acquire(blocking=False) is True
+    rs.handle_command({}, {}, None)
+    rs._cmd_lock.release()
+    assert m.RemoteSync.enabled({}) is False   # not enabled without config/pynacl
+
+
 def test_run_remote_prompt_nonhanging_readonly(monkeypatch):
     """Bug 2 ("prompt took too long"): headless plan mode hangs waiting for plan approval.
     The command must use dontAsk (auto-deny, never prompt) + --bare, keep the read-only
