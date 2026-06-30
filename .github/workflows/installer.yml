@@ -27,9 +27,13 @@ jobs:
       - name: Generate icon
         run: python -c "import claude_usage_tracker as m; m.make_app_icon(256).save('app.ico', sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])"
 
+      # --onedir + --noupx: UPX-packed and onefile binaries are the two biggest
+      # antivirus / SmartScreen false-positive triggers for PyInstaller apps.
+      # We're already onedir; --noupx makes "no UPX" deterministic regardless of
+      # whether the runner image happens to have upx on PATH. Do NOT re-enable UPX.
       - name: Build standalone app (PyInstaller)
         run: >
-          pyinstaller --noconfirm --clean --onedir --noconsole
+          pyinstaller --noconfirm --clean --onedir --noupx --noconsole
           --name ClaudeUsageTracker --icon app.ico
           --collect-all webview --collect-all clr_loader --collect-all pythonnet
           --collect-all nacl --collect-all qrcode
