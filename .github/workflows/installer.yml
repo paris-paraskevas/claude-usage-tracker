@@ -33,6 +33,7 @@ jobs:
           --name ClaudeUsageTracker --icon app.ico
           --collect-all webview --collect-all clr_loader --collect-all pythonnet
           --collect-all nacl --collect-all qrcode
+          --hidden-import _cffi_backend
           --hidden-import pystray._win32
           claude_usage_tracker.py
 
