@@ -2864,11 +2864,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
         else:
             self._send(404, "text/plain", b"not found")
 
+    def _origin_ok(self) -> bool:
+        """Defeat web-based CSRF / DNS-rebinding against the local control plane. A genuine caller
+        is either the dashboard's own same-origin fetch (Origin = our loopback host) or a
+        non-browser client (urllib from the overlays / the session hook), which sends no Origin.
+        A website the user visits sends Origin: https://evil.com, and a rebinding attack sends a
+        foreign Host — both are rejected."""
+        from urllib.parse import urlsplit
+        local = ("127.0.0.1", "localhost", "::1")
+        for hdr in ("Origin", "Referer"):
+            v = self.headers.get(hdr)
+            if v and urlsplit(v).hostname not in local:
+                return False
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
+        return not (host and host not in local)
+
     def do_POST(self):
         path = self.path.split("?", 1)[0]
-        # Loopback only (the server already binds 127.0.0.1; double-check anyway).
-        # These just nudge the tray's own poll loop / sign-in — nothing destructive.
-        if self.client_address[0] not in ("127.0.0.1", "::1"):
+        # These endpoints are state-changing (config, relay, update, sign-in). The socket is bound
+        # to 127.0.0.1, but a web page the user visits could still POST here (the body is parsed
+        # regardless of Content-Type), so also require a loopback Origin/Host — see _origin_ok.
+        if self.client_address[0] not in ("127.0.0.1", "::1") or not self._origin_ok():
             self._send(403, "text/plain", b"forbidden")
             return
         if path == "/api/login":
