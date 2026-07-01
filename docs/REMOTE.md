@@ -83,7 +83,8 @@ Base: `https://<worker>`. All calls require `Authorization: Bearer <readToken>`.
   `auth:{accountId}` = readTokenHash). v2 may switch to a Durable Object per account for
   strong consistency + lower latency.
 - Per-account rate limit (e.g. 1 write / 10 s). Desktop syncs on a throttle
-  (`remote_sync_seconds`, default 60), not every UI poll.
+  (`remote_sync_seconds`, default 300), not every UI poll. Each push is ~3 KV
+  writes, so 300s keeps a free-tier Worker (1000 writes/day) comfortably under budget.
 
 ## Push (FCM HTTP v1, E2EE-preserving)
 

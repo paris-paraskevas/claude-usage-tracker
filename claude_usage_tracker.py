@@ -125,7 +125,11 @@ DEFAULT_CONFIG = {
     "status_components": [],                    # component names to watch ([] = overall status)
     "remote_enabled": False,                    # opt-in: relay an E2EE snapshot to your phone
     "remote_relay_url": "https://claude-usage-relay.businessofzeus.workers.dev",  # default hosted relay; override in Settings
-    "remote_sync_seconds": 60,                  # how often to push the snapshot to the relay
+    "remote_sync_seconds": 300,                 # how often to push the snapshot to the relay. Each push is
+                                                # ~3 KV writes on the relay; the Cloudflare free tier allows
+                                                # 1000 writes/day, so 300s (~864/day) stays under it. Don't
+                                                # drop this below ~180s on a free Workers plan (a usage
+                                                # mirror doesn't need second-level freshness anyway).
     "notify_session_waiting": False,            # opt-in: toast/push when a Claude Code session finishes a turn awaiting you
     "remote_transcript": False,                 # opt-in: mirror the active conversation's text to your phone (E2EE)
     "remote_accept_prompts": False,             # opt-in (ARMED): run prompts sent from the phone, restricted (plan + read-only tools)
@@ -3907,7 +3911,7 @@ class TrayApp:
                 self._refresh_visual(r)
                 # Relay the snapshot to the phone (opt-in, E2EE), throttled + off-thread.
                 if RemoteSync.enabled(self.cfg):
-                    iv = max(15, int(self.cfg.get("remote_sync_seconds", 60)))
+                    iv = max(15, int(self.cfg.get("remote_sync_seconds", 300)))
                     if self._remote.due(now, iv):
                         threading.Thread(target=self._remote.sync, args=(snap, self.cfg), daemon=True).start()
                     # ARMED: also pull + run any phone-sent prompt (restricted), off-thread.
