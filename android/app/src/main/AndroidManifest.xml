@@ -31,6 +31,13 @@
             </intent-filter>
         </activity>
 
+        <!-- zxing QR scanner, pinned to portrait so scanning the pairing QR never rotates the phone. -->
+        <activity
+            android:name=".ui.PortraitCaptureActivity"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|keyboardHidden|screenSize"
+            android:exported="false" />
+
         <service
             android:name=".push.PushService"
             android:exported="false">

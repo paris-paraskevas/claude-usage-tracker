@@ -68,7 +68,8 @@ fun PairScreen(onPaired: () -> Unit) {
                 error = null
                 scanLauncher.launch(
                     ScanOptions()
-                        .setOrientationLocked(true)   // keep the scanner portrait — don't rotate the phone
+                        .setOrientationLocked(false)   // portrait is pinned by PortraitCaptureActivity in the manifest
+                        .setCaptureActivity(PortraitCaptureActivity::class.java)
                         .setBeepEnabled(false)
                         .setPrompt("Scan the pairing QR from the desktop")
                 )
