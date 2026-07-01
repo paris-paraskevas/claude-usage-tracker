@@ -152,7 +152,9 @@ fun DashboardScreen(onUnpair: () -> Unit) {
     }
     val addAccount: () -> Unit = {
         scanLauncher.launch(
-            ScanOptions().setOrientationLocked(true).setBeepEnabled(false)
+            ScanOptions().setOrientationLocked(false)   // portrait pinned by PortraitCaptureActivity (manifest)
+                .setCaptureActivity(PortraitCaptureActivity::class.java)
+                .setBeepEnabled(false)
                 .setPrompt("Scan the pairing QR from another desktop"),
         )
     }
