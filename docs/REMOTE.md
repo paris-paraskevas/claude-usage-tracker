@@ -80,11 +80,13 @@ Base: `https://<worker>`. All calls require `Authorization: Bearer <readToken>`.
 | `POST /v1/acct/{accountId}/push` | desktop | encrypted blob (push plaintext) | `200 {"sent":N}` — fans out an FCM **data** message to every registered token |
 
 - Storage: Cloudflare **KV** (`snapshot:{accountId}`, `tokens:{accountId}` set,
-  `auth:{accountId}` = readTokenHash). v2 may switch to a Durable Object per account for
-  strong consistency + lower latency.
-- Per-account rate limit (e.g. 1 write / 10 s). Desktop syncs on a throttle
-  (`remote_sync_seconds`, default 300), not every UI poll. Each push is ~3 KV
-  writes, so 300s keeps a free-tier Worker (1000 writes/day) comfortably under budget.
+  `auth:{accountId}` = readTokenHash). The snapshot's last-write time rides in its KV
+  metadata (the write throttle), and the auth TTL is refreshed at most once a day, so a
+  steady sync costs **one KV write per push**. v2 may switch to a Durable Object per
+  account for strong consistency + lower latency.
+- Per-account write throttle (8 s min gap). Desktop syncs on a throttle
+  (`remote_sync_seconds`, default 300), not every UI poll. At one write/push, 300s is
+  ~288 writes/day — well under a free-tier Worker's 1000 writes/day.
 
 ## Push (FCM HTTP v1, E2EE-preserving)
 

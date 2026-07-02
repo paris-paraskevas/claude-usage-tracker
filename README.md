@@ -204,7 +204,7 @@ Edit `config.json` (created on first run, in the app's data dir), then restart:
 | `alltime_days` | `30` | Days shown in the All-time daily-usage chart. |
 | `remote_enabled` | `false` | Opt-in: relay an E2E-encrypted snapshot to your phone. |
 | `remote_relay_url` | `""` | Your Cloudflare Worker relay URL (see `docs/REMOTE.md`). |
-| `remote_sync_seconds` | `300` | How often to push the snapshot to the relay. Kept ≥180s so the relay stays within Cloudflare's free-tier KV write budget (~3 writes/push, 1000 writes/day free). |
+| `remote_sync_seconds` | `300` | How often to push the snapshot to the relay. Each push is 1 KV write on the relay, so 300s is ~288 writes/day — well within Cloudflare's free-tier budget (1000 writes/day free). |
 
 ## How it works
 
