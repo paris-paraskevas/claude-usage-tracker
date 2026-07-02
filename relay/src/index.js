@@ -9,8 +9,9 @@
  * Secrets (for push): FCM_PROJECT_ID, FCM_CLIENT_EMAIL, FCM_PRIVATE_KEY.
  */
 
-const WRITE_MIN_GAP_MS = 8000;     // per-account throttle for snapshot writes
-const SNAPSHOT_TTL_S = 7 * 86400;  // forget stale accounts that stop syncing
+const WRITE_MIN_GAP_MS = 8000;             // per-account throttle for snapshot writes
+const SNAPSHOT_TTL_S = 7 * 86400;          // forget stale accounts that stop syncing
+const AUTH_REFRESH_GAP_MS = 86400 * 1000;  // refresh the auth key's 7-day TTL at most once/day, not every push
 
 export default {
   async fetch(request, env, ctx) {
@@ -42,7 +43,11 @@ async function handle(request, env, ctx) {
   const bearerHash = await sha256hex(bearer);
 
   const authKey = `auth:${accountId}`;
-  const storedHash = await env.KV.get(authKey);
+  // getWithMetadata (not get): lets the snapshot PUT below see when the auth TTL was last
+  // refreshed — from this same read — so it only re-writes the key when a refresh is due.
+  const authRec = await env.KV.getWithMetadata(authKey);
+  const storedHash = authRec.value;
+  const authRefreshedAt = (authRec.metadata && Number(authRec.metadata.rt)) || 0;
 
   // Trust-on-first-use: the very first snapshot PUT pins the readToken hash.
   const isFirstWrite = !storedHash && method === "PUT" && resource === "snapshot";
@@ -59,17 +64,32 @@ async function handle(request, env, ctx) {
 
   if (resource === "snapshot") {
     if (method === "PUT") {
-      const last = await env.KV.get(`wts:${accountId}`);
-      if (last && Date.now() - Number(last) < WRITE_MIN_GAP_MS) {
+      // The last-write time rides in the snapshot's own KV metadata instead of a separate
+      // `wts:` key, so a steady sync costs ONE KV write instead of three. KV is eventually
+      // consistent, so this stays a best-effort throttle — exactly as the standalone key was.
+      const prev = await env.KV.getWithMetadata(`snapshot:${accountId}`);
+      const lastWrite = (prev.metadata && Number(prev.metadata.wts)) || 0;
+      if (lastWrite && Date.now() - lastWrite < WRITE_MIN_GAP_MS) {
         return cors(json({ error: "rate_limited" }, 429));
       }
       const blob = await readBlob(request);
       if (!blob) return cors(json({ error: "bad_blob" }, 400));
-      if (isFirstWrite) await env.KV.put(authKey, bearerHash, { expirationTtl: SNAPSHOT_TTL_S });
-      await env.KV.put(`snapshot:${accountId}`, JSON.stringify(blob), { expirationTtl: SNAPSHOT_TTL_S });
-      await env.KV.put(`wts:${accountId}`, String(Date.now()), { expirationTtl: 3600 });
-      // refresh auth TTL so an actively-syncing account never expires
-      if (storedHash) await env.KV.put(authKey, bearerHash, { expirationTtl: SNAPSHOT_TTL_S });
+      const now = Date.now();
+      // The one steady-state write: the snapshot, stamped with the write time (for the
+      // throttle above) and refreshing its own 7-day TTL.
+      await env.KV.put(`snapshot:${accountId}`, JSON.stringify(blob), {
+        expirationTtl: SNAPSHOT_TTL_S,
+        metadata: { wts: now },
+      });
+      // Auth key: written once on first use, then its 7-day TTL is refreshed at most once a
+      // day (not every push) — enough that an actively-syncing account never expires, at a
+      // cost of ~1 write/day rather than one per push.
+      if (isFirstWrite || (storedHash && now - authRefreshedAt > AUTH_REFRESH_GAP_MS)) {
+        await env.KV.put(authKey, bearerHash, {
+          expirationTtl: SNAPSHOT_TTL_S,
+          metadata: { rt: now },
+        });
+      }
       return cors(new Response(null, { status: 204 }));
     }
     if (method === "GET") {

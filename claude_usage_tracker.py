@@ -126,10 +126,9 @@ DEFAULT_CONFIG = {
     "remote_enabled": False,                    # opt-in: relay an E2EE snapshot to your phone
     "remote_relay_url": "https://claude-usage-relay.businessofzeus.workers.dev",  # default hosted relay; override in Settings
     "remote_sync_seconds": 300,                 # how often to push the snapshot to the relay. Each push is
-                                                # ~3 KV writes on the relay; the Cloudflare free tier allows
-                                                # 1000 writes/day, so 300s (~864/day) stays under it. Don't
-                                                # drop this below ~180s on a free Workers plan (a usage
-                                                # mirror doesn't need second-level freshness anyway).
+                                                # 1 KV write on the relay; the Cloudflare free tier allows
+                                                # 1000 writes/day, so 300s (~288/day) stays well under it. A
+                                                # usage mirror doesn't need second-level freshness anyway.
     "notify_session_waiting": False,            # opt-in: toast/push when a Claude Code session finishes a turn awaiting you
     "remote_transcript": False,                 # opt-in: mirror the active conversation's text to your phone (E2EE)
     "remote_accept_prompts": False,             # opt-in (ARMED): run prompts sent from the phone, restricted (plan + read-only tools)
