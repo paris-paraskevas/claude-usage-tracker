@@ -2568,15 +2568,14 @@ DASHBOARD_HTML = r"""<!doctype html>
 
   <div class="err" id="err"></div>
 
-  <div class="tabs">
-    <button class="tab on" data-t="live">Live</button>
-    <button class="tab" data-t="alltime">All-time</button>
-    <button class="tab" data-t="team">Team</button>
-    <button class="tab" data-t="status">Status</button>
-    <button class="tab" data-t="settings">Settings</button>
+  <div class="navbar">
+    <button class="on" data-t="home"><span class="gl">⌂</span> Home</button>
+    <button data-t="team" id="nav-team"><span class="gl">👥</span> Team</button>
+    <button data-t="history"><span class="gl">▤</span> History</button>
+    <button data-t="settings"><span class="gl">⚙</span> Settings</button>
   </div>
 
-  <div id="tab-live" class="tabpane">
+  <div id="tab-home" class="tabpane">
   <div class="gauges">
     <div class="card gauge" id="g-five_hour">
       <div class="gwrap">
@@ -2645,9 +2644,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     <span><i style="background:#cda24e"></i>busy · 60–80%</span>
     <span><i style="background:#d4694f"></i>near limit · 80%+</span>
   </div>
-  </div><!-- /tab-live -->
+  </div><!-- /tab-home -->
 
-  <div id="tab-alltime" class="tabpane" hidden>
+  <div id="tab-history" class="tabpane" hidden>
     <div class="atbar">
       <div class="stabs" id="at-view">
         <button class="stab on" data-v="overview">Overview</button>
@@ -3117,7 +3116,7 @@ function renderAlltime(a){
   $("at-projects").innerHTML=pj.map(x=>atBar(x.name,x.tokens,pmax,"#7f93b0")).join("")||"<div class='sempty'>no data yet</div>";
   $("at-projmore").textContent=(AT.project_count>pj.length)?("top "+pj.length+" of "+AT.project_count):"all-time";
   $("at-models").innerHTML=(p.models||[]).map(modelRow).join("")||"<div class='sempty'>no data yet</div>";
-  if(ATVIEW==="models" && !$("tab-alltime").hidden) renderSeries(p.series);
+  if(ATVIEW==="models" && !$("tab-history").hidden) renderSeries(p.series);
 }
 async function refresh(){
   try{
@@ -3183,7 +3182,7 @@ $("updcta").onclick=doUpdate;
 setInterval(tickCountdowns,1000);
 setInterval(refresh,5000);
 refresh();
-let _rz; window.addEventListener("resize",()=>{clearTimeout(_rz);_rz=setTimeout(()=>{renderSpark(LASTH); if(!$("tab-alltime").hidden)renderAlltime();},120);});
+let _rz; window.addEventListener("resize",()=>{clearTimeout(_rz);_rz=setTimeout(()=>{renderSpark(LASTH); if(!$("tab-history").hidden)renderAlltime();},120);});
 document.querySelectorAll("#sesscard .stab").forEach(b=>b.addEventListener("click",()=>{
   document.querySelectorAll("#sesscard .stab").forEach(x=>x.classList.remove("on"));
   b.classList.add("on"); SMODE=b.dataset.m; renderSessions();
@@ -3197,15 +3196,14 @@ document.querySelectorAll("#at-period .stab").forEach(b=>b.addEventListener("cli
   document.querySelectorAll("#at-period .stab").forEach(x=>x.classList.remove("on")); b.classList.add("on");
   ATPERIOD=b.dataset.p; renderAlltime();
 }));
-document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{
-  document.querySelectorAll(".tab").forEach(x=>x.classList.remove("on"));
+document.querySelectorAll(".navbar button").forEach(b=>b.addEventListener("click",()=>{
+  document.querySelectorAll(".navbar button").forEach(x=>x.classList.remove("on"));
   b.classList.add("on");
   const t=b.dataset.t;
-  $("tab-live").hidden=(t!=="live"); $("tab-alltime").hidden=(t!=="alltime");
-  $("tab-status").hidden=(t!=="status"); $("tab-settings").hidden=(t!=="settings");
-  $("tab-team").hidden=(t!=="team");
-  if(t==="alltime")renderAlltime();   // (re)draw now that the pane has layout
-  if(t==="status")renderStatusPage();
+  $("tab-home").hidden=(t!=="home"); $("tab-history").hidden=(t!=="history");
+  $("tab-team").hidden=(t!=="team"); $("tab-settings").hidden=(t!=="settings");
+  if(t==="home"&&typeof renderHome==="function")renderHome(LASTD);
+  if(t==="history")renderAlltime();   // (re)draw now that the pane has layout
   if(t==="settings")renderSettings();
   if(t==="team")renderTeamPage();
 }));
