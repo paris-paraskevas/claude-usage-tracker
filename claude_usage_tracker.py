@@ -475,6 +475,23 @@ def fetch_usage(timeout: int) -> FetchResult:
     return FetchResult(True, windows=parse_windows(data), extra=parse_extra(data), raw=data)
 
 
+def fetch_profile_org(timeout: int = 10):
+    """The logged-in account's organization uuid from /api/oauth/profile, or None."""
+    token, tstate = read_token()
+    if not token or tstate != TokenState.OK:
+        return None
+    headers = dict(BASE_HEADERS)
+    headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request("https://api.anthropic.com/api/oauth/profile",
+                                 headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        return ((data or {}).get("organization") or {}).get("uuid")
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Severity, formatting, projections
 # ---------------------------------------------------------------------------
@@ -1758,10 +1775,11 @@ def team_create(cfg: dict, name: str = ""):
     url = (cfg.get("remote_relay_url") or "").rstrip("/")
     if not url:
         return "set a relay URL first (Settings → Remote)"
-    ident = {"v": 1, "role": "admin", "url": url,
+    org = fetch_profile_org()
+    ident = {"v": 1, "role": "admin", "url": url, "org": org,
              "team_id": _b64u(_os.urandom(16)), "admin_token": _b64u(_os.urandom(32))}
     status = _team_call("POST", ident, ident["admin_token"], f"/v1/team/{ident['team_id']}/init",
-                        {"tz": cfg.get("team_tz") or "Europe/Athens"})
+                        {"tz": cfg.get("team_tz") or "Europe/Athens", "org": org})
     if status != 200:
         return f"relay rejected team init (HTTP {status})" if status else "relay unreachable"
     acct = read_account() or {}
@@ -1787,7 +1805,8 @@ def team_add_member(ident: dict, name: str):
                         {"token_hash": _sha256_hex(mtok), "name": name})
     if status != 204:
         return f"relay rejected member add (HTTP {status})" if status else "relay unreachable"
-    payload = {"u": ident["url"], "t": ident["team_id"], "m": mid, "k": mtok, "n": name}
+    payload = {"u": ident["url"], "t": ident["team_id"], "m": mid, "k": mtok,
+               "n": name, "o": ident.get("org")}
     import base64
     return "cutteam1:" + base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
 
@@ -1852,8 +1871,16 @@ def team_join(code: str):
     p = team_parse_join(code)
     if not p:
         return "that doesn't look like a team join code"
+    want = p.get("o")
+    if want:
+        mine = fetch_profile_org()
+        if mine and mine != want:
+            return "this join code is for a different Claude org"
+        if not mine:
+            log("team: could not verify org (offline?) — joining anyway")
     ident = {"v": 1, "role": "member", "url": p["u"], "team_id": p["t"],
-             "member_id": p["m"], "member_token": p["k"], "name": p.get("n", "")}
+             "member_id": p["m"], "member_token": p["k"], "name": p.get("n", ""),
+             "org": want}
     save_json(TEAM_PATH, ident)
     return ident
 

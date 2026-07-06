@@ -153,6 +153,35 @@ def test_ensure_team_device(tmp_path, monkeypatch):
     assert again["did"] == ident["did"]         # stable across calls (persisted)
 
 
+# ---- org binding --------------------------------------------------------------
+
+def test_join_code_carries_org():
+    p = {"u": "https://r.example", "t": "T" * 16, "m": "M" * 16, "k": "K" * 32,
+         "n": "P", "o": "org-uuid-1"}
+    assert m.team_parse_join(_code(p))["o"] == "org-uuid-1"
+
+
+def test_join_refuses_wrong_org(tmp_path, monkeypatch):
+    monkeypatch.setattr(m, "TEAM_PATH", tmp_path / "team.json")
+    monkeypatch.setattr(m, "fetch_profile_org", lambda: "org-B")
+    p = {"u": "http://127.0.0.1:9", "t": "t" * 8, "m": "m" * 8, "k": "k" * 32,
+         "n": "P", "o": "org-A"}
+    res = m.team_join(_code(p))
+    assert isinstance(res, str) and "org" in res.lower()
+    assert m.load_team_identity() is None
+
+
+def test_join_allows_matching_or_unknown_org(tmp_path, monkeypatch):
+    monkeypatch.setattr(m, "TEAM_PATH", tmp_path / "team.json")
+    monkeypatch.setattr(m, "fetch_profile_org", lambda: "org-A")
+    p = {"u": "http://127.0.0.1:9", "t": "t" * 8, "m": "m" * 8, "k": "k" * 32,
+         "n": "P", "o": "org-A"}
+    assert isinstance(m.team_join(_code(p)), dict)      # match → join
+    m.team_leave()
+    monkeypatch.setattr(m, "fetch_profile_org", lambda: None)   # offline → warn, allow
+    assert isinstance(m.team_join(_code(p)), dict)
+
+
 # ---- sync throttle ----------------------------------------------------------
 
 def test_teamsync_due_throttle():
