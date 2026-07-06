@@ -2655,17 +2655,6 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
   </div>
 
-  <div id="tab-status" class="tabpane" hidden>
-    <div class="card panel">
-      <div class="ptitle"><span>Anthropic status</span><a class="legend" target="_blank" rel="noopener" href="https://status.anthropic.com">status.anthropic.com ↗</a></div>
-      <div class="big" id="status-head" style="font-size:clamp(22px,5vw,32px)">—</div>
-    </div>
-    <div class="card panel">
-      <div class="ptitle">All components</div>
-      <div id="status-list"></div>
-    </div>
-  </div>
-
   <div id="tab-team" class="tabpane" hidden>
     <div class="card panel" id="tm-none">
       <div class="ptitle">Team · Claude Team plan aggregator</div>
@@ -2741,7 +2730,10 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div id="set-fields" class="fields"></div>
     </div>
     <div class="card panel">
-      <div class="ptitle">Anthropic status — components to watch</div>
+      <div class="ptitle"><span>Anthropic status</span><a class="legend" target="_blank" rel="noopener" href="https://status.anthropic.com">status.anthropic.com ↗</a></div>
+      <div class="big" id="status-head" style="font-size:clamp(20px,4vw,28px);margin-bottom:14px">—</div>
+      <div id="status-list"></div>
+      <div class="ptitle" style="margin-top:18px">Components to watch</div>
       <div id="set-status" class="fields"></div>
       <div class="csub" style="margin-top:8px">None selected = overall status. Shown on the dashboard, widget, and bar.</div>
     </div>
@@ -2851,38 +2843,6 @@ function tickCountdowns(){
     const el=$(id); if(!el||!k||!WIN[k])return;
     el.textContent=WIN[k].resets_at?("resets in "+fdur((WIN[k].resets_at-now)/1000)):"—";
   });
-}
-const DIAL_C=2*Math.PI*50;   // circumference of the dial arc (r=50)
-function buildTicks(){       // subtle measured tick ring — the instrument signature
-  const ns="http://www.w3.org/2000/svg";
-  document.querySelectorAll("svg.dial").forEach(svg=>{
-    for(let i=0;i<100;i+=10){
-      const a=(i/100)*2*Math.PI-Math.PI/2, r1=55, r2=58.5;
-      const ln=document.createElementNS(ns,"line");
-      ln.setAttribute("x1",(60+r1*Math.cos(a)).toFixed(2)); ln.setAttribute("y1",(60+r1*Math.sin(a)).toFixed(2));
-      ln.setAttribute("x2",(60+r2*Math.cos(a)).toFixed(2)); ln.setAttribute("y2",(60+r2*Math.sin(a)).toFixed(2));
-      ln.setAttribute("class","dial-tick");
-      svg.insertBefore(ln, svg.firstChild);
-    }
-  });
-}
-function renderGauge(w){
-  const k=w.key;
-  const arc=$("arc-"+k);
-  if(arc){ arc.style.strokeDashoffset=(DIAL_C*(1-Math.min(100,w.pct)/100)).toFixed(2); arc.style.stroke=w.color; }
-  const p=$("p-"+k); if(p)p.innerHTML=Math.round(w.pct)+"<span>%</span>";
-  WIN[k]={resets_at:w.resets_at,color:w.color};
-  $("ab-"+k).textContent=fabs(w.resets_at);
-  const bn=$("bn-"+k);
-  if(bn){
-    if(w.eta_seconds!=null&&w.eta_seconds>=0&&w.rate_per_hour>0){
-      bn.innerHTML="↗ <span class='hot'>"+w.rate_per_hour.toFixed(1)+"%/h</span> · hits 100% in ~"+fdur(w.eta_seconds);
-    }else if(w.rate_per_hour!=null&&w.rate_per_hour>0.1){
-      bn.innerHTML="↗ "+w.rate_per_hour.toFixed(1)+"%/h · <span class='ok'>resets before limit</span>";
-    }else if(w.rate_per_hour!=null){
-      bn.innerHTML="<span class='ok'>steady</span> · no recent burn";
-    }else{ bn.textContent="gathering rate…"; }
-  }
 }
 function bcol(p){ return p==null?"var(--faint)":(p>=80?"var(--hot)":(p>=60?"var(--warn)":"var(--ok)")); }
 function burnText(w){
@@ -3098,6 +3058,7 @@ function renderSettings(){
   }));
   syncOverlayLabels();
   renderStatusPicker();
+  renderStatusPage();   // live Anthropic status now lives in Settings
   renderRemote();
   $("set-sesswait").checked=!!ui.notify_session_waiting;
   $("rm-transcript").checked=!!ui.remote_transcript;
@@ -3208,13 +3169,12 @@ async function refresh(){
     if(cta){ if(up.available){ cta.hidden=false; if(!cta.disabled)cta.textContent="Update to v"+up.available; } else { cta.hidden=true; } }
     const sv=statusView(d), sp=$("statuspill");
     if(sp){ if(sv){ sp.hidden=false; sp.href=sv.url||"#"; sp.title="Anthropic status — "+sv.text; sp.innerHTML="<i style='background:"+sv.color+"'></i>"+esc(sv.word); } else { sp.hidden=true; } }
-    if(!$("tab-status").hidden)renderStatusPage();
+    if(!$("tab-settings").hidden)renderStatusPage();
     renderRemote();
     renderTeamState(d);
     tickCountdowns();
   }catch(e){ $("err").className="err show"; $("err").textContent="⚠ cannot reach the tracker service."; }
 }
-buildTicks();
 $("btn-refresh").onclick=doRefresh;
 $("btn-checkupd").onclick=doCheckUpdate;
 $("updcta").onclick=doUpdate;
