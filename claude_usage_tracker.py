@@ -2349,11 +2349,6 @@ DASHBOARD_HTML = r"""<!doctype html>
   .live{display:flex;align-items:center;gap:6px;color:var(--faint);font:11px/1 var(--mono);text-transform:uppercase;letter-spacing:.5px}
   .live .dot{width:7px;height:7px;border-radius:50%;background:var(--ok)}
 
-  /* tabs */
-  .tabs{display:inline-flex;gap:2px;margin-bottom:18px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:3px}
-  .tab{background:none;border:0;color:var(--dim);font:600 12px/1 var(--sans);padding:8px 16px;border-radius:6px;cursor:pointer}
-  .tab:hover{color:var(--ink)}
-  .tab.on{background:var(--panel2);color:var(--ink)}
   .tabpane[hidden]{display:none}
 
   /* nav bar (redesign) — 4 destinations, replaces .tabs */
@@ -2391,27 +2386,6 @@ DASHBOARD_HTML = r"""<!doctype html>
   .legend span{display:inline-flex;align-items:center;gap:5px;font:11px/1 var(--mono);color:var(--dim);text-transform:none;letter-spacing:0}
   .legend i{width:8px;height:8px;border-radius:2px;display:inline-block}
 
-  /* gauges */
-  .gauges{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
-  @media(max-width:520px){.gauges{grid-template-columns:1fr}}
-  .gauge{container-type:inline-size;padding:20px}
-  .gwrap{display:flex;flex-direction:column;align-items:center;gap:18px}
-  @container (min-width:360px){.gwrap{flex-direction:row;justify-content:center;gap:26px}.ginfo{align-items:flex-start;text-align:left}}
-  .gauge-dial{position:relative;display:grid;place-items:center;flex:none}
-  .dial{width:clamp(124px,40cqi,156px);height:auto;aspect-ratio:1;display:block;overflow:visible}
-  .dial-track{fill:none;stroke:var(--panel2);stroke-width:7}
-  .dial-arc{fill:none;stroke:var(--accent);stroke-width:7;stroke-linecap:round;
-    stroke-dasharray:314.16;stroke-dashoffset:314.16;
-    transition:stroke-dashoffset .8s cubic-bezier(.22,1,.36,1),stroke .4s}
-  .dial-tick{stroke:var(--line)}
-  .dial-val{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px}
-  .pct{font:600 clamp(26px,12cqi,38px)/1 var(--mono);letter-spacing:-1px;color:var(--ink);font-variant-numeric:tabular-nums}
-  .pct span{font-size:.5em;color:var(--dim);margin-left:1px}
-  .glabel{font:10px/1 var(--mono);color:var(--faint);text-transform:uppercase;letter-spacing:1.5px}
-  .ginfo{display:flex;flex-direction:column;align-items:center;text-align:center;gap:7px;min-width:0}
-  .reset b{font:500 15px/1.2 var(--mono);font-variant-numeric:tabular-nums}
-  .reset .abs{color:var(--faint);font:11px/1.3 var(--mono);margin-top:3px}
-  .burn{font:11px/1.4 var(--mono);color:var(--dim);min-height:15px}
   .burn .hot{color:var(--high)} .burn .ok{color:var(--ok)}
 
   /* rows / charts */
@@ -2481,9 +2455,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   .atrow .abar>i{display:block;height:100%;border-radius:3px;transition:width .7s cubic-bezier(.22,1,.36,1)}
   .atrow .anum{width:58px;text-align:right;color:var(--dim);font:12px/1 var(--mono)}
 
-  /* scale / footer / error */
-  .scale{display:flex;justify-content:center;gap:16px;flex-wrap:wrap;margin-top:18px;color:var(--faint);font:11px/1 var(--mono)}
-  .scale span{display:inline-flex;align-items:center;gap:6px} .scale i{width:9px;height:9px;border-radius:2px;display:inline-block}
+  /* footer / error */
   footer{margin-top:18px;text-align:center;color:var(--faint);font:11px/1.7 var(--mono)}
   .err{padding:13px 15px;border:1px solid rgba(212,105,79,.4);background:rgba(212,105,79,.08);
     border-radius:9px;color:#e9b3a6;margin-bottom:16px;font-size:13px;display:none}
