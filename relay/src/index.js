@@ -196,11 +196,12 @@ async function handle(request, env, ctx) {
 // ---- Team mode (docs/TEAM.md) ---------------------------------------------
 //
 // KV layout (all values JSON):
-//   tadm:{tid}                admin bearer hash + team tz     {hash, tz}
-//   tmem:{tid}:{mid}          member registry (admin-written) {hash, name}
-//   tday:{tid}:{date}:{mid}   one usage row per member per LOCAL day (last write wins)
-//   tfinal:{tid}:{month}:{mid} frozen month-end row (written by the 23:59 cron, never expires)
-//   tesc:{tid}:{mid}          sealed OAuth access token       {iv, ct, exp}
+//   tadm:{tid}                     admin bearer hash + team tz + org  {hash, tz, org}
+//   tmem:{tid}:{mid}               member registry (admin-written)    {hash, name}
+//   tday:{tid}:{date}:{mid}:{did}  one usage row per member DEVICE per LOCAL day;
+//                                  did=`account` is the cron's account-level row
+//   tfinal:{tid}:{month}:{mid}     frozen month-end row (23:59 cron, never expires)
+//   tesc:{tid}:{mid}               sealed OAuth access token          {iv, ct, exp}
 //
 // Date segments sort lexicographically, so one prefix list per month covers the ledger.
 
@@ -218,9 +219,10 @@ async function handleTeam(request, env, url, tid, sub) {
   if (sub === "/init" && method === "POST") {
     const body = (await readJson(request)) || {};
     const tz = validTz(body.tz) || (adm && adm.tz) || DEFAULT_TEAM_TZ;
+    const org = typeof body.org === "string" && body.org.length <= 64 ? body.org : (adm && adm.org) || null;
     if (adm && !isAdmin) return json({ error: "forbidden" }, 403);
-    await env.KV.put(`tadm:${tid}`, JSON.stringify({ hash: bearerHash, tz }));
-    return json({ ok: true, tz });
+    await env.KV.put(`tadm:${tid}`, JSON.stringify({ hash: bearerHash, tz, org }));
+    return json({ ok: true, tz, org });
   }
   if (!adm) return json({ error: "unknown_team" }, 404);
 
@@ -259,20 +261,18 @@ async function handleTeam(request, env, url, tid, sub) {
     if (!timingSafeEqual(mem.hash, bearerHash)) return json({ error: "forbidden" }, 403);
 
     if (leaf === "/report" && method === "PUT") {
-      const row = sanitizeReport(await readJson(request), mem.name);
-      if (!row) return json({ error: "bad_report" }, 400);
-      const dayKey = `tday:${tid}:${tzParts(adm.tz).date}:${mid}`;
+      const body = await readJson(request);
+      const did = body && typeof body.did === "string" && /^[A-Za-z0-9_-]{4,64}$/.test(body.did)
+        ? body.did : null;
+      const row = sanitizeReport(body, mem.name);
+      // Device rows are keyed per did, distinct from the cron's reserved `account`
+      // key, so a device push and the 23:59 cron row can coexist without clobbering.
+      if (!row || !did || did === "account") return json({ error: "bad_report" }, 400);
+      const dayKey = `tday:${tid}:${tzParts(adm.tz).date}:${mid}:${did}`;
       const prev = await env.KV.getWithMetadata(dayKey);
       const lastWrite = (prev.metadata && Number(prev.metadata.wts)) || 0;
       if (lastWrite && Date.now() - lastWrite < REPORT_MIN_GAP_MS) {
         return json({ error: "rate_limited" }, 429);
-      }
-      // The cron's 23:59 row is authoritative for a closed day; a late desktop
-      // push (e.g. a machine waking after midnight still holding yesterday's date)
-      // must not clobber it. Same-day pushes always win over an earlier cron row.
-      const prevRow = prev.value ? JSON.parse(prev.value) : null;
-      if (prevRow && prevRow.src === "cron" && row.ts <= (prevRow.ts || 0)) {
-        return new Response(null, { status: 204 });
       }
       row.src = "push";
       await env.KV.put(dayKey, JSON.stringify(row), {
@@ -293,6 +293,22 @@ async function handleTeam(request, env, url, tid, sub) {
       const tok = body && typeof body.access_token === "string" ? body.access_token : null;
       const exp = body && Number(body.expires_at) || 0; // epoch ms
       if (!tok || tok.length > 4096 || exp <= Date.now()) return json({ error: "bad_token" }, 400);
+      // Org binding: a token escrowed to this team must belong to the team's org.
+      // Defeats a leaked join code being used from an outside account.
+      if (adm.org) {
+        let prof;
+        try {
+          const pr = await fetch("https://api.anthropic.com/api/oauth/profile", {
+            headers: { ...OAUTH_HEADERS, Authorization: `Bearer ${tok}` },
+          });
+          if (!pr.ok) return json({ error: "verify_failed" }, 403);
+          prof = await pr.json();
+        } catch {
+          return json({ error: "verify_failed" }, 403);
+        }
+        const org = prof && prof.organization && prof.organization.uuid;
+        if (org !== adm.org) return json({ error: "wrong_org" }, 403);
+      }
       const sealed = await seal(env.TEAM_SEAL_KEY, tok);
       const ttl = Math.max(60, Math.min(Math.floor((exp - Date.now()) / 1000), 7 * 86400));
       await env.KV.put(`tesc:${tid}:${mid}`, JSON.stringify({ ...sealed, exp }), { expirationTtl: ttl });
@@ -308,27 +324,42 @@ async function handleTeam(request, env, url, tid, sub) {
     const now = new Date();
     const today = tzParts(tz, now).date;
     const yesterday = tzParts(tz, new Date(now.getTime() - 86400_000)).date;
-    const members = await listAll(env, `tmem:${tid}:`);
-    const out = [];
-    for (const key of members) {
+
+    // One prefix list per day yields all members' device rows in a single sweep:
+    // {mid: {did: row}}. Cheaper than a get per member as the team grows.
+    const dayMap = async (date) => {
+      const out = {};
+      for (const key of await listAll(env, `tday:${tid}:${date}:`)) {
+        const rest = key.slice(`tday:${tid}:${date}:`.length); // "{mid}:{did}"
+        const i = rest.indexOf(":");
+        if (i < 0) continue;
+        const v = await env.KV.get(key);
+        if (v) ((out[rest.slice(0, i)] = out[rest.slice(0, i)] || {})[rest.slice(i + 1)] = JSON.parse(v));
+      }
+      return out;
+    };
+    const [todayRows, ydayRows] = await Promise.all([dayMap(today), dayMap(yesterday)]);
+
+    const members = [];
+    for (const key of await listAll(env, `tmem:${tid}:`)) {
       const mid = key.slice(`tmem:${tid}:`.length);
-      const [memRaw, todayRaw, ydayRaw, escRaw] = await Promise.all([
-        env.KV.get(key),
-        env.KV.get(`tday:${tid}:${today}:${mid}`),
-        env.KV.get(`tday:${tid}:${yesterday}:${mid}`),
-        env.KV.get(`tesc:${tid}:${mid}`),
-      ]);
+      const [memRaw, escRaw] = await Promise.all([env.KV.get(key), env.KV.get(`tesc:${tid}:${mid}`)]);
       const mem = memRaw ? JSON.parse(memRaw) : {};
       const esc = escRaw ? JSON.parse(escRaw) : null;
-      out.push({
+      const tdev = todayRows[mid] || {};
+      const ydev = ydayRows[mid] || {};
+      const devices = Object.keys(tdev).filter((d) => d !== "account")
+        .map((d) => ({ did: d, ...tdev[d] }));
+      members.push({
         mid,
         name: mem.name || mid.slice(0, 8),
-        today: todayRaw ? JSON.parse(todayRaw) : null,
-        yesterday: ydayRaw ? JSON.parse(ydayRaw) : null,
+        account: pickAccountRow(tdev) || pickAccountRow(ydev),
+        account_is_today: !!pickAccountRow(tdev),
+        devices,
         escrow: esc ? { present: true, exp: esc.exp } : { present: false },
       });
     }
-    return json({ team: tid, tz, today, members: out });
+    return json({ team: tid, tz, today, members });
   }
 
   if (sub === "/ledger" && method === "GET") {
@@ -342,11 +373,15 @@ async function handleTeam(request, env, url, tid, sub) {
     }
     const days = {};
     for (const key of await listAll(env, `tday:${tid}:${month}-`)) {
-      const rest = key.slice(`tday:${tid}:`.length); // "{date}:{mid}"
+      const rest = key.slice(`tday:${tid}:`.length); // "{date}:{mid}:{did}"
       const date = rest.slice(0, 10);
-      const mid = rest.slice(11);
+      const tail = rest.slice(11);                   // "{mid}:{did}"
+      const i = tail.indexOf(":");
+      if (i < 0) continue;
+      const mid = tail.slice(0, i);
+      const did = tail.slice(i + 1);
       const row = await env.KV.get(key);
-      if (row) (days[date] = days[date] || {})[mid] = JSON.parse(row);
+      if (row) (((days[date] = days[date] || {})[mid] = days[date][mid] || {})[did] = JSON.parse(row));
     }
     const finals = {};
     for (const key of await listAll(env, `tfinal:${tid}:${month}:`)) {
@@ -358,6 +393,19 @@ async function handleTeam(request, env, url, tid, sub) {
   }
 
   return json({ error: "not_found" }, 404);
+}
+
+// The authoritative account-level row for a member's day: the cron's row if
+// present, else the newest device push. Mirrored in Python (_day_account_row).
+function pickAccountRow(devmap) {
+  if (!devmap || typeof devmap !== "object") return null;
+  if (devmap.account) return devmap.account;
+  let best = null;
+  for (const did of Object.keys(devmap)) {
+    const r = devmap[did];
+    if (r && (!best || (r.ts || 0) > (best.ts || 0))) best = r;
+  }
+  return best;
 }
 
 // Compact plaintext usage row a member pushes: display numbers only, no content.
@@ -383,6 +431,10 @@ function sanitizeReport(body, fallbackName) {
       pct: pct(body.extra.pct),
     };
   }
+  row.did = typeof body.did === "string" ? body.did.slice(0, 64) : null;
+  row.device = cleanName(body.device) || null;
+  row.tok_month = typeof body.tok_month === "number" && isFinite(body.tok_month) && body.tok_month >= 0
+    ? Math.floor(body.tok_month) : null;
   if (row.fh_pct === null && row.sd_pct === null && !row.extra) return null;
   return row;
 }
@@ -466,7 +518,9 @@ async function teamCron(env) {
       const mem = JSON.parse((await env.KV.get(memKey)) || "{}");
       row.name = mem.name || mid.slice(0, 8);
       row.src = "cron";
-      await env.KV.put(`tday:${tid}:${local.date}:${mid}`, JSON.stringify(row), {
+      // Reserved device id `account`: an account-level row (no single device),
+      // distinct from any device's push key so both survive on the same day.
+      await env.KV.put(`tday:${tid}:${local.date}:${mid}:account`, JSON.stringify(row), {
         expirationTtl: DAY_ROW_TTL_S,
         metadata: { wts: Date.now() },
       });
