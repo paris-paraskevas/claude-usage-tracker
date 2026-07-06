@@ -2402,14 +2402,23 @@ DASHBOARD_HTML = r"""<!doctype html>
   .credits .csub{margin-top:9px}
 
   /* team */
-  .tmrow{display:flex;align-items:center;gap:14px;padding:10px 0;border-top:1px solid var(--line)}
+  .tmkpis{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+  .tmkpi{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:12px 14px}
+  .tmkpi b{display:block;font:600 22px/1.2 var(--mono);color:var(--ink);margin-top:4px;font-variant-numeric:tabular-nums}
+  .tmkpi.warn b{color:#d4694f}
+  .tmrow{padding:11px 0;border-top:1px solid var(--line)}
   .tmrow:first-child{border-top:0;padding-top:2px}
+  .tmtop{display:flex;align-items:center;gap:14px}
   .tmname{width:150px;min-width:0}
   .tmname b{font:600 13px/1.3 var(--sans);display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .tmbars{flex:1;display:flex;flex-direction:column;gap:6px;min-width:120px}
-  .tmbars .bar{height:7px}
-  .tmspend{font:600 13px/1.3 var(--mono);text-align:right;min-width:120px;font-variant-numeric:tabular-nums}
-  .tmspend .csub{font-weight:400}
+  .tmwin{flex:1;min-width:110px}
+  .tmwin .wcap{display:flex;justify-content:space-between;font:10px/1.4 var(--mono);color:var(--dim)}
+  .tmwin .bar{height:7px;margin-top:3px}
+  .tmspend{width:150px;text-align:right;font-variant-numeric:tabular-nums}
+  .tmspend b{font:600 15px/1.3 var(--mono);color:var(--ink)}
+  .tmdevs{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 0 164px}
+  .tmdev{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:3px 8px;font:10px/1.5 var(--mono);color:var(--dim)}
+  .tmdev b{color:var(--ink);font-weight:600}
   .tmtable{width:100%;border-collapse:collapse;font:12px/1.5 var(--mono)}
   .tmtable th{text-align:left;color:var(--faint);font-weight:500;padding:6px 10px 6px 0;border-bottom:1px solid var(--line)}
   .tmtable td{padding:7px 10px 7px 0;border-bottom:1px solid var(--line);color:var(--ink);font-variant-numeric:tabular-nums}
@@ -2687,6 +2696,10 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="card panel">
         <div class="ptitle"><span>Members · live</span>
           <span class="srt"><span class="legend" id="tm-asof"></span><button class="sbtn" id="tm-reload">Refresh</button></span></div>
+        <div class="tmkpis">
+          <div class="tmkpi"><span class="lbl csub">org spend this month</span><b id="tm-kpi-spend">—</b><div class="csub" id="tm-kpi-spend-sub"></div></div>
+          <div class="tmkpi" id="tm-kpi-near-card"><span class="lbl csub">near limits now</span><b id="tm-kpi-near">—</b><div class="csub" id="tm-kpi-near-sub"></div></div>
+        </div>
         <div id="tm-members"><div class="csub">loading…</div></div>
         <div class="setrow" style="margin-top:14px"><span class="setlbl">Add member</span>
           <input type="text" id="tm-newname" class="tminput" placeholder="member name" spellcheck="false">
@@ -3198,11 +3211,19 @@ function renderTeamState(d){
     " min · team clock "+esc(t.tz||"");
   const sh=$("tm-share"); if(document.activeElement!==sh) sh.checked=!!t.share_token;
 }
-function tmBar(p,lbl){
-  if(p==null)return "<div class='bar' title='"+lbl+" —'><i style='width:0'></i></div>";
-  const c=p>=80?"#d4694f":(p>=60?"#cda24e":"#5e9e72");
-  return "<div class='bar' title='"+lbl+" "+Math.round(p)+"%'><i style='width:"+Math.min(100,p)+"%;background:"+c+"'></i></div>";
+function tmTok(n){ if(n==null)return "—"; if(n>=1e9)return (n/1e9).toFixed(1)+"B"; if(n>=1e6)return (n/1e6).toFixed(1)+"M"; if(n>=1e3)return (n/1e3).toFixed(1)+"k"; return String(n); }
+function tmWin(label,p,reset){
+  const pct=(p==null)?"—":Math.round(p)+"%";
+  const c=p==null?"#3a352f":(p>=80?"#d4694f":(p>=60?"#cda24e":"#5e9e72"));
+  const cap=label+" · "+pct+(reset?" · "+reset:"");
+  return "<div class='tmwin'><div class='wcap'><span>"+cap+"</span></div>"+
+         "<div class='bar'><i style='width:"+(p==null?0:Math.min(100,p))+"%;background:"+c+"'></i></div></div>";
 }
+function tmReset(iso){ if(!iso)return ""; const d=new Date(iso); if(isNaN(d))return "";
+  const now=new Date(); return d.toDateString()===now.toDateString()
+    ? d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})
+    : d.toLocaleDateString([],{weekday:"short"}); }
+function tmCur(d){ for(const mm of (d.members||[])){ const c=((mm.account||{}).extra||{}).currency; if(c)return c; } return ""; }
 async function loadTeamOverview(){
   const box=$("tm-members");
   try{
@@ -3210,18 +3231,28 @@ async function loadTeamOverview(){
     TMOV=d;
     if(d.error){ box.innerHTML="<div class='csub'>"+esc(d.error)+"</div>"; return; }
     $("tm-asof").textContent="today "+esc(d.today||"")+" · "+esc(d.tz||"");
+    const k=d.kpis||{};
+    $("tm-kpi-spend").textContent=(k.org_spend!=null)?tmMoney(k.org_spend,tmCur(d)):"—";
+    $("tm-kpi-spend-sub").textContent="across "+(k.member_count||0)+" member"+((k.member_count||0)===1?"":"s")+" since the 1st";
+    const near=k.near||[];
+    $("tm-kpi-near").textContent=near.length;
+    $("tm-kpi-near-sub").textContent=near.slice(0,3).map(n=>n.name+" "+n.window).join(" · ")||"all clear";
+    $("tm-kpi-near-card").className="tmkpi"+(near.length?" warn":"");
     if(!(d.members||[]).length){ box.innerHTML="<div class='csub'>No members yet — add one below.</div>"; return; }
     box.innerHTML=d.members.map(m=>{
-      const r=m.today||m.yesterday||{}, stale=!m.today, e=r.extra||{};
+      const r=m.account||{}, e=r.extra||{};
       const seen=r.ts?new Date(r.ts*1000).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):"no data";
-      const tag=(stale&&r.ts?"yday · ":"")+seen+((m.escrow||{}).present?" · escrow":"");
-      return "<div class='tmrow'>"+
+      const tag=(m.account_is_today===false&&r.ts?"yday · ":"")+seen+((m.escrow||{}).present?" · escrow ✓":" · no escrow");
+      const devs=(m.devices||[]).map(dv=>"<span class='tmdev'>"+esc(dv.device||dv.did||"device")+" <b>"+tmTok(dv.tok_month)+"</b></span>").join("");
+      const sum=(m.devices||[]).length>1?"<span class='csub' style='align-self:center'>"+tmTok(m.month_tokens)+" this month</span>":"";
+      return "<div class='tmrow'><div class='tmtop'>"+
         "<div class='tmname'><b>"+esc(m.name)+"</b><span class='csub'>"+esc(tag)+"</span></div>"+
-        "<div class='tmbars'>"+tmBar(r.fh_pct,"5h")+tmBar(r.sd_pct,"weekly")+"</div>"+
-        "<div class='tmspend'>"+(e.enabled?tmMoney(e.used,e.currency)+"<br><span class='csub'>of "+tmMoney(e.limit,e.currency)+"</span>"
-                                          :"<span class='csub'>no extra usage</span>")+"</div>"+
+        tmWin("5h",r.fh_pct,tmReset(r.fh_resets_at))+
+        tmWin("weekly",r.sd_pct,tmReset(r.sd_resets_at))+
+        "<div class='tmspend'><b>"+(m.month_spend!=null?tmMoney(m.month_spend,e.currency):"—")+"</b>"+
+        "<br><span class='csub'>since the 1st"+(e.enabled&&e.pct!=null?" · "+Math.round(e.pct)+"% of cap":"")+"</span></div>"+
         "<button class='sbtn' data-mid='"+esc(m.mid)+"' title='remove member'>×</button>"+
-        "</div>";
+        "</div>"+(devs?"<div class='tmdevs'>"+devs+sum+"</div>":"")+"</div>";
     }).join("");
   }catch(e){ box.innerHTML="<div class='csub'>relay unreachable</div>"; }
 }
@@ -3233,17 +3264,18 @@ async function loadTeamLedger(){
     const d=await (await fetch("/api/team/ledger?month="+TMMONTH,{cache:"no-store"})).json();
     TMLED=d;
     if(d.error){ box.innerHTML="<div class='csub'>"+esc(d.error)+"</div>"; return; }
-    const names=d.members||{}, spend=d.computed_spend||{}, finals=d.finals||{}, days=d.days||{};
+    const names=d.members||{}, spend=d.computed_spend||{}, finals=d.finals||{}, days=d.days||{}, monthTok=d.month_tokens||{};
     const dates=Object.keys(days).sort();
     const mids=Object.keys(names); Object.keys(spend).forEach(m=>{ if(mids.indexOf(m)<0)mids.push(m); });
     if(!mids.length){ box.innerHTML="<div class='csub'>No data for "+esc(TMMONTH)+" yet.</div>"; return; }
-    const lastRow=m=>{ for(let i=dates.length-1;i>=0;i--){ const r=days[dates[i]][m]; if(r)return r; } return finals[m]||null; };
-    let html="<table class='tmtable'><tr><th>member</th><th class='r'>month spend</th><th class='r'>meter</th><th class='r'>cap</th><th class='r'>days</th><th>state</th></tr>";
+    const lastRow=m=>{ for(let i=dates.length-1;i>=0;i--){ const a=tmAcct((days[dates[i]]||{})[m]); if(a)return a; } return finals[m]||null; };
+    let html="<table class='tmtable'><tr><th>member</th><th class='r'>€ month</th><th class='r'>tokens</th><th class='r'>meter</th><th class='r'>cap</th><th class='r'>days</th><th>state</th></tr>";
     mids.sort((a,b)=>(spend[b]||0)-(spend[a]||0)).forEach(m=>{
       const fin=finals[m], lr=fin||lastRow(m)||{}, e=lr.extra||{};
-      const nDays=dates.filter(dt=>days[dt][m]&&((days[dt][m].extra||{}).used!=null)).length;
+      const nDays=dates.filter(dt=>{ const a=tmAcct((days[dt]||{})[m]); return a&&((a.extra||{}).used!=null); }).length;
       html+="<tr><td>"+esc(names[m]||m.slice(0,8))+"</td>"+
         "<td class='r'><b>"+tmMoney(spend[m],e.currency)+"</b></td>"+
+        "<td class='r'>"+tmTok(monthTok[m])+"</td>"+
         "<td class='r'>"+tmMoney(e.used,e.currency)+"</td>"+
         "<td class='r'>"+tmMoney(e.limit,e.currency)+"</td>"+
         "<td class='r'>"+nDays+"</td>"+
@@ -3252,17 +3284,22 @@ async function loadTeamLedger(){
     box.innerHTML=html+"</table>";
   }catch(e){ box.innerHTML="<div class='csub'>relay unreachable</div>"; }
 }
+// The account-authoritative row among a member's device rows for one day: cron's
+// `account` if present, else the newest push. Mirrors the relay + Python.
+function tmAcct(devmap){ if(!devmap)return null; if(devmap.account)return devmap.account;
+  let best=null; for(const k of Object.keys(devmap)){ const r=devmap[k]; if(r&&(!best||(r.ts||0)>(best.ts||0)))best=r; } return best; }
 function tmCsv(){
   if(!TMLED||TMLED.error)return;
-  const names=TMLED.members||{}, spend=TMLED.computed_spend||{}, finals=TMLED.finals||{}, days=TMLED.days||{};
+  const names=TMLED.members||{}, spend=TMLED.computed_spend||{}, finals=TMLED.finals||{}, days=TMLED.days||{}, monthTok=TMLED.month_tokens||{};
   const dates=Object.keys(days).sort();
-  const lastRow=m=>{ for(let i=dates.length-1;i>=0;i--){ const r=days[dates[i]][m]; if(r)return r; } return finals[m]||null; };
-  let csv="member,month,spend,currency,meter_end,cap,days_sampled,final_frozen\r\n";
+  const lastRow=m=>{ for(let i=dates.length-1;i>=0;i--){ const a=tmAcct((days[dates[i]]||{})[m]); if(a)return a; } return finals[m]||null; };
+  let csv="member,month,spend,currency,tokens,meter_end,cap,days_sampled,final_frozen\r\n";
   const mids=Object.keys(names); Object.keys(spend).forEach(m=>{ if(mids.indexOf(m)<0)mids.push(m); });
   mids.forEach(m=>{
     const lr=finals[m]||lastRow(m)||{}, e=lr.extra||{};
     csv+='"'+String(names[m]||m).replace(/"/g,'""')+'",'+TMLED.month+","+(spend[m]!=null?spend[m]:"")+","+(e.currency||"")+","+
-      (e.used!=null?e.used:"")+","+(e.limit!=null?e.limit:"")+","+dates.filter(dt=>!!days[dt][m]).length+","+(finals[m]?"yes":"no")+"\r\n";
+      (monthTok[m]!=null?monthTok[m]:"")+","+
+      (e.used!=null?e.used:"")+","+(e.limit!=null?e.limit:"")+","+dates.filter(dt=>!!(days[dt]||{})[m]).length+","+(finals[m]?"yes":"no")+"\r\n";
   });
   const a=document.createElement("a");
   a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
