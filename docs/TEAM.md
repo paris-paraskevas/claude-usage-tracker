@@ -46,11 +46,15 @@ plaintext member token travels — send it privately; re-adding the member voids
 
 **Admin (once):**
 1. Deploy the relay as in `docs/REMOTE.md` (same Worker serves both features).
-2. Enable escrow + the cron:
+2. Create the team database + apply the schema:
+   `cd relay && npx wrangler d1 create claude-usage-team` → paste the returned
+   `database_id` into `wrangler.toml`, then
+   `npx wrangler d1 execute claude-usage-team --file=schema.sql`.
+3. Enable escrow + the cron:
    `python -c "import os,base64;print(base64.b64encode(os.urandom(32)).decode())"`
    → `npx wrangler secret put TEAM_SEAL_KEY`, then `npx wrangler deploy` (picks up
    the `[triggers]` crons).
-3. In the tracker: **Team tab → Create team** (uses the relay URL from
+4. In the tracker: **Team tab → Create team** (uses the relay URL from
    Settings → Remote; enrolls you as the first member), then **Add member** per
    teammate and send each code privately.
 
@@ -81,11 +85,14 @@ devices, since `/api/oauth/usage` reports for the whole account); only `tok_mont
 per-device. claude.ai web/mobile burn shows in € and the limit bars but has no local
 log, so it is absent from token counts.
 
-KV: `tadm:{tid}` (`{hash,tz,org}`), `tmem:{tid}:{mid}`,
-`tday:{tid}:{date}:{mid}:{did}` (~13-month TTL; `did=account` is the cron's
-account-level row), `tfinal:{tid}:{month}:{mid}` (never expires), `tesc:{tid}:{mid}`.
-Per-device keying means a member on two machines (same join code) no longer has one
-machine's row clobber the other's — each device is its own key.
+**Storage: Cloudflare D1** (SQLite; schema in `relay/schema.sql`) — tables `teams`,
+`members`, `usage_rows` (one row per member **device** per local day; `did='account'`
+is the cron's account-level row), `finals` (frozen month-end, never pruned), `escrow`.
+Per-device rows mean a member on two machines (same join code) no longer has one
+machine's row clobber the other's. **Phone sync stays in KV** (E2EE blobs) — only team
+mode is in D1. D1 has no TTL, so the cron prunes `usage_rows` past the retention window
+and expired `escrow` rows. The HTTP contract is identical to the earlier KV design, so
+the desktop and phone clients are unchanged by this.
 
 ## Org binding — who can see the admin page
 
@@ -119,9 +126,9 @@ useless from an account outside the org.
 
 ## Cost (Cloudflare free tier)
 
-Steady state per **device**: ~4 report writes/hour while the desktop runs
-(`team_report_seconds` 900), ~2 escrow writes/day (token rotations), 1–2 cron
-writes/day per member. A 5-member team on single machines during work hours, plus
-the phone-sync feature, stays comfortably under the 1 000 KV writes/day free budget.
-Since each device is now its own key, count devices (not members) when estimating;
-nudge `team_report_seconds` up as the fleet grows.
+Team mode's writes land in **D1**, whose free tier is **100,000 rows written/day** and
+5M read/day — ~100× KV's 1,000 writes/day, and D1 doesn't pause on inactivity, so the
+month-end cron is never at risk. Steady state per **device**: ~4 report writes/hour
+while the desktop runs (`team_report_seconds` 900), ~2 escrow writes/day, 1–2 cron
+writes/day per member. A team writing a few hundred rows/day doesn't come close to the
+cap. (Phone sync's E2EE blobs stay in KV and are unaffected.)

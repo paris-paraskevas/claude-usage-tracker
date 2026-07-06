@@ -83,14 +83,16 @@ Base: `https://<worker>`. All calls require `Authorization: Bearer <readToken>`.
 | `DELETE /v1/acct/{accountId}/push-token` | phone | `{ "token": "<fcm>" }` | `204` |
 | `POST /v1/acct/{accountId}/push` | desktop | encrypted blob (push plaintext) | `200 {"sent":N}` — fans out an FCM **data** message to every registered token |
 
-- Storage: Cloudflare **KV** (`snapshot:{accountId}`, `tokens:{accountId}` set,
-  `auth:{accountId}` = readTokenHash). The snapshot's last-write time rides in its KV
-  metadata (the write throttle), and the auth TTL is refreshed at most once a day, so a
-  steady sync costs **one KV write per push**. v2 may switch to a Durable Object per
-  account for strong consistency + lower latency.
-- Per-account write throttle (8 s min gap). Desktop syncs on a throttle
-  (`remote_sync_seconds`, default 300), not every UI poll. At one write/push, 300s is
-  ~288 writes/day — well under a free-tier Worker's 1000 writes/day.
+- Storage: the **snapshot blob lives in Cloudflare D1** (`snapshots` table in
+  `relay/schema.sql`) — moved off KV so a ~10s sync stays free (D1 allows 100k
+  writes/day vs KV's 1,000). It's still E2EE: the row holds only the opaque ciphertext.
+  `tokens:{accountId}` (FCM set), `auth:{accountId}` (readTokenHash, TOFU), and the
+  transient `cmd:{accountId}` stay in **KV** (low write volume). The snapshot's last-write
+  time is a column (`wts`, the throttle); the auth hash's TTL is refreshed at most once a
+  day. D1 has no TTL, so the Worker cron prunes `snapshots` past `exp` (the 7-day forget).
+- Per-account write throttle (5 s min gap). Desktop syncs on a throttle
+  (`remote_sync_seconds`, default 10, bounded below by `ui_refresh_seconds`), not every
+  UI poll. At ~10s that's ~8.6k writes/day — comfortably under D1's 100k/day.
 
 ## Push (FCM HTTP v1, E2EE-preserving)
 
@@ -116,8 +118,11 @@ keep the logic in one place and stay compatible with E2EE.)
 
 ## Operator setup (user-owned accounts)
 
-1. **Cloudflare:** `cd relay && npm i`, create a KV namespace, set IDs in
-   `wrangler.toml`, `npx wrangler deploy`. Note the Worker URL.
+1. **Cloudflare:** `cd relay && npm i`, create a KV namespace **and** a D1 database
+   (`npx wrangler d1 create claude-usage-team` → `npx wrangler d1 execute
+   claude-usage-team --file=schema.sql`), set both IDs in `wrangler.toml`,
+   `npx wrangler deploy`. Note the Worker URL. (D1 backs the snapshot + team storage;
+   KV backs auth/tokens/commands.)
 2. **Firebase (FCM):** create a project, add an Android app (package
    `com.claudeusage.tracker`), download `google-services.json` → `android/app/`. Create a
    service account, download its JSON, set the three `FCM_*` Worker secrets
