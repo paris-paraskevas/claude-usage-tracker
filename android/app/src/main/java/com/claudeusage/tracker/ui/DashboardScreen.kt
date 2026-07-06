@@ -31,6 +31,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.filled.Forum
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Speed
@@ -88,6 +89,8 @@ import com.claudeusage.tracker.RelayClient
 import com.claudeusage.tracker.Msg
 import com.claudeusage.tracker.Sess
 import com.claudeusage.tracker.Snap
+import com.claudeusage.tracker.TeamMember
+import com.claudeusage.tracker.TeamOverview
 import com.claudeusage.tracker.Transcript
 import com.claudeusage.tracker.Win
 import com.claudeusage.tracker.widget.UsageWidget
@@ -110,7 +113,7 @@ fun DashboardScreen(onUnpair: () -> Unit) {
     var snap by remember { mutableStateOf<Snap?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    var tab by rememberSaveable { mutableStateOf(0) }
+    var tab by rememberSaveable { mutableStateOf("home") }
     var ctxSel by rememberSaveable { mutableStateOf<String?>(null) }   // which session drives the Context gauge
     var chatSel by rememberSaveable { mutableStateOf<String?>(null) }  // which conversation the Chat tab shows
 
@@ -198,14 +201,15 @@ fun DashboardScreen(onUnpair: () -> Unit) {
 
     Scaffold(
         containerColor = Bg,
-        bottomBar = { BottomNav(tab) { tab = it } },
+        bottomBar = { BottomNav(s.teamOverview != null, tab) { tab = it } },
     ) { inner ->
         when (tab) {
-            0 -> OverviewPage(s, now, inner, accounts, activeId, switchTo, addAccount,
+            "home" -> OverviewPage(s, now, inner, accounts, activeId, switchTo, addAccount,
                 ctxSel, onCtxSel = { ctxSel = it }) { scope.launch { reload() } }
-            1 -> SessionsPage(s, inner)
-            2 -> ChatPage(s, inner, chatSel, onChatSel = { chatSel = it })
-            3 -> StatsPage(s, inner)
+            "team" -> TeamPage(s, inner)
+            "sessions" -> SessionsPage(s, inner)
+            "chat" -> ChatPage(s, inner, chatSel, onChatSel = { chatSel = it })
+            "history" -> StatsPage(s, inner)
             else -> SettingsPage(s, Prefs.active(ctx), now, inner, accounts, activeId,
                 switchTo, addAccount, removeAccount) { scope.launch { reload() } }
         }
@@ -316,6 +320,63 @@ private fun SessionsPage(s: Snap, inner: PaddingValues) {
         }
     }
 }
+
+/** Admin-only team overview, from the compact `team_overview` embedded in the snapshot. */
+@Composable
+private fun TeamPage(s: Snap, inner: PaddingValues) {
+    val ov = s.teamOverview
+    PageScroll(inner) {
+        PageTitle("Team", ov?.tz?.ifBlank { null })
+        Spacer(Modifier.height(16.dp))
+        if (ov == null) {
+            Text("Team data appears here when you're a team admin.", color = Dim, fontSize = 14.sp)
+            return@PageScroll
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            StatTile("Org spend", ov.orgSpend?.let { fmtMoney(it, teamCur(ov)) } ?: "—", Modifier.weight(1f))
+            StatTile("Near limits", ov.near.size.toString(), Modifier.weight(1f))
+        }
+        if (ov.near.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            Text(ov.near.joinToString(" · ") { "${it.name} ${it.window}" },
+                color = hexColor("#d4694f"), fontSize = 12.sp, fontFamily = MONO)
+        }
+        Spacer(Modifier.height(16.dp))
+        ov.members.forEach { TeamMemberRow(it); Spacer(Modifier.height(10.dp)) }
+    }
+}
+
+@Composable
+private fun TeamMemberRow(m: TeamMember) {
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(CardBg).padding(14.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Text(m.name, color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1,
+                modifier = Modifier.weight(1f))
+            Text(m.monthSpend?.let { fmtMoney(it, m.currency) } ?: "—",
+                color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold, fontFamily = MONO)
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth()) {
+            Column(Modifier.weight(1f)) {
+                Text("5h " + (m.fhPct?.let { "${it.toInt()}%" } ?: "—"), color = Faint, fontSize = 11.sp, fontFamily = MONO)
+                Spacer(Modifier.height(4.dp))
+                Bar(m.fhPct ?: 0.0, usageColor(m.fhPct ?: 0.0), Modifier.fillMaxWidth())
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text("wk " + (m.sdPct?.let { "${it.toInt()}%" } ?: "—"), color = Faint, fontSize = 11.sp, fontFamily = MONO)
+                Spacer(Modifier.height(4.dp))
+                Bar(m.sdPct ?: 0.0, usageColor(m.sdPct ?: 0.0), Modifier.fillMaxWidth())
+            }
+        }
+    }
+}
+
+private fun fmtMoney(v: Double, cur: String): String =
+    (if (cur.isNotBlank()) "$cur " else "") + String.format("%.2f", v)
+
+private fun teamCur(ov: TeamOverview): String =
+    ov.members.firstOrNull { it.currency.isNotBlank() }?.currency ?: ""
 
 @Composable
 private fun ChatPage(s: Snap, inner: PaddingValues, chatSel: String?, onChatSel: (String?) -> Unit) {
@@ -871,23 +932,26 @@ private fun ErrorState(msg: String, onRetry: () -> Unit) {
 }
 
 @Composable
-private fun BottomNav(selected: Int, onSelect: (Int) -> Unit) {
+private fun BottomNav(hasTeam: Boolean, selected: String, onSelect: (String) -> Unit) {
     NavigationBar(containerColor = Panel, tonalElevation = 0.dp) {
-        val items = listOf(
-            Triple("Overview", Icons.Filled.Speed, 0),
-            Triple("Sessions", Icons.AutoMirrored.Filled.ViewList, 1),
-            Triple("Chat", Icons.Filled.Forum, 2),
-            Triple("Stats", Icons.Filled.Insights, 3),
-            Triple("Settings", Icons.Filled.Settings, 4),
-        )
+        // Admins get a Team destination (replacing Sessions, which is previewed on Home);
+        // everyone else keeps Sessions. Stats is labelled History.
+        val items = buildList {
+            add(Triple("Home", Icons.Filled.Speed, "home"))
+            if (hasTeam) add(Triple("Team", Icons.Filled.Groups, "team"))
+            else add(Triple("Sessions", Icons.AutoMirrored.Filled.ViewList, "sessions"))
+            add(Triple("Chat", Icons.Filled.Forum, "chat"))
+            add(Triple("History", Icons.Filled.Insights, "history"))
+            add(Triple("Settings", Icons.Filled.Settings, "settings"))
+        }
         val colors = NavigationBarItemDefaults.colors(
             selectedIconColor = Accent, selectedTextColor = Accent, indicatorColor = Panel2,
             unselectedIconColor = Dim, unselectedTextColor = Faint,
         )
-        items.forEach { (label, icon, idx) ->
+        items.forEach { (label, icon, key) ->
             NavigationBarItem(
-                selected = selected == idx,
-                onClick = { onSelect(idx) },
+                selected = selected == key,
+                onClick = { onSelect(key) },
                 icon = { Icon(icon, contentDescription = label) },
                 label = { Text(label, fontSize = 11.sp) },
                 colors = colors,
