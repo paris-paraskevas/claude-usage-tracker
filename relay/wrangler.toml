@@ -5,14 +5,37 @@ main = "src/index.js"
 compatibility_date = "2026-06-01"
 workers_dev = true
 
+# Phone sync (E2EE blobs) lives in KV.
 # Create with: npx wrangler kv namespace create KV
 # then paste the returned id below (and a preview_id from `--preview`).
 [[kv_namespaces]]
 binding = "KV"
-id = "0123456789abcdef0123456789abcdef"          # <-- REPLACE with your KV namespace id
-preview_id = "0123456789abcdef0123456789abcdef"  # <-- REPLACE for `wrangler dev`
+id = "91af90ba92614681a59dcb51fccfe11f"
+preview_id = "c459a83c77494a6eb01c50d6f69f3a10"
+
+# Team mode (docs/TEAM.md) lives in D1 (SQLite) — free tier: 100k writes/day, 5M
+# reads/day, 5 GB, no inactivity pause. Set up:
+#   npx wrangler d1 create claude-usage-team        # paste the returned database_id below
+#   npx wrangler d1 execute claude-usage-team --file=schema.sql          # apply schema (remote)
+#   npx wrangler d1 execute claude-usage-team --local --file=schema.sql  # ...and for `wrangler dev --local`
+[[d1_databases]]
+binding = "DB"
+database_name = "claude-usage-team"
+database_id = "PLACEHOLDER_RUN_wrangler_d1_create"
 
 # Push secrets (do NOT put these here — set them out of band):
 #   npx wrangler secret put FCM_PROJECT_ID
 #   npx wrangler secret put FCM_CLIENT_EMAIL
 #   npx wrangler secret put FCM_PRIVATE_KEY     # paste the service-account private_key (PEM)
+
+# Team mode (docs/TEAM.md). The seal key enables member-token escrow for the
+# 23:59 ledger cron; without it, escrow PUTs answer 503 and the ledger falls
+# back to each member's last push of the day. Generate with:
+#   python -c "import os,base64;print(base64.b64encode(os.urandom(32)).decode())"
+#   npx wrangler secret put TEAM_SEAL_KEY
+
+# End-of-day ledger capture. Cron runs in UTC; the worker acts only when a
+# team's LOCAL time is 23:5x, so the pair covers UTC+2/+3 (DST) for the default
+# Europe/Athens. Teams in other zones need an entry matching their offset.
+[triggers]
+crons = ["59 20 * * *", "59 21 * * *"]

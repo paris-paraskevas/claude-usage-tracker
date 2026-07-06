@@ -94,7 +94,7 @@ BASE_HEADERS = {
 }
 
 DEFAULT_CONFIG = {
-    "ui_refresh_seconds": 15,            # how often the loop refreshes the UI from the statusline file
+    "ui_refresh_seconds": 10,            # how often the loop ticks (UI refresh + gates the relay sync/report below)
     "statusline_stale_seconds": 300,     # treat statusline data older than this as stale
     "api_extras_interval_seconds": 1800, # how often to refresh overage/scoped extras from the API
     "api_fallback_interval_seconds": 300,# min gap between API polls when no statusline data
@@ -126,14 +126,15 @@ DEFAULT_CONFIG = {
     "status_components": [],                    # component names to watch ([] = overall status)
     "remote_enabled": False,                    # opt-in: relay an E2EE snapshot to your phone
     "remote_relay_url": "https://claude-usage-relay.businessofzeus.workers.dev",  # default hosted relay; override in Settings
-    "remote_sync_seconds": 300,                 # how often to push the snapshot to the relay. Each push is
-                                                # 1 KV write on the relay; the Cloudflare free tier allows
-                                                # 1000 writes/day, so 300s (~288/day) stays well under it. A
-                                                # usage mirror doesn't need second-level freshness anyway.
+    "remote_sync_seconds": 10,                  # how often to push the snapshot to the relay. The snapshot now
+                                                # lives in D1 (not KV), whose free tier is 100k writes/day, so
+                                                # ~10s (~8.6k/day) is fine. Bounded below by ui_refresh_seconds
+                                                # (the loop tick). Raise it to spare phone battery/network.
     "notify_session_waiting": False,            # opt-in: toast/push when a Claude Code session finishes a turn awaiting you
     "remote_transcript": False,                 # opt-in: mirror the active conversation's text to your phone (E2EE)
     "remote_accept_prompts": False,             # opt-in (ARMED): run prompts sent from the phone, restricted (plan + read-only tools)
-    "team_report_seconds": 900,                 # how often a team member pushes its usage row (docs/TEAM.md)
+    "team_report_seconds": 10,                  # how often a team member pushes its usage row to D1 (docs/TEAM.md);
+                                                # bounded below by ui_refresh_seconds (the loop tick)
     "team_share_token": True,                   # escrow the short-lived OAuth access token so the relay's
                                                 # 23:59 cron can capture the ledger with this machine off
     "team_tz": "Europe/Athens",                 # the team's wall clock for daily/month-end ledger rows
@@ -3349,7 +3350,7 @@ $("tm-share").onchange=function(){ postCfg({team_share_token:this.checked}); };
 $("tm-members").addEventListener("click",function(e){
   const b=e.target.closest("button[data-mid]"); if(b)tmRemove(b.dataset.mid);
 });
-setInterval(function(){ if(!$("tab-team").hidden&&(((LASTD||{}).team)||{}).role==="admin")loadTeamOverview(); },60000);
+setInterval(function(){ if(!$("tab-team").hidden&&(((LASTD||{}).team)||{}).role==="admin")loadTeamOverview(); },10000);
 </script>
 </body>
 </html>"""
@@ -4673,12 +4674,12 @@ class TrayApp:
                 self._refresh_visual(r)
                 # Relay the snapshot to the phone (opt-in, E2EE), throttled + off-thread.
                 if RemoteSync.enabled(self.cfg):
-                    iv = max(15, int(self.cfg.get("remote_sync_seconds", 300)))
+                    iv = max(5, int(self.cfg.get("remote_sync_seconds", 10)))
                     if self._remote.due(now, iv):
                         threading.Thread(target=self._remote.sync, args=(snap, self.cfg), daemon=True).start()
                 # Team mode: push the compact usage row to the admin's relay (docs/TEAM.md).
                 if TeamSync.enabled(self.cfg):
-                    tiv = max(120, int(self.cfg.get("team_report_seconds", 900)))
+                    tiv = max(5, int(self.cfg.get("team_report_seconds", 10)))
                     if self._team.due(now, tiv):
                         threading.Thread(target=self._team.sync,
                                          args=(snap, self.cfg, self._alltime_cache), daemon=True).start()
