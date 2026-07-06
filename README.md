@@ -224,7 +224,8 @@ Read-only and local. It reads your Claude login token and session logs from
 `~/.claude` and displays the numbers; it sends nothing anywhere except the Anthropic
 usage endpoint (using your own token) — and, **only if you opt in**, an
 **end-to-end-encrypted** snapshot to a relay you run (see *Remote / phone access*
-below). No telemetry, no analytics, no data collection.
+below) and/or a **numbers-only usage row** to your team's relay (see *Team
+dashboard* below). No telemetry, no analytics, no data collection.
 
 ## Remote / phone access (optional)
 
@@ -239,6 +240,21 @@ Enable it in **Settings → Remote (phone)** and scan the pairing QR with the ap
 and alerts arrive whenever your desktop is on and online. **Android only — no iOS yet.**
 Setup (Cloudflare Worker + optional Firebase + the app): see
 **[docs/REMOTE.md](docs/REMOTE.md)**, [`relay/`](relay/), and [`android/`](android/).
+
+## Team dashboard (optional) — Claude Team plans
+
+For **Claude Team plan** admins: see every member's 5-hour / weekly load and
+**extra-usage spend (€)** live in a **Team** tab, plus a per-member **monthly
+ledger** — the decisive reading captured by a relay cron at **23:59 on the last
+day of the month**, even with members' machines off (via an opt-in escrow of
+their *short-lived* login token; the refresh token never leaves their machine).
+Month spend is computed robustly across Anthropic's mid-month billing-cycle
+reset, and exports to CSV.
+
+Each member runs this tracker and joins with a one-time code from the admin.
+Members share **usage numbers only** — never sessions, projects, or conversation
+content. Uses the same self-hosted relay as phone sync: see
+**[docs/TEAM.md](docs/TEAM.md)**.
 
 ## Code signing
 

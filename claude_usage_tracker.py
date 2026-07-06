@@ -79,6 +79,7 @@ LOG_PATH = APP_DIR / "claude_usage_tracker.log"
 ICON_PATH = APP_DIR / "app_icon.png"
 ICO_PATH = APP_DIR / "app.ico"
 REMOTE_PATH = APP_DIR / "remote.json"   # remote-sync identity (accountId/readToken/e2eeKey) — secrets, opt-in
+TEAM_PATH = APP_DIR / "team.json"       # team-mode identity (team/member ids + bearer tokens) — secrets, opt-in
 PORT_PATH = APP_DIR / "server_port"     # the tray writes its live dashboard port here for the --session-hook
 CLAUDE_SETTINGS = Path(os.path.expanduser("~")) / ".claude" / "settings.json"   # where the idle hook installs
 
@@ -132,6 +133,10 @@ DEFAULT_CONFIG = {
     "notify_session_waiting": False,            # opt-in: toast/push when a Claude Code session finishes a turn awaiting you
     "remote_transcript": False,                 # opt-in: mirror the active conversation's text to your phone (E2EE)
     "remote_accept_prompts": False,             # opt-in (ARMED): run prompts sent from the phone, restricted (plan + read-only tools)
+    "team_report_seconds": 900,                 # how often a team member pushes its usage row (docs/TEAM.md)
+    "team_share_token": True,                   # escrow the short-lived OAuth access token so the relay's
+                                                # 23:59 cron can capture the ledger with this machine off
+    "team_tz": "Europe/Athens",                 # the team's wall clock for daily/month-end ledger rows
 }
 
 # Settings the dashboard/settings UI may change at runtime (allowlist for POST /api/config).
@@ -141,6 +146,7 @@ CONFIG_ALLOW = {
     "open_as_window", "predictive_alerts", "update_check", "danger_alerts",
     "status_check", "status_components", "remote_enabled", "remote_relay_url",
     "notify_session_waiting", "remote_transcript", "remote_accept_prompts",
+    "team_report_seconds", "team_share_token", "team_tz",
 }
 
 LABELS = {
@@ -1666,6 +1672,306 @@ def run_remote_prompt(prompt: str, cwd: str | None = None, timeout: int = 180,
         return (out or (proc.stderr or "").strip() or "No output.")[:6000], resume_id
 
 
+# ---------------------------------------------------------------------------
+# Team mode (optional, opt-in) — see docs/TEAM.md
+#
+# An admin-owned relay aggregates a Claude Team plan's members. Members push a
+# compact PLAINTEXT row (usage numbers only — never sessions, paths, or content)
+# and, if `team_share_token` is on, escrow their short-lived OAuth access token
+# so the relay's nightly cron can capture the 23:59 ledger row (daily + the
+# month-end freeze) even while this machine is off. The refresh token NEVER
+# leaves this machine. Unlike phone sync, team rows are not E2EE: the relay is
+# the admin's own Worker and the numbers are exactly what the dashboard shows.
+# ---------------------------------------------------------------------------
+
+def _sha256_hex(s: str) -> str:
+    import hashlib
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def load_team_identity():
+    """{role, url, team_id, admin_token?, member_id?, member_token?, name?} or None.
+    Read fresh each time (cheap, rare) so server-thread joins need no cache dance."""
+    data = load_json(TEAM_PATH, None)
+    if isinstance(data, dict) and data.get("team_id") and data.get("url"):
+        return data
+    return None
+
+
+def team_leave() -> None:
+    """Forget the local identity. A member's escrowed token is deleted best-effort
+    (it would expire on its own TTL within hours anyway)."""
+    ident = load_team_identity()
+    if ident and ident.get("member_id") and ident.get("member_token"):
+        _team_call("DELETE", ident, ident["member_token"],
+                   f"/v1/team/{ident['team_id']}/member/{ident['member_id']}/token")
+    try:
+        TEAM_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _team_call(method: str, ident: dict, bearer: str, path: str, body=None, timeout: int = 8):
+    """Authenticated relay request for team routes. Returns HTTP status or None."""
+    url = (ident.get("url") or "").rstrip("/")
+    if not url or not bearer:
+        return None
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(url + path, data=data, method=method)
+    req.add_header("Authorization", "Bearer " + bearer)
+    req.add_header("User-Agent", f"claude-usage-tracker/{__version__}")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except Exception as exc:
+        log(f"team: {method} {path} failed: {exc}")
+        return None
+
+
+def _team_get_json(ident: dict, bearer: str, path: str, timeout: int = 10):
+    """GET a team route. Returns (status, parsed_json_or_None)."""
+    url = (ident.get("url") or "").rstrip("/")
+    req = urllib.request.Request(url + path, method="GET")
+    req.add_header("Authorization", "Bearer " + bearer)
+    req.add_header("User-Agent", f"claude-usage-tracker/{__version__}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.loads(r.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as e:
+        return e.code, None
+    except Exception as exc:
+        log(f"team: GET {path} failed: {exc}")
+        return None, None
+
+
+def team_create(cfg: dict, name: str = ""):
+    """Admin: mint a team on the relay (TOFU pins our admin bearer), then enroll
+    ourselves as the first member so our own usage shows up too. Returns the
+    identity dict or an error string."""
+    import os as _os
+    if load_team_identity():
+        return "already in a team — leave it first"
+    url = (cfg.get("remote_relay_url") or "").rstrip("/")
+    if not url:
+        return "set a relay URL first (Settings → Remote)"
+    ident = {"v": 1, "role": "admin", "url": url,
+             "team_id": _b64u(_os.urandom(16)), "admin_token": _b64u(_os.urandom(32))}
+    status = _team_call("POST", ident, ident["admin_token"], f"/v1/team/{ident['team_id']}/init",
+                        {"tz": cfg.get("team_tz") or "Europe/Athens"})
+    if status != 200:
+        return f"relay rejected team init (HTTP {status})" if status else "relay unreachable"
+    acct = read_account() or {}
+    my_name = name or acct.get("name") or acct.get("email") or "Admin"
+    code = team_add_member(ident, my_name)
+    if isinstance(code, str) and code.startswith("cutteam1:"):
+        me = team_parse_join(code)
+        ident.update({"member_id": me["m"], "member_token": me["k"], "name": me["n"]})
+    save_json(TEAM_PATH, ident)
+    return ident
+
+
+def team_add_member(ident: dict, name: str):
+    """Admin: pre-register a member (relay stores only the token HASH) and return the
+    one-time join code carrying the plaintext token. Lost codes: just re-add the member —
+    the hash is overwritten and the old code stops working."""
+    import os as _os
+    if not ident or ident.get("role") != "admin":
+        return "not a team admin"
+    mid, mtok = _b64u(_os.urandom(16)), _b64u(_os.urandom(32))
+    status = _team_call("PUT", ident, ident["admin_token"],
+                        f"/v1/team/{ident['team_id']}/member/{mid}",
+                        {"token_hash": _sha256_hex(mtok), "name": name})
+    if status != 204:
+        return f"relay rejected member add (HTTP {status})" if status else "relay unreachable"
+    payload = {"u": ident["url"], "t": ident["team_id"], "m": mid, "k": mtok, "n": name}
+    import base64
+    return "cutteam1:" + base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+
+
+def team_parse_join(code: str):
+    """Decode a cutteam1: join code → {u,t,m,k,n} or None."""
+    import base64
+    try:
+        raw = code.strip()
+        if not raw.startswith("cutteam1:"):
+            return None
+        b = raw[len("cutteam1:"):]
+        b += "=" * (-len(b) % 4)
+        p = json.loads(base64.urlsafe_b64decode(b.encode()).decode("utf-8"))
+        if all(isinstance(p.get(k), str) and p.get(k) for k in ("u", "t", "m", "k")):
+            return p
+    except Exception:
+        pass
+    return None
+
+
+def team_join(code: str):
+    """Member: adopt a join code from the admin. Returns identity dict or error string."""
+    if load_team_identity():
+        return "already in a team — leave it first"
+    p = team_parse_join(code)
+    if not p:
+        return "that doesn't look like a team join code"
+    ident = {"v": 1, "role": "member", "url": p["u"], "team_id": p["t"],
+             "member_id": p["m"], "member_token": p["k"], "name": p.get("n", "")}
+    save_json(TEAM_PATH, ident)
+    return ident
+
+
+def build_team_report(snap: dict) -> dict:
+    """The compact plaintext row a member shares with the team: window percents,
+    reset times, and overage euros. Deliberately nothing else."""
+    row = {"fh_pct": None, "sd_pct": None, "fh_resets_at": None, "sd_resets_at": None,
+           "extra": None, "ts": int(time.time())}
+    for w in snap.get("windows") or []:
+        iso = None
+        if w.get("resets_at"):
+            try:
+                iso = datetime.fromtimestamp(w["resets_at"] / 1000.0, tz=timezone.utc).isoformat()
+            except Exception:
+                iso = None
+        if w.get("key") == "five_hour":
+            row["fh_pct"], row["fh_resets_at"] = w.get("pct"), iso
+        elif w.get("key") == "seven_day":
+            row["sd_pct"], row["sd_resets_at"] = w.get("pct"), iso
+    e = snap.get("extra")
+    if isinstance(e, dict) and e.get("enabled"):
+        row["extra"] = {"enabled": True, "used": e.get("used"), "limit": e.get("limit"),
+                        "currency": e.get("currency", ""), "pct": e.get("pct")}
+    return row
+
+
+def team_month_spend(samples: list, baseline=None) -> float:
+    """Calendar-month spend from a member's day-by-day `extra.used` samples (sorted by
+    date), summing day-over-day increases. `used` accumulates since Anthropic's billing
+    anchor (mid-month), so a drop between samples means the cycle reset: the new value is
+    fresh accumulation and counts whole. `baseline` is the previous month's last sample;
+    without one, the first sample only seeds the diff (its own accumulation is unattributable).
+    Error bound: spend between the last pre-reset sample and the reset moment is lost —
+    at most one day's burn, at the anchor day."""
+    spend = 0.0
+    prev = baseline
+    for v in samples:
+        if not isinstance(v, (int, float)):
+            continue
+        if prev is None:
+            pass                       # unknown history: seed only
+        elif v >= prev:
+            spend += v - prev
+        else:
+            spend += v                 # cycle reset in the gap: v is all new spend
+        prev = v
+    return round(spend, 2)
+
+
+def _prev_month(month: str) -> str:
+    y, m = int(month[:4]), int(month[5:7])
+    return f"{y - 1}-12" if m == 1 else f"{y}-{m - 1:02d}"
+
+
+def _ledger_samples(led: dict, mid: str) -> list:
+    """A member's extra.used values for a ledger month, in date order."""
+    vals = []
+    for date in sorted((led.get("days") or {})):
+        e = ((led["days"][date].get(mid) or {}).get("extra")) or {}
+        if isinstance(e.get("used"), (int, float)):
+            vals.append(e["used"])
+    return vals
+
+
+def _ledger_baseline(prev_led, mid: str):
+    """The value to diff the month's first sample against: the previous month's
+    frozen final if the cron caught it, else its last daily row."""
+    if not prev_led:
+        return None
+    f = (((prev_led.get("finals") or {}).get(mid) or {}).get("extra")) or {}
+    if isinstance(f.get("used"), (int, float)):
+        return f["used"]
+    prior = _ledger_samples(prev_led, mid)
+    return prior[-1] if prior else None
+
+
+def team_ledger_computed(led: dict, prev_led=None) -> dict:
+    """Per-member calendar-month spend for a relay ledger response."""
+    mids = set(led.get("members") or {})
+    for d in (led.get("days") or {}).values():
+        mids.update(d)
+    return {mid: team_month_spend(_ledger_samples(led, mid), _ledger_baseline(prev_led, mid))
+            for mid in mids}
+
+
+class TeamSync:
+    """Owns the opt-in team-mode side effects for the poll loop: the throttled report
+    push and the access-token escrow (pushed only when the token actually rotates).
+    Mirrors RemoteSync's shape so the loop treats them alike."""
+
+    def __init__(self):
+        self._last_report = 0.0
+        self._last_tok_hash = None      # last escrowed token, to push only on rotation
+        self._escrow_unsupported = False  # relay said 503 (no TEAM_SEAL_KEY) — log once, stop trying
+        self.last_ok: bool | None = None
+
+    @staticmethod
+    def enabled(cfg: dict) -> bool:
+        ident = load_team_identity()
+        return bool(ident and ident.get("member_id") and ident.get("member_token"))
+
+    def due(self, now: float, interval: float) -> bool:
+        if now - self._last_report >= interval:
+            self._last_report = now
+            return True
+        return False
+
+    def reset_throttle(self) -> None:
+        self._last_report = 0.0
+
+    def sync(self, snap: dict, cfg: dict) -> None:
+        try:
+            ident = load_team_identity()
+            if not ident or not ident.get("member_id"):
+                return
+            base = f"/v1/team/{ident['team_id']}/member/{ident['member_id']}"
+            row = build_team_report(snap)
+            status = _team_call("PUT", ident, ident["member_token"], base + "/report", row)
+            self.last_ok = status == 204
+            if status in (403, 404):
+                log(f"team: report rejected (HTTP {status}) — removed from the team? (Settings → Team)")
+                return
+            self._escrow(ident, base, cfg)
+        except Exception:
+            self.last_ok = False
+            log("team: sync error:\n" + traceback.format_exc())
+
+    def _escrow(self, ident: dict, base: str, cfg: dict) -> None:
+        """Keep the relay's sealed copy of our CURRENT access token fresh (rotation-driven,
+        so steady state is ~2 writes/day). Never touches the refresh token."""
+        if not cfg.get("team_share_token"):
+            if self._last_tok_hash:      # user turned escrow off: withdraw the stored token
+                _team_call("DELETE", ident, ident["member_token"], base + "/token")
+                self._last_tok_hash = None
+            return
+        if self._escrow_unsupported:
+            return
+        oauth = read_oauth()
+        tok, exp = oauth.get("accessToken"), oauth.get("expiresAt")
+        if not tok or not isinstance(exp, (int, float)) or exp / 1000.0 <= time.time() + 60:
+            return
+        h = _sha256_hex(tok)
+        if h == self._last_tok_hash:
+            return
+        status = _team_call("PUT", ident, ident["member_token"], base + "/token",
+                            {"access_token": tok, "expires_at": int(exp)})
+        if status == 204:
+            self._last_tok_hash = h
+        elif status == 503:
+            self._escrow_unsupported = True
+            log("team: relay has no TEAM_SEAL_KEY — escrow off, ledger uses last push of the day")
+
+
 class RemoteSync:
     """Owns the opt-in phone-relay side effects and their shared state, so the poll loop
     doesn't have to: throttled snapshot sync, the armed prompt runner (with an in-flight guard
@@ -1972,6 +2278,22 @@ DASHBOARD_HTML = r"""<!doctype html>
   .csub{color:var(--dim);font:11px/1.4 var(--mono)}
   .credits .csub{margin-top:9px}
 
+  /* team */
+  .tmrow{display:flex;align-items:center;gap:14px;padding:10px 0;border-top:1px solid var(--line)}
+  .tmrow:first-child{border-top:0;padding-top:2px}
+  .tmname{width:150px;min-width:0}
+  .tmname b{font:600 13px/1.3 var(--sans);display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tmbars{flex:1;display:flex;flex-direction:column;gap:6px;min-width:120px}
+  .tmbars .bar{height:7px}
+  .tmspend{font:600 13px/1.3 var(--mono);text-align:right;min-width:120px;font-variant-numeric:tabular-nums}
+  .tmspend .csub{font-weight:400}
+  .tmtable{width:100%;border-collapse:collapse;font:12px/1.5 var(--mono)}
+  .tmtable th{text-align:left;color:var(--faint);font-weight:500;padding:6px 10px 6px 0;border-bottom:1px solid var(--line)}
+  .tmtable td{padding:7px 10px 7px 0;border-bottom:1px solid var(--line);color:var(--ink);font-variant-numeric:tabular-nums}
+  .tmtable td.r,.tmtable th.r{text-align:right}
+  .tminput{flex:1;min-width:180px;background:var(--bg);border:1px solid var(--line);color:var(--ink);border-radius:7px;padding:8px 10px;font:12px/1 var(--mono)}
+  .tmcode{margin-top:10px;word-break:break-all;user-select:all;background:var(--panel2);border-radius:7px;padding:9px 10px;font:11px/1.5 var(--mono);color:var(--ink)}
+
   /* sessions */
   .srt{display:flex;align-items:center;gap:10px}
   .stabs{display:inline-flex;gap:2px;background:var(--panel2);border-radius:6px;padding:2px}
@@ -2089,6 +2411,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   <div class="tabs">
     <button class="tab on" data-t="live">Live</button>
     <button class="tab" data-t="alltime">All-time</button>
+    <button class="tab" data-t="team">Team</button>
     <button class="tab" data-t="status">Status</button>
     <button class="tab" data-t="settings">Settings</button>
   </div>
@@ -2210,6 +2533,56 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="card panel">
       <div class="ptitle">All components</div>
       <div id="status-list"></div>
+    </div>
+  </div>
+
+  <div id="tab-team" class="tabpane" hidden>
+    <div class="card panel" id="tm-none">
+      <div class="ptitle">Team · Claude Team plan aggregator</div>
+      <div class="csub" style="margin-bottom:14px">See every member's 5-hour / weekly load and extra-usage spend in one place,
+        with a monthly € ledger captured at <b>23:59 on the last day of the month</b>. Members share <b>usage numbers only</b> —
+        never sessions, projects, or conversation content. Uses the relay from Settings → Remote. Details: <code>docs/TEAM.md</code>.</div>
+      <div class="setrow"><span class="setlbl">Admin</span>
+        <button class="sbtn" id="tm-create">Create team</button>
+        <span class="csub">creates the team on your relay and enrolls you as its first member</span></div>
+      <div class="setrow" style="margin-top:10px"><span class="setlbl">Member</span>
+        <input type="text" id="tm-code" class="tminput" placeholder="cutteam1:… (paste the join code your admin sent you)" spellcheck="false">
+        <button class="sbtn" id="tm-join">Join</button></div>
+      <div class="csub" id="tm-err" style="margin-top:10px"></div>
+    </div>
+
+    <div class="card panel" id="tm-me" hidden>
+      <div class="ptitle"><span>My membership</span><span class="legend" id="tm-mstate"></span></div>
+      <div class="csub" id="tm-minfo"></div>
+      <div class="setrow" style="margin-top:12px"><span class="setlbl">23:59 ledger</span>
+        <label class="chk"><input type="checkbox" id="tm-share"> let the relay read my usage at day's end — shares my <b>short-lived</b>
+          login token (hours; never the refresh token) so the ledger stays exact while this PC is off</label></div>
+      <div class="setacts" style="margin-top:12px"><button class="sbtn" id="tm-leave">Leave team</button></div>
+    </div>
+
+    <div id="tm-adminview" hidden>
+      <div class="card panel">
+        <div class="ptitle"><span>Members · live</span>
+          <span class="srt"><span class="legend" id="tm-asof"></span><button class="sbtn" id="tm-reload">Refresh</button></span></div>
+        <div id="tm-members"><div class="csub">loading…</div></div>
+        <div class="setrow" style="margin-top:14px"><span class="setlbl">Add member</span>
+          <input type="text" id="tm-newname" class="tminput" placeholder="member name" spellcheck="false">
+          <button class="sbtn" id="tm-add">Add</button></div>
+        <div id="tm-codebox" hidden>
+          <div class="csub" style="margin-top:10px">Send this join code privately — it contains the member's token. Paste it in their
+            tracker under Team → Join. Re-adding the same name mints a fresh code and voids this one.</div>
+          <div class="tmcode" id="tm-codeval"></div>
+        </div>
+      </div>
+      <div class="card panel">
+        <div class="ptitle"><span>Monthly ledger · extra usage €</span>
+          <span class="stabs"><button class="stab" id="tm-prevm" title="previous month">‹</button><span class="stab on" id="tm-month"></span><button class="stab" id="tm-nextm" title="next month">›</button></span></div>
+        <div id="tm-ledger"><div class="csub">loading…</div></div>
+        <div class="setacts" style="margin-top:12px"><button class="sbtn" id="tm-csv">Export CSV</button></div>
+        <div class="csub" style="margin-top:10px">Month spend = day-over-day increases of each member's credit meter (robust to the
+          mid-month billing-cycle reset; the first tracked month starts counting at its first sample). <b>frozen</b> = the 23:59
+          month-end row is in. Rows marked <b>push</b> came from the member's last report of the day instead of the cron.</div>
+      </div>
     </div>
   </div>
 
@@ -2635,6 +3008,7 @@ async function refresh(){
     if(sp){ if(sv){ sp.hidden=false; sp.href=sv.url||"#"; sp.title="Anthropic status — "+sv.text; sp.innerHTML="<i style='background:"+sv.color+"'></i>"+esc(sv.word); } else { sp.hidden=true; } }
     if(!$("tab-status").hidden)renderStatusPage();
     renderRemote();
+    renderTeamState(d);
     tickCountdowns();
   }catch(e){ $("err").className="err show"; $("err").textContent="⚠ cannot reach the tracker service."; }
 }
@@ -2665,9 +3039,11 @@ document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{
   const t=b.dataset.t;
   $("tab-live").hidden=(t!=="live"); $("tab-alltime").hidden=(t!=="alltime");
   $("tab-status").hidden=(t!=="status"); $("tab-settings").hidden=(t!=="settings");
+  $("tab-team").hidden=(t!=="team");
   if(t==="alltime")renderAlltime();   // (re)draw now that the pane has layout
   if(t==="status")renderStatusPage();
   if(t==="settings")renderSettings();
+  if(t==="team")renderTeamPage();
 }));
 $("set-toggle-bar").onclick=function(){ const sh=this.textContent==="Hide"; this.textContent=sh?"Show":"Hide"; this.classList.toggle("on",!sh); postOverlay("bar"); };
 $("set-toggle-widget").onclick=function(){ const sh=this.textContent==="Hide"; this.textContent=sh?"Show":"Hide"; this.classList.toggle("on",!sh); postOverlay("widget"); };
@@ -2682,6 +3058,139 @@ $("rm-unpair").onclick=function(){ if(confirm("Unpair and disable remote sync?")
 $("set-sesswait").onchange=function(){ postCfg({notify_session_waiting:this.checked}); };
 $("rm-transcript").onchange=function(){ postCfg({remote_transcript:this.checked}); };
 $("rm-accept").onchange=function(){ postCfg({remote_accept_prompts:this.checked}); };
+
+/* ---- team tab ---- */
+let TMMONTH=null, TMLED=null, TMOV=null;
+function tmMoney(v,cur){ return v==null?"—":((cur?cur+" ":"")+Number(v).toFixed(2)); }
+function tmMonthNow(){ const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0"); }
+function tmShiftMonth(m,dir){ let y=+m.slice(0,4),mo=+m.slice(5,7)+dir; if(mo<1){mo=12;y--;} if(mo>12){mo=1;y++;} return y+"-"+String(mo).padStart(2,"0"); }
+function renderTeamState(d){
+  const t=(d||{}).team||{};
+  $("tm-none").hidden=!!t.in_team;
+  $("tm-me").hidden=!t.in_team;
+  $("tm-adminview").hidden=!(t.in_team&&t.role==="admin");
+  if(!t.in_team)return;
+  $("tm-mstate").textContent=(t.role||"member")+(t.last_ok===true?" · reporting":(t.last_ok===false?" · push failed":""));
+  $("tm-minfo").innerHTML="Reporting as <b>"+esc(t.name||"me")+"</b> every "+Math.round((t.report_seconds||900)/60)+
+    " min · team clock "+esc(t.tz||"");
+  const sh=$("tm-share"); if(document.activeElement!==sh) sh.checked=!!t.share_token;
+}
+function tmBar(p,lbl){
+  if(p==null)return "<div class='bar' title='"+lbl+" —'><i style='width:0'></i></div>";
+  const c=p>=80?"#d4694f":(p>=60?"#cda24e":"#5e9e72");
+  return "<div class='bar' title='"+lbl+" "+Math.round(p)+"%'><i style='width:"+Math.min(100,p)+"%;background:"+c+"'></i></div>";
+}
+async function loadTeamOverview(){
+  const box=$("tm-members");
+  try{
+    const d=await (await fetch("/api/team/overview",{cache:"no-store"})).json();
+    TMOV=d;
+    if(d.error){ box.innerHTML="<div class='csub'>"+esc(d.error)+"</div>"; return; }
+    $("tm-asof").textContent="today "+esc(d.today||"")+" · "+esc(d.tz||"");
+    if(!(d.members||[]).length){ box.innerHTML="<div class='csub'>No members yet — add one below.</div>"; return; }
+    box.innerHTML=d.members.map(m=>{
+      const r=m.today||m.yesterday||{}, stale=!m.today, e=r.extra||{};
+      const seen=r.ts?new Date(r.ts*1000).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):"no data";
+      const tag=(stale&&r.ts?"yday · ":"")+seen+((m.escrow||{}).present?" · escrow":"");
+      return "<div class='tmrow'>"+
+        "<div class='tmname'><b>"+esc(m.name)+"</b><span class='csub'>"+esc(tag)+"</span></div>"+
+        "<div class='tmbars'>"+tmBar(r.fh_pct,"5h")+tmBar(r.sd_pct,"weekly")+"</div>"+
+        "<div class='tmspend'>"+(e.enabled?tmMoney(e.used,e.currency)+"<br><span class='csub'>of "+tmMoney(e.limit,e.currency)+"</span>"
+                                          :"<span class='csub'>no extra usage</span>")+"</div>"+
+        "<button class='sbtn' data-mid='"+esc(m.mid)+"' title='remove member'>×</button>"+
+        "</div>";
+    }).join("");
+  }catch(e){ box.innerHTML="<div class='csub'>relay unreachable</div>"; }
+}
+async function loadTeamLedger(){
+  const box=$("tm-ledger");
+  if(!TMMONTH)TMMONTH=tmMonthNow();
+  $("tm-month").textContent=TMMONTH;
+  try{
+    const d=await (await fetch("/api/team/ledger?month="+TMMONTH,{cache:"no-store"})).json();
+    TMLED=d;
+    if(d.error){ box.innerHTML="<div class='csub'>"+esc(d.error)+"</div>"; return; }
+    const names=d.members||{}, spend=d.computed_spend||{}, finals=d.finals||{}, days=d.days||{};
+    const dates=Object.keys(days).sort();
+    const mids=Object.keys(names); Object.keys(spend).forEach(m=>{ if(mids.indexOf(m)<0)mids.push(m); });
+    if(!mids.length){ box.innerHTML="<div class='csub'>No data for "+esc(TMMONTH)+" yet.</div>"; return; }
+    const lastRow=m=>{ for(let i=dates.length-1;i>=0;i--){ const r=days[dates[i]][m]; if(r)return r; } return finals[m]||null; };
+    let html="<table class='tmtable'><tr><th>member</th><th class='r'>month spend</th><th class='r'>meter</th><th class='r'>cap</th><th class='r'>days</th><th>state</th></tr>";
+    mids.sort((a,b)=>(spend[b]||0)-(spend[a]||0)).forEach(m=>{
+      const fin=finals[m], lr=fin||lastRow(m)||{}, e=lr.extra||{};
+      const nDays=dates.filter(dt=>days[dt][m]&&((days[dt][m].extra||{}).used!=null)).length;
+      html+="<tr><td>"+esc(names[m]||m.slice(0,8))+"</td>"+
+        "<td class='r'><b>"+tmMoney(spend[m],e.currency)+"</b></td>"+
+        "<td class='r'>"+tmMoney(e.used,e.currency)+"</td>"+
+        "<td class='r'>"+tmMoney(e.limit,e.currency)+"</td>"+
+        "<td class='r'>"+nDays+"</td>"+
+        "<td>"+(fin?"frozen":esc(lr.src||"—"))+"</td></tr>";
+    });
+    box.innerHTML=html+"</table>";
+  }catch(e){ box.innerHTML="<div class='csub'>relay unreachable</div>"; }
+}
+function tmCsv(){
+  if(!TMLED||TMLED.error)return;
+  const names=TMLED.members||{}, spend=TMLED.computed_spend||{}, finals=TMLED.finals||{}, days=TMLED.days||{};
+  const dates=Object.keys(days).sort();
+  const lastRow=m=>{ for(let i=dates.length-1;i>=0;i--){ const r=days[dates[i]][m]; if(r)return r; } return finals[m]||null; };
+  let csv="member,month,spend,currency,meter_end,cap,days_sampled,final_frozen\r\n";
+  const mids=Object.keys(names); Object.keys(spend).forEach(m=>{ if(mids.indexOf(m)<0)mids.push(m); });
+  mids.forEach(m=>{
+    const lr=finals[m]||lastRow(m)||{}, e=lr.extra||{};
+    csv+='"'+String(names[m]||m).replace(/"/g,'""')+'",'+TMLED.month+","+(spend[m]!=null?spend[m]:"")+","+(e.currency||"")+","+
+      (e.used!=null?e.used:"")+","+(e.limit!=null?e.limit:"")+","+dates.filter(dt=>!!days[dt][m]).length+","+(finals[m]?"yes":"no")+"\r\n";
+  });
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
+  a.download="claude-team-ledger-"+TMLED.month+".csv"; a.click(); URL.revokeObjectURL(a.href);
+}
+async function tmPost(body){
+  try{ return await (await fetch("/api/team",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json(); }
+  catch(e){ return {ok:false,error:"tracker unreachable"}; }
+}
+async function tmRemove(mid){
+  const m=((TMOV||{}).members||[]).find(x=>x.mid===mid);
+  if(!confirm("Remove "+((m&&m.name)||"this member")+" from the team? Their ledger history stays readable."))return;
+  const r=await tmPost({action:"member-remove",mid:mid});
+  if(!r.ok)alert(r.error||"failed");
+  loadTeamOverview();
+}
+function renderTeamPage(){
+  renderTeamState(LASTD||{});
+  const t=((LASTD||{}).team)||{};
+  if(t.in_team&&t.role==="admin"){ loadTeamOverview(); loadTeamLedger(); }
+}
+$("tm-create").onclick=async function(){
+  this.disabled=true; const r=await tmPost({action:"create"}); this.disabled=false;
+  $("tm-err").textContent=r.ok?"":("✗ "+(r.error||"failed"));
+  if(r.ok){ setTimeout(refresh,400); setTimeout(renderTeamPage,900); }
+};
+$("tm-join").onclick=async function(){
+  const code=$("tm-code").value.trim(); if(!code){ $("tm-code").focus(); return; }
+  this.disabled=true; const r=await tmPost({action:"join",code:code}); this.disabled=false;
+  $("tm-err").textContent=r.ok?"":("✗ "+(r.error||"failed"));
+  if(r.ok){ $("tm-code").value=""; setTimeout(refresh,400); }
+};
+$("tm-leave").onclick=async function(){
+  if(!confirm("Leave the team? An admin can re-invite you with a fresh code."))return;
+  await tmPost({action:"leave"}); setTimeout(refresh,400);
+};
+$("tm-add").onclick=async function(){
+  const name=$("tm-newname").value.trim(); if(!name){ $("tm-newname").focus(); return; }
+  this.disabled=true; const r=await tmPost({action:"member-add",name:name}); this.disabled=false;
+  if(r.ok&&r.code){ $("tm-codebox").hidden=false; $("tm-codeval").textContent=r.code; $("tm-newname").value=""; loadTeamOverview(); }
+  else alert(r.error||"failed");
+};
+$("tm-reload").onclick=loadTeamOverview;
+$("tm-prevm").onclick=function(){ TMMONTH=tmShiftMonth(TMMONTH||tmMonthNow(),-1); loadTeamLedger(); };
+$("tm-nextm").onclick=function(){ TMMONTH=tmShiftMonth(TMMONTH||tmMonthNow(),1); loadTeamLedger(); };
+$("tm-csv").onclick=tmCsv;
+$("tm-share").onchange=function(){ postCfg({team_share_token:this.checked}); };
+$("tm-members").addEventListener("click",function(e){
+  const b=e.target.closest("button[data-mid]"); if(b)tmRemove(b.dataset.mid);
+});
+setInterval(function(){ if(!$("tab-team").hidden&&(((LASTD||{}).team)||{}).role==="admin")loadTeamOverview(); },60000);
 </script>
 </body>
 </html>"""
@@ -2924,6 +3433,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send(200, "image/png", png)
             else:
                 self._send(404, "text/plain", b"pairing unavailable")
+        elif path == "/api/team/overview":
+            ident = load_team_identity()
+            if not ident or ident.get("role") != "admin":
+                self._send(200, "application/json", b'{"error":"not_admin"}')
+            else:
+                st, data = _team_get_json(ident, ident["admin_token"],
+                                          f"/v1/team/{ident['team_id']}/overview")
+                out = data if (st == 200 and data) else {"error": f"relay HTTP {st}" if st else "relay unreachable"}
+                self._send(200, "application/json", json.dumps(out).encode("utf-8"))
+        elif path == "/api/team/ledger":
+            from urllib.parse import parse_qs, urlsplit
+            month = (parse_qs(urlsplit(self.path).query).get("month") or [""])[0]
+            ident = load_team_identity()
+            if not ident or ident.get("role") != "admin":
+                self._send(200, "application/json", b'{"error":"not_admin"}')
+            elif not (len(month) == 7 and month[:4].isdigit() and month[4] == "-" and month[5:].isdigit()):
+                self._send(200, "application/json", b'{"error":"bad_month"}')
+            else:
+                tid_path = f"/v1/team/{ident['team_id']}/ledger?month="
+                st, led = _team_get_json(ident, ident["admin_token"], tid_path + month)
+                if st == 200 and led:
+                    _, prev = _team_get_json(ident, ident["admin_token"], tid_path + _prev_month(month))
+                    led["computed_spend"] = team_ledger_computed(led, prev)
+                    out = led
+                else:
+                    out = {"error": f"relay HTTP {st}" if st else "relay unreachable"}
+                self._send(200, "application/json", json.dumps(out).encode("utf-8"))
         elif path == "/favicon.ico":
             self._send(204, "image/x-icon", b"")
         else:
@@ -3009,8 +3545,52 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
             self._send(200, "application/json", b'{"ok":true}')
+        elif path == "/api/team":
+            self._send(200, "application/json", json.dumps(self._team_action()).encode("utf-8"))
         else:
             self._send(404, "text/plain", b"not found")
+
+    def _team_action(self) -> dict:
+        """POST /api/team {action, ...} — create/join/leave and member management,
+        proxied to the relay with the locally-stored team identity."""
+        body = self._read_json() or {}
+        action = body.get("action", "")
+        try:
+            if action == "create":
+                res = team_create(load_config(), (body.get("name") or "").strip())
+            elif action == "join":
+                res = team_join(body.get("code") or "")
+            elif action == "leave":
+                team_leave()
+                res = {}
+            elif action == "member-add":
+                name = (body.get("name") or "").strip()
+                if not name:
+                    return {"ok": False, "error": "member name required"}
+                res = team_add_member(load_team_identity(), name)
+                if isinstance(res, str) and res.startswith("cutteam1:"):
+                    return {"ok": True, "code": res}
+            elif action == "member-remove":
+                ident = load_team_identity()
+                mid = body.get("mid") or ""
+                if not ident or ident.get("role") != "admin" or not mid:
+                    return {"ok": False, "error": "not a team admin"}
+                st = _team_call("DELETE", ident, ident["admin_token"],
+                                f"/v1/team/{ident['team_id']}/member/{mid}")
+                res = {} if st == 204 else f"relay HTTP {st}"
+            else:
+                return {"ok": False, "error": "unknown action"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        if isinstance(res, str):
+            return {"ok": False, "error": res}
+        fn = CONTROL.get("team_changed")
+        if fn and action in ("create", "join"):
+            try:
+                fn()
+            except Exception:
+                pass
+        return {"ok": True}
 
 
 def start_server(port: int) -> tuple[ThreadingHTTPServer | None, int]:
@@ -3446,6 +4026,7 @@ class TrayApp:
         self._wake = threading.Event()
         self._started_notified = False
         self._remote = RemoteSync()       # owns relay sync/command/push + their shared state
+        self._team = TeamSync()           # owns the opt-in team report/escrow pushes
         self._session_waiting_last = {}   # session_id -> last-notified ts (rate-limit)
 
     def build_menu(self):
@@ -3495,6 +4076,7 @@ class TrayApp:
         CONTROL["toggle_overlay"] = self._toggle_overlay
         CONTROL["remote_action"] = self._remote_action
         CONTROL["session_waiting"] = self._on_session_waiting
+        CONTROL["team_changed"] = lambda: (self._team.reset_throttle(), self._wake.set())  # report right after join/create
         global REMOTE_PUSH
         REMOTE_PUSH = lambda title, msg: self._remote.push(self.cfg, title, msg)  # mirror toasts to the phone
         threading.Thread(target=self._poll_loop, daemon=True).start()
@@ -3904,6 +4486,15 @@ class TrayApp:
                                   "available": remote_available(),
                                   "paired": load_remote_identity(create=False) is not None,
                                   "last_sync_ok": self._remote.last_ok}
+                tid = load_team_identity()
+                snap["team"] = {"in_team": tid is not None,
+                                "role": (tid or {}).get("role"),
+                                "name": (tid or {}).get("name"),
+                                "team_id": (tid or {}).get("team_id"),
+                                "share_token": bool(self.cfg.get("team_share_token")),
+                                "report_seconds": int(self.cfg.get("team_report_seconds", 900)),
+                                "tz": self.cfg.get("team_tz", "Europe/Athens"),
+                                "last_ok": self._team.last_ok}
                 self._verdict = (snap.get("verdict") or {}).get("text", "")
                 with STORE_LOCK:
                     STORE["snapshot"] = snap
@@ -3913,6 +4504,11 @@ class TrayApp:
                     iv = max(15, int(self.cfg.get("remote_sync_seconds", 300)))
                     if self._remote.due(now, iv):
                         threading.Thread(target=self._remote.sync, args=(snap, self.cfg), daemon=True).start()
+                # Team mode: push the compact usage row to the admin's relay (docs/TEAM.md).
+                if TeamSync.enabled(self.cfg):
+                    tiv = max(120, int(self.cfg.get("team_report_seconds", 900)))
+                    if self._team.due(now, tiv):
+                        threading.Thread(target=self._team.sync, args=(snap, self.cfg), daemon=True).start()
                     # ARMED: also pull + run any phone-sent prompt (restricted), off-thread.
                     if self.cfg.get("remote_accept_prompts"):
                         threading.Thread(target=self._remote.handle_command,
