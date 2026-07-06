@@ -2366,7 +2366,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   .bento .card{padding:16px}
   .bento .hero{grid-column:1;grid-row:1 / span 2;display:flex;flex-direction:column;gap:6px;
     background:linear-gradient(160deg,var(--card2),var(--card))}
-  .bento .span2{grid-column:2 / span 2}
+  .bento .span2{grid-column:1 / -1}
   .clab{font:10px/1.4 var(--mono);color:var(--faint);text-transform:uppercase;letter-spacing:1.2px;margin-bottom:9px}
   .hnum{font:600 40px/1 var(--mono);letter-spacing:-1.5px;font-variant-numeric:tabular-nums}
   .hnum small{font-size:22px;font-weight:600}
@@ -2555,7 +2555,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="bar"><i id="hero-bar" style="width:0"></i></div>
       <div class="hsub"><b id="hero-cd">—</b> <span id="hero-abs"></span></div>
       <div class="hsub" id="hero-burn"></div>
-      <div style="margin-top:16px" class="clab" id="hero2-lab">Weekly</div>
+      <div style="margin-top:auto;padding-top:16px" class="clab" id="hero2-lab">Weekly</div>
       <div class="hsub"><b id="hero2-val" style="color:var(--ink)">—</b> · <span id="hero2-cd">—</span></div>
       <div class="bar"><i id="hero2-bar" style="width:0"></i></div>
     </div>
@@ -2569,7 +2569,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div id="home-ctx"><div class="hsub">—</div></div>
     </div>
     <div class="card" id="sesscard">
-      <div class="clab" style="display:flex;justify-content:space-between;align-items:center">Sessions · last 5h
+      <div class="clab" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <span>Sessions · last 5h <span class="legend" id="sesssub" style="text-transform:none;letter-spacing:0"></span></span>
         <span class="stabs"><button class="stab on" data-m="context">Ctx</button><button class="stab" data-m="tokens">Tok</button></span></div>
       <div id="sessions"></div>
     </div>
@@ -2582,7 +2583,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         <span class="legend"><span><i style="background:#d97757"></i>5h</span><span><i style="background:#7f93b0"></i>weekly</span></span></div>
       <svg class="spark" id="spark" preserveAspectRatio="none"></svg>
     </div>
-    <div class="card">
+    <div class="card span2">
       <div class="clab">Anthropic status</div>
       <div id="home-status"><div class="hsub">—</div></div>
     </div>
