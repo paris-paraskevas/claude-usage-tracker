@@ -2321,11 +2321,13 @@ DASHBOARD_HTML = r"""<!doctype html>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   :root{
-    --bg:#0e0e10; --panel:#161618; --panel2:#1d1d20;
-    --line:rgba(255,255,255,.07); --line2:rgba(255,255,255,.045);
-    --ink:#e7e6e3; --dim:#9b9a95; --faint:#6c6b66;
+    /* Warm dark palette — see docs/superpowers/specs/2026-07-06-dashboard-bento-redesign-design.md */
+    --bg:#100e0c; --panel:#1a1613; --panel2:#221e1a;
+    --card:#1e1a16; --card2:#26211c;
+    --line:#332e28; --line2:#2a2621;
+    --ink:#f2ede5; --dim:#a99f93; --faint:#786f65;
     --accent:#d97757; --accent2:#7f93b0;
-    --ok:#5e9e72; --warn:#cda24e; --high:#d4694f;
+    --ok:#5e9e72; --warn:#cda24e; --high:#d4694f; --hot:#d4694f;
     --mono:ui-monospace,"Cascadia Mono","Cascadia Code","SF Mono","JetBrains Mono",Consolas,"Liberation Mono",monospace;
     --sans:ui-sans-serif,"Segoe UI",system-ui,-apple-system,sans-serif;
   }
@@ -2354,8 +2356,34 @@ DASHBOARD_HTML = r"""<!doctype html>
   .tab.on{background:var(--panel2);color:var(--ink)}
   .tabpane[hidden]{display:none}
 
+  /* nav bar (redesign) — 4 destinations, replaces .tabs */
+  .navbar{display:inline-flex;gap:3px;margin-bottom:20px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:5px}
+  .navbar button{display:inline-flex;align-items:center;gap:7px;background:none;border:0;color:var(--dim);
+    font:550 12.5px/1 var(--sans);padding:9px 15px;border-radius:8px;cursor:pointer}
+  .navbar button:hover{color:var(--ink)}
+  .navbar button.on{background:var(--card2);color:var(--ink)}
+  .navbar button .gl{font-size:14px;line-height:1}
+  .navbar button.on .gl{color:var(--accent)}
+  .navbar button[hidden]{display:none}
+
+  /* bento (redesign Home) */
+  .bento{display:grid;grid-template-columns:1.5fr 1fr 1fr;grid-auto-rows:auto;gap:12px}
+  .bento .card{padding:16px}
+  .bento .hero{grid-column:1;grid-row:1 / span 2;display:flex;flex-direction:column;gap:6px;
+    background:linear-gradient(160deg,var(--card2),var(--card))}
+  .bento .span2{grid-column:2 / span 2}
+  .clab{font:10px/1.4 var(--mono);color:var(--faint);text-transform:uppercase;letter-spacing:1.2px;margin-bottom:9px}
+  .hnum{font:600 40px/1 var(--mono);letter-spacing:-1.5px;font-variant-numeric:tabular-nums}
+  .hnum small{font-size:22px;font-weight:600}
+  .cval{font:600 24px/1 var(--mono);letter-spacing:-.5px;font-variant-numeric:tabular-nums}
+  .hsub{color:var(--faint);font:11px/1.5 var(--mono);margin-top:2px}
+  .hsess{display:flex;align-items:center;gap:10px;padding:5px 0}
+  .hsess .nm{width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink)}
+  .hsess .pc{color:var(--dim);font:12px/1 var(--mono);font-variant-numeric:tabular-nums}
+  @media(max-width:720px){ .bento{grid-template-columns:1fr} .bento .hero{grid-column:1;grid-row:auto} .bento .span2{grid-column:1} }
+
   /* cards */
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:11px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px}
   .panel{padding:18px}
   .ptitle{font:11px/1 var(--mono);color:var(--faint);text-transform:uppercase;letter-spacing:1px;
     margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:10px}
