@@ -2321,11 +2321,13 @@ DASHBOARD_HTML = r"""<!doctype html>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   :root{
-    --bg:#0e0e10; --panel:#161618; --panel2:#1d1d20;
-    --line:rgba(255,255,255,.07); --line2:rgba(255,255,255,.045);
-    --ink:#e7e6e3; --dim:#9b9a95; --faint:#6c6b66;
+    /* Warm dark palette — see docs/superpowers/specs/2026-07-06-dashboard-bento-redesign-design.md */
+    --bg:#100e0c; --panel:#1a1613; --panel2:#221e1a;
+    --card:#1e1a16; --card2:#26211c;
+    --line:#332e28; --line2:#2a2621;
+    --ink:#f2ede5; --dim:#a99f93; --faint:#786f65;
     --accent:#d97757; --accent2:#7f93b0;
-    --ok:#5e9e72; --warn:#cda24e; --high:#d4694f;
+    --ok:#5e9e72; --warn:#cda24e; --high:#d4694f; --hot:#d4694f;
     --mono:ui-monospace,"Cascadia Mono","Cascadia Code","SF Mono","JetBrains Mono",Consolas,"Liberation Mono",monospace;
     --sans:ui-sans-serif,"Segoe UI",system-ui,-apple-system,sans-serif;
   }
@@ -2347,15 +2349,36 @@ DASHBOARD_HTML = r"""<!doctype html>
   .live{display:flex;align-items:center;gap:6px;color:var(--faint);font:11px/1 var(--mono);text-transform:uppercase;letter-spacing:.5px}
   .live .dot{width:7px;height:7px;border-radius:50%;background:var(--ok)}
 
-  /* tabs */
-  .tabs{display:inline-flex;gap:2px;margin-bottom:18px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:3px}
-  .tab{background:none;border:0;color:var(--dim);font:600 12px/1 var(--sans);padding:8px 16px;border-radius:6px;cursor:pointer}
-  .tab:hover{color:var(--ink)}
-  .tab.on{background:var(--panel2);color:var(--ink)}
   .tabpane[hidden]{display:none}
 
+  /* nav bar (redesign) — 4 destinations, replaces .tabs */
+  .navbar{display:inline-flex;gap:3px;margin-bottom:20px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:5px}
+  .navbar button{display:inline-flex;align-items:center;gap:7px;background:none;border:0;color:var(--dim);
+    font:550 12.5px/1 var(--sans);padding:9px 15px;border-radius:8px;cursor:pointer}
+  .navbar button:hover{color:var(--ink)}
+  .navbar button.on{background:var(--card2);color:var(--ink)}
+  .navbar button .gl{font-size:14px;line-height:1}
+  .navbar button.on .gl{color:var(--accent)}
+  .navbar button[hidden]{display:none}
+
+  /* bento (redesign Home) */
+  .bento{display:grid;grid-template-columns:1.5fr 1fr 1fr;grid-auto-rows:auto;gap:12px}
+  .bento .card{padding:16px}
+  .bento .hero{grid-column:1;grid-row:1 / span 2;display:flex;flex-direction:column;gap:6px;
+    background:linear-gradient(160deg,var(--card2),var(--card))}
+  .bento .span2{grid-column:1 / -1}
+  .clab{font:10px/1.4 var(--mono);color:var(--faint);text-transform:uppercase;letter-spacing:1.2px;margin-bottom:9px}
+  .hnum{font:600 40px/1 var(--mono);letter-spacing:-1.5px;font-variant-numeric:tabular-nums}
+  .hnum small{font-size:22px;font-weight:600}
+  .cval{font:600 24px/1 var(--mono);letter-spacing:-.5px;font-variant-numeric:tabular-nums}
+  .hsub{color:var(--faint);font:11px/1.5 var(--mono);margin-top:2px}
+  .hsess{display:flex;align-items:center;gap:10px;padding:5px 0}
+  .hsess .nm{width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink)}
+  .hsess .pc{color:var(--dim);font:12px/1 var(--mono);font-variant-numeric:tabular-nums}
+  @media(max-width:720px){ .bento{grid-template-columns:1fr} .bento .hero{grid-column:1;grid-row:auto} .bento .span2{grid-column:1} }
+
   /* cards */
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:11px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px}
   .panel{padding:18px}
   .ptitle{font:11px/1 var(--mono);color:var(--faint);text-transform:uppercase;letter-spacing:1px;
     margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:10px}
@@ -2363,27 +2386,6 @@ DASHBOARD_HTML = r"""<!doctype html>
   .legend span{display:inline-flex;align-items:center;gap:5px;font:11px/1 var(--mono);color:var(--dim);text-transform:none;letter-spacing:0}
   .legend i{width:8px;height:8px;border-radius:2px;display:inline-block}
 
-  /* gauges */
-  .gauges{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
-  @media(max-width:520px){.gauges{grid-template-columns:1fr}}
-  .gauge{container-type:inline-size;padding:20px}
-  .gwrap{display:flex;flex-direction:column;align-items:center;gap:18px}
-  @container (min-width:360px){.gwrap{flex-direction:row;justify-content:center;gap:26px}.ginfo{align-items:flex-start;text-align:left}}
-  .gauge-dial{position:relative;display:grid;place-items:center;flex:none}
-  .dial{width:clamp(124px,40cqi,156px);height:auto;aspect-ratio:1;display:block;overflow:visible}
-  .dial-track{fill:none;stroke:var(--panel2);stroke-width:7}
-  .dial-arc{fill:none;stroke:var(--accent);stroke-width:7;stroke-linecap:round;
-    stroke-dasharray:314.16;stroke-dashoffset:314.16;
-    transition:stroke-dashoffset .8s cubic-bezier(.22,1,.36,1),stroke .4s}
-  .dial-tick{stroke:var(--line)}
-  .dial-val{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px}
-  .pct{font:600 clamp(26px,12cqi,38px)/1 var(--mono);letter-spacing:-1px;color:var(--ink);font-variant-numeric:tabular-nums}
-  .pct span{font-size:.5em;color:var(--dim);margin-left:1px}
-  .glabel{font:10px/1 var(--mono);color:var(--faint);text-transform:uppercase;letter-spacing:1.5px}
-  .ginfo{display:flex;flex-direction:column;align-items:center;text-align:center;gap:7px;min-width:0}
-  .reset b{font:500 15px/1.2 var(--mono);font-variant-numeric:tabular-nums}
-  .reset .abs{color:var(--faint);font:11px/1.3 var(--mono);margin-top:3px}
-  .burn{font:11px/1.4 var(--mono);color:var(--dim);min-height:15px}
   .burn .hot{color:var(--high)} .burn .ok{color:var(--ok)}
 
   /* rows / charts */
@@ -2453,9 +2455,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   .atrow .abar>i{display:block;height:100%;border-radius:3px;transition:width .7s cubic-bezier(.22,1,.36,1)}
   .atrow .anum{width:58px;text-align:right;color:var(--dim);font:12px/1 var(--mono)}
 
-  /* scale / footer / error */
-  .scale{display:flex;justify-content:center;gap:16px;flex-wrap:wrap;margin-top:18px;color:var(--faint);font:11px/1 var(--mono)}
-  .scale span{display:inline-flex;align-items:center;gap:6px} .scale i{width:9px;height:9px;border-radius:2px;display:inline-block}
+  /* footer / error */
   footer{margin-top:18px;text-align:center;color:var(--faint);font:11px/1.7 var(--mono)}
   .err{padding:13px 15px;border:1px solid rgba(212,105,79,.4);background:rgba(212,105,79,.08);
     border-radius:9px;color:#e9b3a6;margin-bottom:16px;font-size:13px;display:none}
@@ -2540,86 +2540,57 @@ DASHBOARD_HTML = r"""<!doctype html>
 
   <div class="err" id="err"></div>
 
-  <div class="tabs">
-    <button class="tab on" data-t="live">Live</button>
-    <button class="tab" data-t="alltime">All-time</button>
-    <button class="tab" data-t="team">Team</button>
-    <button class="tab" data-t="status">Status</button>
-    <button class="tab" data-t="settings">Settings</button>
+  <div class="navbar">
+    <button class="on" data-t="home"><span class="gl">⌂</span> Home</button>
+    <button data-t="team" id="nav-team"><span class="gl">👥</span> Team</button>
+    <button data-t="history"><span class="gl">▤</span> History</button>
+    <button data-t="settings"><span class="gl">⚙</span> Settings</button>
   </div>
 
-  <div id="tab-live" class="tabpane">
-  <div class="gauges">
-    <div class="card gauge" id="g-five_hour">
-      <div class="gwrap">
-        <div class="gauge-dial">
-          <svg class="dial" viewBox="0 0 120 120">
-            <circle class="dial-track" cx="60" cy="60" r="50"></circle>
-            <circle class="dial-arc" id="arc-five_hour" cx="60" cy="60" r="50" transform="rotate(-90 60 60)"></circle>
-          </svg>
-          <div class="dial-val">
-            <div class="pct" id="p-five_hour">––<span>%</span></div>
-            <div class="glabel">5-hour</div>
-          </div>
-        </div>
-        <div class="ginfo">
-          <div class="reset"><b id="cd-five_hour">—</b><div class="abs" id="ab-five_hour"></div></div>
-          <div class="burn" id="bn-five_hour"></div>
-        </div>
-      </div>
+  <div id="tab-home" class="tabpane">
+  <div class="bento">
+    <div class="card hero" id="home-hero">
+      <div class="clab" id="hero-lab">5-hour limit</div>
+      <div class="hnum" id="hero-num">––<small>%</small></div>
+      <div class="bar"><i id="hero-bar" style="width:0"></i></div>
+      <div class="hsub"><b id="hero-cd">—</b> <span id="hero-abs"></span></div>
+      <div class="hsub" id="hero-burn"></div>
+      <div style="margin-top:auto;padding-top:16px" class="clab" id="hero2-lab">Weekly</div>
+      <div class="hsub"><b id="hero2-val" style="color:var(--ink)">—</b> · <span id="hero2-cd">—</span></div>
+      <div class="bar"><i id="hero2-bar" style="width:0"></i></div>
     </div>
-    <div class="card gauge" id="g-seven_day">
-      <div class="gwrap">
-        <div class="gauge-dial">
-          <svg class="dial" viewBox="0 0 120 120">
-            <circle class="dial-track" cx="60" cy="60" r="50"></circle>
-            <circle class="dial-arc" id="arc-seven_day" cx="60" cy="60" r="50" transform="rotate(-90 60 60)"></circle>
-          </svg>
-          <div class="dial-val">
-            <div class="pct" id="p-seven_day">––<span>%</span></div>
-            <div class="glabel">Weekly</div>
-          </div>
-        </div>
-        <div class="ginfo">
-          <div class="reset"><b id="cd-seven_day">—</b><div class="abs" id="ab-seven_day"></div></div>
-          <div class="burn" id="bn-seven_day"></div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div class="row">
-    <div class="card panel">
-      <div class="ptitle">Usage history
-        <span class="legend"><span><i style="background:#d97757"></i>5h</span><span><i style="background:#7f93b0"></i>weekly</span></span>
-      </div>
-      <svg class="spark" id="spark" preserveAspectRatio="none"></svg>
-    </div>
-    <div class="card panel">
-      <div class="ptitle">Overage credits &amp; scoped limits</div>
+    <div class="card">
+      <div class="clab">Extra usage · this month</div>
       <div id="extra"></div>
       <div id="scoped"></div>
     </div>
-  </div>
-
-  <div class="card panel" id="sesscard">
-    <div class="ptitle"><span>Sessions · last 5h</span>
-      <span class="srt">
-        <span class="stabs"><button class="stab on" data-m="context">Context&nbsp;%</button><button class="stab" data-m="tokens">Tokens</button></span>
-        <span class="legend" id="sesssub"></span>
-      </span>
+    <div class="card">
+      <div class="clab">Context · active</div>
+      <div id="home-ctx"><div class="hsub">—</div></div>
     </div>
-    <div id="sessions"></div>
+    <div class="card" id="sesscard">
+      <div class="clab" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+        <span>Sessions · last 5h <span class="legend" id="sesssub" style="text-transform:none;letter-spacing:0"></span></span>
+        <span class="stabs"><button class="stab on" data-m="context">Ctx</button><button class="stab" data-m="tokens">Tok</button></span></div>
+      <div id="sessions"></div>
+    </div>
+    <div class="card" id="home-team-card">
+      <div class="clab">Team</div>
+      <div id="home-team"><div class="hsub">—</div></div>
+    </div>
+    <div class="card span2">
+      <div class="clab" style="display:flex;justify-content:space-between">Usage · last 30 days
+        <span class="legend"><span><i style="background:#d97757"></i>5h</span><span><i style="background:#7f93b0"></i>weekly</span></span></div>
+      <svg class="spark" id="spark" preserveAspectRatio="none"></svg>
+    </div>
+    <div class="card span2">
+      <div class="clab">Anthropic status</div>
+      <div id="home-status"><div class="hsub">—</div></div>
+    </div>
   </div>
+  </div><!-- /tab-home -->
 
-  <div class="scale">
-    <span><i style="background:#5e9e72"></i>ok · under 60%</span>
-    <span><i style="background:#cda24e"></i>busy · 60–80%</span>
-    <span><i style="background:#d4694f"></i>near limit · 80%+</span>
-  </div>
-  </div><!-- /tab-live -->
-
-  <div id="tab-alltime" class="tabpane" hidden>
+  <div id="tab-history" class="tabpane" hidden>
     <div class="atbar">
       <div class="stabs" id="at-view">
         <button class="stab on" data-v="overview">Overview</button>
@@ -2654,17 +2625,6 @@ DASHBOARD_HTML = r"""<!doctype html>
         <div class="ptitle">By model</div>
         <div id="at-models"></div>
       </div>
-    </div>
-  </div>
-
-  <div id="tab-status" class="tabpane" hidden>
-    <div class="card panel">
-      <div class="ptitle"><span>Anthropic status</span><a class="legend" target="_blank" rel="noopener" href="https://status.anthropic.com">status.anthropic.com ↗</a></div>
-      <div class="big" id="status-head" style="font-size:clamp(22px,5vw,32px)">—</div>
-    </div>
-    <div class="card panel">
-      <div class="ptitle">All components</div>
-      <div id="status-list"></div>
     </div>
   </div>
 
@@ -2743,7 +2703,10 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div id="set-fields" class="fields"></div>
     </div>
     <div class="card panel">
-      <div class="ptitle">Anthropic status — components to watch</div>
+      <div class="ptitle"><span>Anthropic status</span><a class="legend" target="_blank" rel="noopener" href="https://status.anthropic.com">status.anthropic.com ↗</a></div>
+      <div class="big" id="status-head" style="font-size:clamp(20px,4vw,28px);margin-bottom:14px">—</div>
+      <div id="status-list"></div>
+      <div class="ptitle" style="margin-top:18px">Components to watch</div>
       <div id="set-status" class="fields"></div>
       <div class="csub" style="margin-top:8px">None selected = overall status. Shown on the dashboard, widget, and bar.</div>
     </div>
@@ -2791,6 +2754,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 <script>
 const $=id=>document.getElementById(id);
 let WIN={};   // key -> {resets_at, color}
+let HEROKEY=null, SECKEY=null, HOME_TEAM_TS=0;   // Home hero windows + team-mini fetch throttle
 let LASTH=null;   // last history payload, for resize reflow
 function esc(s){ return (s||"").replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
 async function doSignin(email, terminal){
@@ -2847,38 +2811,73 @@ function tickCountdowns(){
     if(!w.resets_at){el.textContent="—";continue;}
     el.textContent="resets in "+fdur((w.resets_at-now)/1000);
   }
-}
-const DIAL_C=2*Math.PI*50;   // circumference of the dial arc (r=50)
-function buildTicks(){       // subtle measured tick ring — the instrument signature
-  const ns="http://www.w3.org/2000/svg";
-  document.querySelectorAll("svg.dial").forEach(svg=>{
-    for(let i=0;i<100;i+=10){
-      const a=(i/100)*2*Math.PI-Math.PI/2, r1=55, r2=58.5;
-      const ln=document.createElementNS(ns,"line");
-      ln.setAttribute("x1",(60+r1*Math.cos(a)).toFixed(2)); ln.setAttribute("y1",(60+r1*Math.sin(a)).toFixed(2));
-      ln.setAttribute("x2",(60+r2*Math.cos(a)).toFixed(2)); ln.setAttribute("y2",(60+r2*Math.sin(a)).toFixed(2));
-      ln.setAttribute("class","dial-tick");
-      svg.insertBefore(ln, svg.firstChild);
-    }
+  // Home hero + secondary countdowns (redesign)
+  [["hero-cd",HEROKEY],["hero2-cd",SECKEY]].forEach(([id,k])=>{
+    const el=$(id); if(!el||!k||!WIN[k])return;
+    el.textContent=WIN[k].resets_at?("resets in "+fdur((WIN[k].resets_at-now)/1000)):"—";
   });
 }
-function renderGauge(w){
-  const k=w.key;
-  const arc=$("arc-"+k);
-  if(arc){ arc.style.strokeDashoffset=(DIAL_C*(1-Math.min(100,w.pct)/100)).toFixed(2); arc.style.stroke=w.color; }
-  const p=$("p-"+k); if(p)p.innerHTML=Math.round(w.pct)+"<span>%</span>";
-  WIN[k]={resets_at:w.resets_at,color:w.color};
-  $("ab-"+k).textContent=fabs(w.resets_at);
-  const bn=$("bn-"+k);
-  if(bn){
-    if(w.eta_seconds!=null&&w.eta_seconds>=0&&w.rate_per_hour>0){
-      bn.innerHTML="↗ <span class='hot'>"+w.rate_per_hour.toFixed(1)+"%/h</span> · hits 100% in ~"+fdur(w.eta_seconds);
-    }else if(w.rate_per_hour!=null&&w.rate_per_hour>0.1){
-      bn.innerHTML="↗ "+w.rate_per_hour.toFixed(1)+"%/h · <span class='ok'>resets before limit</span>";
-    }else if(w.rate_per_hour!=null){
-      bn.innerHTML="<span class='ok'>steady</span> · no recent burn";
-    }else{ bn.textContent="gathering rate…"; }
+function bcol(p){ return p==null?"var(--faint)":(p>=80?"var(--hot)":(p>=60?"var(--warn)":"var(--ok)")); }
+function burnText(w){
+  if(!w)return"";
+  if(w.eta_seconds!=null&&w.eta_seconds>=0&&w.rate_per_hour>0)
+    return "▲ "+w.rate_per_hour.toFixed(1)+"%/h · full in ~"+fdur(w.eta_seconds);
+  if(w.rate_per_hour!=null&&w.rate_per_hour>0.1) return "▲ "+w.rate_per_hour.toFixed(1)+"%/h · resets before limit";
+  if(w.rate_per_hour!=null) return "steady · no recent burn";
+  return "gathering rate…";
+}
+// Home bento: hero = the hotter of 5h/weekly; the other rides as a secondary bar.
+function renderHome(d){
+  if(!d)return;
+  const wins=d.windows||[];
+  const five=wins.find(w=>w.key==="five_hour"), week=wins.find(w=>w.key==="seven_day");
+  const both=[five,week].filter(Boolean);
+  if(both.length){
+    const hero=both.reduce((a,b)=>(b.pct>a.pct?b:a));
+    const sec=both.find(w=>w!==hero)||null;
+    HEROKEY=hero.key; SECKEY=sec?sec.key:null;
+    WIN[hero.key]={resets_at:hero.resets_at,color:hero.color};
+    if(sec)WIN[sec.key]={resets_at:sec.resets_at,color:sec.color};
+    $("hero-lab").textContent=hero.label+" limit";
+    $("hero-num").innerHTML=Math.round(hero.pct)+"<small>%</small>";
+    $("hero-num").style.color=hero.color;
+    $("hero-bar").style.width=Math.min(100,hero.pct)+"%"; $("hero-bar").style.background=hero.color;
+    $("hero-abs").textContent=fabs(hero.resets_at);
+    $("hero-burn").innerHTML=burnText(hero);
+    if(sec){
+      $("hero2-lab").textContent=sec.label;
+      $("hero2-val").textContent=Math.round(sec.pct)+"% used";
+      $("hero2-bar").style.width=Math.min(100,sec.pct)+"%"; $("hero2-bar").style.background=sec.color;
+    }
+    tickCountdowns();
   }
+  // Context
+  const c=d.context||{}, cp=(c.used_percentage!=null?c.used_percentage:null);
+  $("home-ctx").innerHTML = cp==null
+    ? "<div class='hsub'>no active session</div>"
+    : "<div class='cval' style='color:"+bcol(cp)+"'>"+Math.round(cp)+"%</div><div class='bar'><i style='width:"+Math.min(100,cp)+"%;background:"+bcol(cp)+"'></i></div>"+
+      (c.total_input_tokens?"<div class='hsub'>"+fmtTok(c.total_input_tokens)+" tokens</div>":"");
+  // Status
+  const sv=statusView(d), st=$("home-status");
+  if(sv){ st.innerHTML="<div style='display:flex;align-items:center;gap:8px'><span class='sdot2' style='background:"+sv.color+"'></span><b>"+esc(sv.word)+"</b></div>"+
+    (sv.text?"<div class='hsub'>"+esc(sv.text)+"</div>":""); }
+  else { st.innerHTML="<div class='hsub'>status unavailable</div>"; }
+  // Team mini
+  fillHomeTeam();
+  const t=(d.team)||{};
+  if(t.in_team&&t.role==="admin"&&Date.now()-HOME_TEAM_TS>60000){ HOME_TEAM_TS=Date.now(); loadTeamOverview(); }
+}
+function fillHomeTeam(){
+  const box=$("home-team"); if(!box)return;
+  const t=(LASTD&&LASTD.team)||{};
+  if(!t.in_team){ box.innerHTML="<div class='hsub'>Not in a team — set one up in the Team tab.</div>"; return; }
+  if(t.role!=="admin"){ box.innerHTML="<div class='cval'>Member</div><div class='hsub'>of "+esc(t.name||"your team")+"</div>"; return; }
+  const k=(TMOV&&TMOV.kpis)||null;
+  if(!k){ box.innerHTML="<div class='hsub'>Open the Team tab for spend &amp; limits.</div>"; return; }
+  const near=k.near||[];
+  box.innerHTML="<div class='cval'>"+tmMoney(k.org_spend,tmCur(TMOV))+"</div>"+
+    "<div class='hsub'>"+(k.member_count||0)+" members"+
+    (near.length?" · <span style='color:var(--hot)'>"+near.length+" near limit</span>":" · all clear")+"</div>";
 }
 function renderSpark(h){
   const svg=$("spark"); svg.innerHTML="";
@@ -3032,6 +3031,7 @@ function renderSettings(){
   }));
   syncOverlayLabels();
   renderStatusPicker();
+  renderStatusPage();   // live Anthropic status now lives in Settings
   renderRemote();
   $("set-sesswait").checked=!!ui.notify_session_waiting;
   $("rm-transcript").checked=!!ui.remote_transcript;
@@ -3089,7 +3089,7 @@ function renderAlltime(a){
   $("at-projects").innerHTML=pj.map(x=>atBar(x.name,x.tokens,pmax,"#7f93b0")).join("")||"<div class='sempty'>no data yet</div>";
   $("at-projmore").textContent=(AT.project_count>pj.length)?("top "+pj.length+" of "+AT.project_count):"all-time";
   $("at-models").innerHTML=(p.models||[]).map(modelRow).join("")||"<div class='sempty'>no data yet</div>";
-  if(ATVIEW==="models" && !$("tab-alltime").hidden) renderSeries(p.series);
+  if(ATVIEW==="models" && !$("tab-history").hidden) renderSeries(p.series);
 }
 async function refresh(){
   try{
@@ -3132,7 +3132,7 @@ async function refresh(){
       $("livedot").style.background="#cda24e"; $("livetxt").textContent=wins.length?"stale":"offline";
       $("updated").textContent=wins.length?("paused · "+(d.error||"waiting for Claude Code activity")):(d.error||"—");
     }
-    wins.filter(w=>w.key==="five_hour"||w.key==="seven_day").forEach(renderGauge);
+    renderHome(d);
     LASTH=d.history; renderSpark(LASTH);
     renderExtra(d.extra);
     renderScoped(wins);
@@ -3142,20 +3142,19 @@ async function refresh(){
     if(cta){ if(up.available){ cta.hidden=false; if(!cta.disabled)cta.textContent="Update to v"+up.available; } else { cta.hidden=true; } }
     const sv=statusView(d), sp=$("statuspill");
     if(sp){ if(sv){ sp.hidden=false; sp.href=sv.url||"#"; sp.title="Anthropic status — "+sv.text; sp.innerHTML="<i style='background:"+sv.color+"'></i>"+esc(sv.word); } else { sp.hidden=true; } }
-    if(!$("tab-status").hidden)renderStatusPage();
+    if(!$("tab-settings").hidden)renderStatusPage();
     renderRemote();
     renderTeamState(d);
     tickCountdowns();
   }catch(e){ $("err").className="err show"; $("err").textContent="⚠ cannot reach the tracker service."; }
 }
-buildTicks();
 $("btn-refresh").onclick=doRefresh;
 $("btn-checkupd").onclick=doCheckUpdate;
 $("updcta").onclick=doUpdate;
 setInterval(tickCountdowns,1000);
 setInterval(refresh,5000);
 refresh();
-let _rz; window.addEventListener("resize",()=>{clearTimeout(_rz);_rz=setTimeout(()=>{renderSpark(LASTH); if(!$("tab-alltime").hidden)renderAlltime();},120);});
+let _rz; window.addEventListener("resize",()=>{clearTimeout(_rz);_rz=setTimeout(()=>{renderSpark(LASTH); if(!$("tab-history").hidden)renderAlltime();},120);});
 document.querySelectorAll("#sesscard .stab").forEach(b=>b.addEventListener("click",()=>{
   document.querySelectorAll("#sesscard .stab").forEach(x=>x.classList.remove("on"));
   b.classList.add("on"); SMODE=b.dataset.m; renderSessions();
@@ -3169,15 +3168,14 @@ document.querySelectorAll("#at-period .stab").forEach(b=>b.addEventListener("cli
   document.querySelectorAll("#at-period .stab").forEach(x=>x.classList.remove("on")); b.classList.add("on");
   ATPERIOD=b.dataset.p; renderAlltime();
 }));
-document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{
-  document.querySelectorAll(".tab").forEach(x=>x.classList.remove("on"));
+document.querySelectorAll(".navbar button").forEach(b=>b.addEventListener("click",()=>{
+  document.querySelectorAll(".navbar button").forEach(x=>x.classList.remove("on"));
   b.classList.add("on");
   const t=b.dataset.t;
-  $("tab-live").hidden=(t!=="live"); $("tab-alltime").hidden=(t!=="alltime");
-  $("tab-status").hidden=(t!=="status"); $("tab-settings").hidden=(t!=="settings");
-  $("tab-team").hidden=(t!=="team");
-  if(t==="alltime")renderAlltime();   // (re)draw now that the pane has layout
-  if(t==="status")renderStatusPage();
+  $("tab-home").hidden=(t!=="home"); $("tab-history").hidden=(t!=="history");
+  $("tab-team").hidden=(t!=="team"); $("tab-settings").hidden=(t!=="settings");
+  if(t==="home"&&typeof renderHome==="function")renderHome(LASTD);
+  if(t==="history")renderAlltime();   // (re)draw now that the pane has layout
   if(t==="settings")renderSettings();
   if(t==="team")renderTeamPage();
 }));
@@ -3229,6 +3227,7 @@ async function loadTeamOverview(){
   try{
     const d=await (await fetch("/api/team/overview",{cache:"no-store"})).json();
     TMOV=d;
+    fillHomeTeam();   // keep the Home team-mini in sync with the freshest overview
     if(d.error){ box.innerHTML="<div class='csub'>"+esc(d.error)+"</div>"; return; }
     $("tm-asof").textContent="today "+esc(d.today||"")+" · "+esc(d.tz||"");
     const k=d.kpis||{};
