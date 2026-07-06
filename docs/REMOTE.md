@@ -4,6 +4,10 @@ This is the frozen contract shared by the three components of the optional remot
 feature: the **desktop** tracker (producer), a **relay** (Cloudflare Worker, dumb
 pipe), and the **Android app** (consumer). It is **off by default** and **opt-in**.
 
+> The same Worker also serves the optional **team mode** (`/v1/team/...`) with a
+> deliberately different trust model (plaintext numbers on the admin-owned relay)
+> — that contract lives in [TEAM.md](TEAM.md). Nothing below is affected by it.
+
 > **Scope:** Android only for now — **no iOS support** (iOS Web/native push and the
 > store process are out of scope for v1). The relay and crypto are platform-neutral, so
 > an iOS client could be added later without changing this contract.
