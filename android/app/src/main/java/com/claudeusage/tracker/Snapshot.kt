@@ -7,6 +7,16 @@ data class Win(val key: String, val label: String, val pct: Double, val resetsAt
 data class Sess(val name: String, val pct: Double, val tokens: Long, val active: Boolean)
 data class Msg(val role: String, val text: String, val ts: Long?)
 data class Transcript(val name: String, val cwd: String?, val sessionId: String?, val active: Boolean, val messages: List<Msg>)
+data class ExtraUsage(val used: Double?, val limit: Double?, val currency: String, val pct: Double?)
+data class NearLimit(val name: String, val window: String, val pct: Double)
+data class TeamMember(
+    val name: String, val fhPct: Double?, val sdPct: Double?,
+    val monthSpend: Double?, val monthTokens: Long?, val currency: String,
+)
+data class TeamOverview(
+    val orgSpend: Double?, val memberCount: Int, val tz: String,
+    val near: List<NearLimit>, val members: List<TeamMember>,
+)
 
 /** A parsed, UI-ready view of the desktop snapshot. Parsing is defensive — any field
  *  may be missing on an early/stale snapshot. */
@@ -32,8 +42,13 @@ data class Snap(
     val atPeak: String?,
     val favModel: String?,
     val transcripts: List<Transcript>,
+    val extra: ExtraUsage?,
+    val teamOverview: TeamOverview?,
 ) {
     companion object {
+        private fun JSONObject.optNullableDouble(key: String): Double? =
+            if (!has(key) || isNull(key)) null else optDouble(key).let { if (it.isNaN()) null else it }
+
         fun parse(jsonStr: String): Snap {
             val o = JSONObject(jsonStr)
             val acc = o.optJSONObject("account")
@@ -87,6 +102,45 @@ data class Snap(
             }
             if (transcripts.isEmpty()) o.optJSONObject("transcript")?.let { transcripts.add(parseTranscript(it)) }
 
+            // Extra-usage € (present only when the account has overage enabled).
+            val ex = o.optJSONObject("extra")
+            val extra = if (ex != null) ExtraUsage(
+                used = ex.optNullableDouble("used"),
+                limit = ex.optNullableDouble("limit"),
+                currency = ex.optString("currency", ""),
+                pct = ex.optNullableDouble("pct"),
+            ) else null
+
+            // Compact team overview — present only in an admin's snapshot.
+            val to = o.optJSONObject("team_overview")
+            val teamOverview = if (to != null) {
+                val nearArr = to.optJSONArray("near") ?: JSONArray()
+                val near = ArrayList<NearLimit>()
+                for (i in 0 until nearArr.length()) {
+                    val n = nearArr.getJSONObject(i)
+                    near.add(NearLimit(n.optString("name"), n.optString("window"), n.optNullableDouble("pct") ?: 0.0))
+                }
+                val memArr = to.optJSONArray("members") ?: JSONArray()
+                val members = ArrayList<TeamMember>()
+                for (i in 0 until memArr.length()) {
+                    val mm = memArr.getJSONObject(i)
+                    members.add(TeamMember(
+                        name = mm.optString("name"),
+                        fhPct = mm.optNullableDouble("fh_pct"),
+                        sdPct = mm.optNullableDouble("sd_pct"),
+                        monthSpend = mm.optNullableDouble("month_spend"),
+                        monthTokens = if (mm.isNull("month_tokens")) null else mm.optLong("month_tokens"),
+                        currency = mm.optString("currency", ""),
+                    ))
+                }
+                TeamOverview(
+                    orgSpend = to.optNullableDouble("org_spend"),
+                    memberCount = if (to.isNull("member_count")) 0 else to.optInt("member_count"),
+                    tz = to.optString("tz", ""),
+                    near = near, members = members,
+                )
+            } else null
+
             return Snap(
                 ok = o.optBoolean("ok", false),
                 org = acc?.optString("org").orEmptyAcct(acc),
@@ -109,6 +163,8 @@ data class Snap(
                 atPeak = at?.optString("peak_hour")?.takeIf { it.isNotBlank() && it != "null" },
                 favModel = period?.optString("fav_model")?.takeIf { it.isNotBlank() && it != "null" },
                 transcripts = transcripts,
+                extra = extra,
+                teamOverview = teamOverview,
             )
         }
 
