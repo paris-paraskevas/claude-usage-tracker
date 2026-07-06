@@ -251,9 +251,11 @@ their *short-lived* login token; the refresh token never leaves their machine).
 Month spend is computed robustly across Anthropic's mid-month billing-cycle
 reset, and exports to CSV.
 
-Each member runs this tracker and joins with a one-time code from the admin.
-Members share **usage numbers only** — never sessions, projects, or conversation
-content. Uses the same self-hosted relay as phone sync: see
+Tokens are attributed **per device** (each machine's local logs), € per member per
+calendar month, and join codes are bound to your Claude org so a leaked code is
+useless outside it. Each member runs this tracker and joins with a one-time code
+from the admin. Members share **usage numbers only** — never sessions, projects, or
+conversation content. Uses the same self-hosted relay as phone sync: see
 **[docs/TEAM.md](docs/TEAM.md)**.
 
 ## Code signing
