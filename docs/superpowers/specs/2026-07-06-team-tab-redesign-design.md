@@ -59,9 +59,23 @@ Code logs; claude.ai web/mobile burn appears in € and the limit bars only.
   + prev-month baseline) and `month_tokens`; KPI aggregates (org spend, near-limits list,
   member count). The dashboard JS renders only — no math in the browser beyond formatting.
 
+## Org binding (admin-page exclusivity)
+The OAuth surface exposes the caller's **org uuid** but not their role (probed 2026-07-06:
+`/api/oauth/profile`, `account/settings` — no role/admin/owner fields). Admin-page access
+therefore stays credential-based (only the team creator's machine holds `admin_token`),
+hardened with org binding:
+- `POST /init` body gains `org` (admin's `organization.uuid`); stored on the team record.
+- Join codes carry `o` (org uuid). Joining apps fetch their own profile and **refuse** on
+  mismatch ("this code is for a different Claude org"); offline profile fetch → warn, allow.
+- The escrow PUT is verified server-side: the relay calls `/api/oauth/profile` with the
+  submitted token and rejects (403 `wrong_org`) unless the org uuid matches the team's.
+  A leaked join code is thus useless outside the org. Role (admin vs member) remains
+  unverifiable — a member could run their own separate team on their own relay, but can
+  never access this team's admin routes.
+
 ## Not changing
-Auth model, join codes, escrow crypto, crons/timezone logic, member view, phone sync,
-docs/TEAM.md trust model (gets a device paragraph + row-shape update).
+Auth model otherwise, escrow crypto, crons/timezone logic, member view, phone sync,
+docs/TEAM.md trust model (gets a device paragraph + org-binding note + row-shape update).
 
 ## KV budget
 Unchanged per machine: each running install writes ~4 rows/hour (default 900 s cadence).
