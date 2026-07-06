@@ -251,7 +251,16 @@ private fun OverviewPage(
             ContextGauge(s, ctxSel, onCtxSel)
         }
 
-        Spacer(Modifier.height(22.dp))
+        s.extra?.let { Spacer(Modifier.height(20.dp)); ExtraCard(it) }
+
+        if (s.sessions.isNotEmpty()) {
+            Spacer(Modifier.height(20.dp))
+            SectionLabel("SESSIONS · LAST 5H")
+            Spacer(Modifier.height(10.dp))
+            s.sessions.take(2).forEach { SessionCard(it); Spacer(Modifier.height(10.dp)) }
+        }
+
+        Spacer(Modifier.height(16.dp))
         Text(syncedAgo(s.updatedAt, now), color = Faint, fontSize = 11.sp, fontFamily = MONO,
             modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
     }
@@ -673,7 +682,36 @@ private fun PageTitle(title: String, sub: String?) {
 
 @Composable
 private fun Card(content: @Composable () -> Unit) {
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Panel).padding(16.dp)) { content() }
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(CardBg).padding(16.dp)) { content() }
+}
+
+/** Extra-usage € card for the Home bento. */
+@Composable
+private fun ExtraCard(e: com.claudeusage.tracker.ExtraUsage) {
+    Card {
+        SectionLabel("EXTRA USAGE · THIS MONTH")
+        Spacer(Modifier.height(8.dp))
+        val cur = e.currency.ifBlank { "" }
+        val pre = if (cur.isNotBlank()) "$cur " else ""
+        Text(
+            buildAnnotatedString {
+                append(pre)
+                withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
+                    append(e.used?.let { String.format("%.2f", it) } ?: "—")
+                }
+                e.limit?.let {
+                    withStyle(SpanStyle(color = Dim)) { append("  of $pre${String.format("%.2f", it)}") }
+                }
+            },
+            color = Ink, fontSize = 22.sp, fontFamily = MONO,
+        )
+        e.pct?.let { p ->
+            Spacer(Modifier.height(10.dp))
+            Bar(p, usageColor(p), Modifier.fillMaxWidth())
+            Spacer(Modifier.height(6.dp))
+            Text("${p.toInt()}% of monthly cap", color = Faint, fontSize = 12.sp, fontFamily = MONO)
+        }
+    }
 }
 
 // ---- components -----------------------------------------------------------
