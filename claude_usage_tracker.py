@@ -1858,11 +1858,13 @@ def team_join(code: str):
     return ident
 
 
-def build_team_report(snap: dict) -> dict:
-    """The compact plaintext row a member shares with the team: window percents,
-    reset times, and overage euros. Deliberately nothing else."""
+def build_team_report(snap: dict, dev=None) -> dict:
+    """The compact plaintext row a device shares with the team: window percents,
+    reset times, overage euros, and THIS device's month tokens. Nothing else."""
     row = {"fh_pct": None, "sd_pct": None, "fh_resets_at": None, "sd_resets_at": None,
-           "extra": None, "ts": int(time.time())}
+           "extra": None, "ts": int(time.time()),
+           "did": (dev or {}).get("did"), "device": (dev or {}).get("device"),
+           "tok_month": (dev or {}).get("tok_month")}
     for w in snap.get("windows") or []:
         iso = None
         if w.get("resets_at"):
@@ -1965,13 +1967,17 @@ class TeamSync:
     def reset_throttle(self) -> None:
         self._last_report = 0.0
 
-    def sync(self, snap: dict, cfg: dict) -> None:
+    def sync(self, snap: dict, cfg: dict, alltime_cache=None) -> None:
         try:
             ident = load_team_identity()
             if not ident or not ident.get("member_id"):
                 return
+            ident = ensure_team_device(ident)
+            month = _now_local().strftime("%Y-%m")
+            dev = {"did": ident.get("did"), "device": ident.get("device"),
+                   "tok_month": device_month_tokens(alltime_cache, month)}
             base = f"/v1/team/{ident['team_id']}/member/{ident['member_id']}"
-            row = build_team_report(snap)
+            row = build_team_report(snap, dev)
             status = _team_call("PUT", ident, ident["member_token"], base + "/report", row)
             self.last_ok = status == 204
             if status in (403, 404):
@@ -4544,7 +4550,8 @@ class TrayApp:
                 if TeamSync.enabled(self.cfg):
                     tiv = max(120, int(self.cfg.get("team_report_seconds", 900)))
                     if self._team.due(now, tiv):
-                        threading.Thread(target=self._team.sync, args=(snap, self.cfg), daemon=True).start()
+                        threading.Thread(target=self._team.sync,
+                                         args=(snap, self.cfg, self._alltime_cache), daemon=True).start()
                     # ARMED: also pull + run any phone-sent prompt (restricted), off-thread.
                     if self.cfg.get("remote_accept_prompts"):
                         threading.Thread(target=self._remote.handle_command,

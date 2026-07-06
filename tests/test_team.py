@@ -57,10 +57,13 @@ def test_build_team_report():
         ],
         "extra": {"enabled": True, "used": 70.8, "limit": 75.0, "currency": "EUR", "pct": 94.4},
     }
-    row = m.build_team_report(snap)
+    dev = {"did": "d1d1d1d1", "device": "DESKTOP-X", "tok_month": 12345}
+    row = m.build_team_report(snap, dev)
     assert row["fh_pct"] == 99.0 and row["sd_pct"] == 19.0
     assert row["fh_resets_at"] and row["fh_resets_at"].startswith("20")
     assert row["sd_resets_at"] is None
+    assert row["did"] == "d1d1d1d1" and row["device"] == "DESKTOP-X"
+    assert row["tok_month"] == 12345
     assert row["extra"] == {"enabled": True, "used": 70.8, "limit": 75.0,
                             "currency": "EUR", "pct": 94.4}
     assert row["ts"] > 0
@@ -69,6 +72,7 @@ def test_build_team_report():
 def test_build_team_report_minimal():
     row = m.build_team_report({"windows": [], "extra": None})
     assert row["fh_pct"] is None and row["sd_pct"] is None and row["extra"] is None
+    assert row["did"] is None and row["tok_month"] is None
     row = m.build_team_report({"windows": [], "extra": {"enabled": False}})
     assert row["extra"] is None                                # disabled overage isn't shared
 
