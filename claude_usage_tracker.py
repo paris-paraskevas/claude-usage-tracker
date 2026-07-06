@@ -1938,14 +1938,68 @@ def _prev_month(month: str) -> str:
     return f"{y - 1}-12" if m == 1 else f"{y}-{m - 1:02d}"
 
 
+def _day_account_row(devmap):
+    """The account-authoritative row among a member's device rows for one day:
+    the cron's `account` row if present, else the newest push. Mirrors the relay's
+    pickAccountRow()."""
+    if not isinstance(devmap, dict) or not devmap:
+        return None
+    if isinstance(devmap.get("account"), dict):
+        return devmap["account"]
+    best = None
+    for r in devmap.values():
+        if isinstance(r, dict) and (best is None or (r.get("ts") or 0) > (best.get("ts") or 0)):
+            best = r
+    return best
+
+
 def _ledger_samples(led: dict, mid: str) -> list:
-    """A member's extra.used values for a ledger month, in date order."""
+    """A member's account-level extra.used values for a ledger month, date order."""
     vals = []
     for date in sorted((led.get("days") or {})):
-        e = ((led["days"][date].get(mid) or {}).get("extra")) or {}
+        row = _day_account_row((led["days"][date] or {}).get(mid))
+        e = (row or {}).get("extra") or {}
         if isinstance(e.get("used"), (int, float)):
             vals.append(e["used"])
     return vals
+
+
+def member_month_tokens(led: dict, mid: str) -> int:
+    """Tokens a member burnt this month across devices: per device take the LAST
+    cumulative tok_month value seen in the month, then sum devices. The cron's
+    `account` rows carry no tokens and are skipped."""
+    last = {}
+    for date in sorted((led.get("days") or {})):
+        for did, row in ((led["days"][date] or {}).get(mid) or {}).items():
+            if did == "account" or not isinstance(row, dict):
+                continue
+            if isinstance(row.get("tok_month"), (int, float)):
+                last[did] = int(row["tok_month"])
+    return sum(last.values())
+
+
+def team_overview_merge(ov: dict, led, prev_led=None) -> dict:
+    """Attach month spend/tokens per member and the KPI aggregates to a relay
+    overview. Pure — the dashboard JS only formats what this returns."""
+    out = dict(ov)
+    members = [dict(m0) for m0 in (ov.get("members") or [])]
+    near = []
+    org_spend = 0.0
+    spend = team_ledger_computed(led, prev_led) if led else {}
+    for m0 in members:
+        m0["month_spend"] = spend.get(m0.get("mid"))
+        m0["month_tokens"] = member_month_tokens(led, m0.get("mid")) if led else 0
+        if isinstance(m0["month_spend"], (int, float)):
+            org_spend += m0["month_spend"]
+        acct = m0.get("account") or {}
+        for key, label in (("fh_pct", "5h"), ("sd_pct", "weekly")):
+            p = acct.get(key)
+            if isinstance(p, (int, float)) and p >= 80:
+                near.append({"name": m0.get("name"), "window": label, "pct": p})
+    near.sort(key=lambda x: -x["pct"])
+    out["members"] = members
+    out["kpis"] = {"org_spend": round(org_spend, 2), "member_count": len(members), "near": near}
+    return out
 
 
 def _ledger_baseline(prev_led, mid: str):
@@ -3509,7 +3563,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
             else:
                 st, data = _team_get_json(ident, ident["admin_token"],
                                           f"/v1/team/{ident['team_id']}/overview")
-                out = data if (st == 200 and data) else {"error": f"relay HTTP {st}" if st else "relay unreachable"}
+                if st == 200 and data:
+                    month = (data.get("today") or "")[:7]
+                    lpath = f"/v1/team/{ident['team_id']}/ledger?month="
+                    led = None
+                    if month:
+                        _, led = _team_get_json(ident, ident["admin_token"], lpath + month)
+                    prev = None
+                    if led and month:
+                        _, prev = _team_get_json(ident, ident["admin_token"], lpath + _prev_month(month))
+                    out = team_overview_merge(data, led, prev) if led else data
+                else:
+                    out = {"error": f"relay HTTP {st}" if st else "relay unreachable"}
                 self._send(200, "application/json", json.dumps(out).encode("utf-8"))
         elif path == "/api/team/ledger":
             from urllib.parse import parse_qs, urlsplit
@@ -3525,6 +3590,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if st == 200 and led:
                     _, prev = _team_get_json(ident, ident["admin_token"], tid_path + _prev_month(month))
                     led["computed_spend"] = team_ledger_computed(led, prev)
+                    led["month_tokens"] = {mid: member_month_tokens(led, mid)
+                                           for mid in (led.get("members") or {})}
                     out = led
                 else:
                     out = {"error": f"relay HTTP {st}" if st else "relay unreachable"}

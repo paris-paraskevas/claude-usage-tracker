@@ -100,32 +100,77 @@ def test_prev_month():
     assert m._prev_month("2026-01") == "2025-12"
 
 
-def test_ledger_computed():
+def _dev(used=None, ts=0, src="push", tok=None):
+    r = {"ts": ts, "src": src}
+    if used is not None:
+        r["extra"] = {"used": used}
+    if tok is not None:
+        r["tok_month"] = tok
+    return r
+
+
+def test_day_account_row_prefers_cron_then_newest():
+    assert m._day_account_row({"account": _dev(5, 10, "cron"), "d1": _dev(9, 99)})["extra"]["used"] == 5
+    assert m._day_account_row({"d1": _dev(1, 10), "d2": _dev(2, 20)})["extra"]["used"] == 2
+    assert m._day_account_row({}) is None
+    assert m._day_account_row(None) is None
+
+
+def test_ledger_computed_device_rows():
     led = {
         "members": {"a": "A", "b": "B"},
         "days": {
-            "2026-07-01": {"a": {"extra": {"used": 10.0}}, "b": {"extra": {"used": 1.0}}},
-            "2026-07-02": {"a": {"extra": {"used": 12.5}}},
-            "2026-07-03": {"a": {"extra": {"used": 2.0}}, "b": {"extra": {"used": 4.0}}},
+            "2026-07-01": {"a": {"d1": _dev(10.0, 100)}, "b": {"d9": _dev(1.0, 100)}},
+            "2026-07-02": {"a": {"d1": _dev(11.0, 100), "account": _dev(12.5, 90, "cron")}},
+            "2026-07-03": {"a": {"d1": _dev(2.0, 100)}, "b": {"d9": _dev(4.0, 100)}},
         },
         "finals": {},
     }
-    prev = {
-        "days": {"2026-06-30": {"a": {"extra": {"used": 9.0}}}},
-        "finals": {"b": {"extra": {"used": 0.5}}},
-    }
+    prev = {"days": {"2026-06-30": {"a": {"account": _dev(9.0, 5, "cron")}}},
+            "finals": {"b": {"extra": {"used": 0.5}}}}
     out = m.team_ledger_computed(led, prev)
-    # a: baseline 9 → 10(+1) → 12.5(+2.5) → 2(reset: +2)  = 5.5
+    # a: baseline 9 → 10(+1) → 12.5 cron wins (+2.5) → 2(reset, +2) = 5.5
     # b: baseline 0.5 (prev FINAL preferred) → 1(+0.5) → 4(+3) = 3.5
     assert out["a"] == 5.5 and out["b"] == 3.5
 
 
 def test_ledger_computed_no_prev_month():
     led = {"members": {"a": "A"},
-           "days": {"2026-07-01": {"a": {"extra": {"used": 3.0}}},
-                    "2026-07-02": {"a": {"extra": {"used": 7.0}}}},
+           "days": {"2026-07-01": {"a": {"d1": _dev(3.0, 1)}},
+                    "2026-07-02": {"a": {"d1": _dev(7.0, 2)}}},
            "finals": {}}
     assert m.team_ledger_computed(led)["a"] == 4.0
+
+
+def test_member_month_tokens_sums_last_per_device():
+    led = {"days": {
+        "2026-07-01": {"a": {"d1": _dev(ts=1, tok=100), "d2": _dev(ts=1, tok=10)}},
+        "2026-07-03": {"a": {"d1": _dev(ts=2, tok=250), "account": _dev(ts=9, src="cron")}},
+    }}
+    assert m.member_month_tokens(led, "a") == 260        # d1 last=250 + d2 last=10; account ignored
+    assert m.member_month_tokens(led, "zz") == 0
+
+
+def test_team_overview_merge():
+    ov = {"team": "t", "tz": "Europe/Athens", "today": "2026-07-06", "members": [
+        {"mid": "a", "name": "A", "account": {"fh_pct": 99.0, "sd_pct": 10.0,
+                                              "extra": {"used": 70.8, "limit": 75.0, "currency": "EUR", "pct": 94.4}},
+         "devices": [], "escrow": {"present": True}},
+        {"mid": "b", "name": "B", "account": {"fh_pct": 10.0, "sd_pct": 85.0, "extra": None},
+         "devices": [], "escrow": {"present": False}},
+    ]}
+    led = {"days": {"2026-07-06": {"a": {"d1": _dev(70.8, 5, tok=45)},
+                                   "b": {"d2": _dev(ts=5, tok=7)}}}, "finals": {}, "members": {}}
+    # Steady state: the overview proxy always supplies the prior month as a baseline
+    # (here A entered July having spent nothing through June).
+    prev = {"days": {}, "finals": {"a": {"extra": {"used": 0.0}}}}
+    out = m.team_overview_merge(ov, led, prev)
+    ka = out["kpis"]
+    assert ka["org_spend"] == 70.8 and ka["member_count"] == 2
+    assert ka["near"] == [{"name": "A", "window": "5h", "pct": 99.0},
+                          {"name": "B", "window": "weekly", "pct": 85.0}]
+    ma = out["members"][0]
+    assert ma["month_spend"] == 70.8 and ma["month_tokens"] == 45
 
 
 # ---- device identity + device tokens -----------------------------------------
