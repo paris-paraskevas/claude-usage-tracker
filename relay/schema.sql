@@ -71,3 +71,17 @@ CREATE TABLE IF NOT EXISTS escrow (
   exp INTEGER NOT NULL,                        -- token expiry (epoch ms)
   PRIMARY KEY (tid, mid)
 );
+
+-- Phone-sync snapshots. Moved off KV so the desktop can push every ~10s without
+-- blowing KV's 1,000-writes/day free cap (D1 allows 100k/day). Still E2EE: the row
+-- holds only the opaque ciphertext blob; the auth-token hash stays in KV. The cron
+-- prunes rows past `exp` (KV used to expire these automatically).
+CREATE TABLE IF NOT EXISTS snapshots (
+  account_id TEXT PRIMARY KEY,
+  v          INTEGER,
+  nonce      TEXT,                             -- E2EE nonce (b64)
+  ct         TEXT,                             -- secretbox ciphertext (b64)
+  ts         INTEGER,                          -- producer timestamp (epoch s)
+  wts        INTEGER,                          -- last write (epoch ms) — the throttle
+  exp        INTEGER                           -- expiry (epoch ms) — the 7-day forget
+);

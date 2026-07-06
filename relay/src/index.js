@@ -21,11 +21,11 @@
  *          TEAM_SEAL_KEY (32 bytes base64; enables team token escrow).
  */
 
-const WRITE_MIN_GAP_MS = 8000;             // per-account throttle for snapshot writes
+const WRITE_MIN_GAP_MS = 5000;             // per-account snapshot-write floor (~10s sync; D1-backed)
 const SNAPSHOT_TTL_S = 7 * 86400;          // forget stale accounts that stop syncing
 const AUTH_REFRESH_GAP_MS = 86400 * 1000;  // refresh the auth key's 7-day TTL at most once/day, not every push
 
-const REPORT_MIN_GAP_MS = 60_000;          // per-member throttle for team report writes
+const REPORT_MIN_GAP_MS = 5000;            // per-device team-report write floor (~10s reporting; D1-backed)
 const DAY_ROW_TTL_S = 400 * 86400;         // keep ~13 months of daily rows (month finals never expire)
 const DEFAULT_TEAM_TZ = "Europe/Athens";
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
@@ -94,26 +94,22 @@ async function handle(request, env, ctx) {
 
   if (resource === "snapshot") {
     if (method === "PUT") {
-      // The last-write time rides in the snapshot's own KV metadata instead of a separate
-      // `wts:` key, so a steady sync costs ONE KV write instead of three. KV is eventually
-      // consistent, so this stays a best-effort throttle — exactly as the standalone key was.
-      const prev = await env.KV.getWithMetadata(`snapshot:${accountId}`);
-      const lastWrite = (prev.metadata && Number(prev.metadata.wts)) || 0;
+      // Snapshot blob lives in D1 (not KV) so a ~10s sync stays free — D1 allows 100k
+      // writes/day vs KV's 1,000. Still E2EE: only the opaque ciphertext is stored.
+      const prev = await env.DB.prepare("SELECT wts FROM snapshots WHERE account_id=?").bind(accountId).first();
+      const lastWrite = (prev && prev.wts) || 0;
       if (lastWrite && Date.now() - lastWrite < WRITE_MIN_GAP_MS) {
         return cors(json({ error: "rate_limited" }, 429));
       }
       const blob = await readBlob(request);
       if (!blob) return cors(json({ error: "bad_blob" }, 400));
       const now = Date.now();
-      // The one steady-state write: the snapshot, stamped with the write time (for the
-      // throttle above) and refreshing its own 7-day TTL.
-      await env.KV.put(`snapshot:${accountId}`, JSON.stringify(blob), {
-        expirationTtl: SNAPSHOT_TTL_S,
-        metadata: { wts: now },
-      });
-      // Auth key: written once on first use, then its 7-day TTL is refreshed at most once a
-      // day (not every push) — enough that an actively-syncing account never expires, at a
-      // cost of ~1 write/day rather than one per push.
+      await env.DB.prepare(
+        "INSERT INTO snapshots(account_id,v,nonce,ct,ts,wts,exp) VALUES(?1,?2,?3,?4,?5,?6,?7) " +
+        "ON CONFLICT(account_id) DO UPDATE SET v=?2,nonce=?3,ct=?4,ts=?5,wts=?6,exp=?7"
+      ).bind(accountId, blob.v || 1, blob.nonce, blob.ct, blob.ts, now, now + SNAPSHOT_TTL_S * 1000).run();
+      // Auth-token hash stays in KV: written once on first use, then its 7-day TTL is
+      // refreshed at most once a day (not every push) — a handful of KV writes/day total.
       if (isFirstWrite || (storedHash && now - authRefreshedAt > AUTH_REFRESH_GAP_MS)) {
         await env.KV.put(authKey, bearerHash, {
           expirationTtl: SNAPSHOT_TTL_S,
@@ -123,9 +119,11 @@ async function handle(request, env, ctx) {
       return cors(new Response(null, { status: 204 }));
     }
     if (method === "GET") {
-      const v = await env.KV.get(`snapshot:${accountId}`);
-      if (!v) return cors(new Response(null, { status: 204 }));
-      return cors(new Response(v, { status: 200, headers: { "content-type": "application/json" } }));
+      const r = await env.DB.prepare("SELECT v,nonce,ct,ts,exp FROM snapshots WHERE account_id=?")
+        .bind(accountId).first();
+      if (!r || (r.exp && r.exp < Date.now())) return cors(new Response(null, { status: 204 }));
+      return cors(new Response(JSON.stringify({ v: r.v, nonce: r.nonce, ct: r.ct, ts: r.ts }),
+        { status: 200, headers: { "content-type": "application/json" } }));
     }
   }
 
@@ -510,6 +508,7 @@ async function teamCron(env) {
   await env.DB.batch([
     env.DB.prepare("DELETE FROM usage_rows WHERE date < ?").bind(cutoff),
     env.DB.prepare("DELETE FROM escrow WHERE exp < ?").bind(Date.now()),
+    env.DB.prepare("DELETE FROM snapshots WHERE exp < ?").bind(Date.now()),  // KV used to auto-expire these
   ]);
   if (!env.TEAM_SEAL_KEY) return;
 
