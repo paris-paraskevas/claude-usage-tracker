@@ -1809,6 +1809,42 @@ def team_parse_join(code: str):
     return None
 
 
+def device_month_tokens(cache, month: str) -> int:
+    """This machine's Claude Code tokens for a calendar month, from the all-time
+    cache's per-day buckets. Same headline metric as the All-time tab (in+out+cw;
+    cheap cache reads excluded). Day keys are local dates."""
+    if not isinstance(cache, dict):
+        return 0
+    total = 0
+    for ds, r in (cache.get("days") or {}).items():
+        if isinstance(ds, str) and ds.startswith(month + "-"):
+            try:
+                total += _at_tokens(r)
+            except Exception:
+                pass
+    return total
+
+
+def ensure_team_device(ident):
+    """Guarantee the identity carries a per-install device id + display name.
+    Minted once and persisted; a member's second machine (same join code) gets
+    its own did, so its rows never clobber the first machine's."""
+    if not ident:
+        return ident
+    if ident.get("did") and ident.get("device"):
+        return ident
+    import os as _os
+    ident = dict(ident)
+    ident.setdefault("did", _b64u(_os.urandom(8)))
+    if not ident.get("device"):
+        try:
+            ident["device"] = socket.gethostname()[:32] or "device"
+        except Exception:
+            ident["device"] = "device"
+    save_json(TEAM_PATH, ident)
+    return ident
+
+
 def team_join(code: str):
     """Member: adopt a join code from the admin. Returns identity dict or error string."""
     if load_team_identity():

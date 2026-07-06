@@ -124,6 +124,31 @@ def test_ledger_computed_no_prev_month():
     assert m.team_ledger_computed(led)["a"] == 4.0
 
 
+# ---- device identity + device tokens -----------------------------------------
+
+def test_device_month_tokens():
+    cache = {"days": {
+        "2026-06-30": {"in": 5, "out": 5, "cw": 0, "cr": 9, "msgs": 1},
+        "2026-07-01": {"in": 100, "out": 50, "cw": 10, "cr": 999, "msgs": 3},
+        "2026-07-05": {"in": 1, "out": 2, "cw": 3, "cr": 0, "msgs": 1},
+    }}
+    assert m.device_month_tokens(cache, "2026-07") == 166   # cr excluded, June excluded
+    assert m.device_month_tokens(cache, "2026-05") == 0
+    assert m.device_month_tokens({}, "2026-07") == 0
+    assert m.device_month_tokens(None, "2026-07") == 0
+
+
+def test_ensure_team_device(tmp_path, monkeypatch):
+    monkeypatch.setattr(m, "TEAM_PATH", tmp_path / "team.json")
+    m.save_json(m.TEAM_PATH, {"v": 1, "role": "member", "url": "http://x", "team_id": "t" * 8,
+                              "member_id": "m" * 8, "member_token": "k" * 32})
+    ident = m.ensure_team_device(m.load_team_identity())
+    assert ident["did"] and len(ident["did"]) >= 8
+    assert ident["device"]                      # hostname, non-empty
+    again = m.ensure_team_device(m.load_team_identity())
+    assert again["did"] == ident["did"]         # stable across calls (persisted)
+
+
 # ---- sync throttle ----------------------------------------------------------
 
 def test_teamsync_due_throttle():
