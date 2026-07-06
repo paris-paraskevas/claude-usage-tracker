@@ -195,15 +195,14 @@ async function handle(request, env, ctx) {
 
 // ---- Team mode (docs/TEAM.md) ---------------------------------------------
 //
-// KV layout (all values JSON):
-//   tadm:{tid}                     admin bearer hash + team tz + org  {hash, tz, org}
-//   tmem:{tid}:{mid}               member registry (admin-written)    {hash, name}
-//   tday:{tid}:{date}:{mid}:{did}  one usage row per member DEVICE per LOCAL day;
-//                                  did=`account` is the cron's account-level row
-//   tfinal:{tid}:{month}:{mid}     frozen month-end row (23:59 cron, never expires)
-//   tesc:{tid}:{mid}               sealed OAuth access token          {iv, ct, exp}
-//
-// Date segments sort lexicographically, so one prefix list per month covers the ledger.
+// Storage: Cloudflare D1 (SQLite), schema in relay/schema.sql —
+//   teams(tid, admin_hash, tz, org)          · members(tid, mid, token_hash, name)
+//   usage_rows(tid, date, mid, did, …)        one row per member DEVICE per LOCAL day;
+//                                             did='account' is the cron's account row
+//   finals(tid, month, mid, …)                frozen month-end row (never pruned)
+//   escrow(tid, mid, iv, ct, exp)             sealed OAuth access token
+// Phone sync stays in KV. The HTTP contract is unchanged from the KV era, so the
+// desktop/phone clients don't change — this is purely a storage swap.
 
 async function handleTeam(request, env, url, tid, sub) {
   const { method } = request;
@@ -211,9 +210,8 @@ async function handleTeam(request, env, url, tid, sub) {
   if (!bearer) return json({ error: "unauthorized" }, 401);
   const bearerHash = await sha256hex(bearer);
 
-  const admRaw = await env.KV.get(`tadm:${tid}`);
-  const adm = admRaw ? JSON.parse(admRaw) : null;
-  const isAdmin = !!(adm && timingSafeEqual(adm.hash, bearerHash));
+  const adm = await env.DB.prepare("SELECT admin_hash, tz, org FROM teams WHERE tid=?").bind(tid).first();
+  const isAdmin = !!(adm && timingSafeEqual(adm.admin_hash, bearerHash));
 
   // POST /init — trust-on-first-use pin of the admin bearer; idempotent for the admin.
   if (sub === "/init" && method === "POST") {
@@ -221,7 +219,10 @@ async function handleTeam(request, env, url, tid, sub) {
     const tz = validTz(body.tz) || (adm && adm.tz) || DEFAULT_TEAM_TZ;
     const org = typeof body.org === "string" && body.org.length <= 64 ? body.org : (adm && adm.org) || null;
     if (adm && !isAdmin) return json({ error: "forbidden" }, 403);
-    await env.KV.put(`tadm:${tid}`, JSON.stringify({ hash: bearerHash, tz, org }));
+    await env.DB.prepare(
+      "INSERT INTO teams(tid,admin_hash,tz,org) VALUES(?1,?2,?3,?4) " +
+      "ON CONFLICT(tid) DO UPDATE SET admin_hash=?2, tz=?3, org=?4"
+    ).bind(tid, bearerHash, tz, org).run();
     return json({ ok: true, tz, org });
   }
   if (!adm) return json({ error: "unknown_team" }, 404);
@@ -231,7 +232,6 @@ async function handleTeam(request, env, url, tid, sub) {
   if (mm) {
     const mid = mm[1];
     const leaf = mm[2] || "";
-    const memKey = `tmem:${tid}:${mid}`;
 
     if (leaf === "") {
       // Registry management — admin only. The admin mints the member token and
@@ -243,22 +243,28 @@ async function handleTeam(request, env, url, tid, sub) {
           ? body.token_hash : null;
         if (!hash) return json({ error: "bad_member" }, 400);
         const name = cleanName(body.name) || mid.slice(0, 8);
-        await env.KV.put(memKey, JSON.stringify({ hash, name }));
+        await env.DB.prepare(
+          "INSERT INTO members(tid,mid,token_hash,name) VALUES(?1,?2,?3,?4) " +
+          "ON CONFLICT(tid,mid) DO UPDATE SET token_hash=?3, name=?4"
+        ).bind(tid, mid, hash, name).run();
         return new Response(null, { status: 204 });
       }
       if (method === "DELETE") {
-        await env.KV.delete(memKey);
-        await env.KV.delete(`tesc:${tid}:${mid}`);
+        // Drop the registry entry + escrow; ledger rows are kept for history.
+        await env.DB.batch([
+          env.DB.prepare("DELETE FROM members WHERE tid=? AND mid=?").bind(tid, mid),
+          env.DB.prepare("DELETE FROM escrow WHERE tid=? AND mid=?").bind(tid, mid),
+        ]);
         return new Response(null, { status: 204 });
       }
       return json({ error: "method" }, 405);
     }
 
     // Member-authenticated leaves.
-    const memRaw = await env.KV.get(memKey);
-    const mem = memRaw ? JSON.parse(memRaw) : null;
+    const mem = await env.DB.prepare("SELECT token_hash, name FROM members WHERE tid=? AND mid=?")
+      .bind(tid, mid).first();
     if (!mem) return json({ error: "unknown_member" }, 404);
-    if (!timingSafeEqual(mem.hash, bearerHash)) return json({ error: "forbidden" }, 403);
+    if (!timingSafeEqual(mem.token_hash, bearerHash)) return json({ error: "forbidden" }, 403);
 
     if (leaf === "/report" && method === "PUT") {
       const body = await readJson(request);
@@ -266,25 +272,22 @@ async function handleTeam(request, env, url, tid, sub) {
         ? body.did : null;
       const row = sanitizeReport(body, mem.name);
       // Device rows are keyed per did, distinct from the cron's reserved `account`
-      // key, so a device push and the 23:59 cron row can coexist without clobbering.
+      // row, so a device push and the 23:59 cron row can coexist without clobbering.
       if (!row || !did || did === "account") return json({ error: "bad_report" }, 400);
-      const dayKey = `tday:${tid}:${tzParts(adm.tz).date}:${mid}:${did}`;
-      const prev = await env.KV.getWithMetadata(dayKey);
-      const lastWrite = (prev.metadata && Number(prev.metadata.wts)) || 0;
-      if (lastWrite && Date.now() - lastWrite < REPORT_MIN_GAP_MS) {
+      const date = tzParts(adm.tz).date;
+      const prev = await env.DB.prepare("SELECT wts FROM usage_rows WHERE tid=? AND date=? AND mid=? AND did=?")
+        .bind(tid, date, mid, did).first();
+      if (prev && prev.wts && Date.now() - prev.wts < REPORT_MIN_GAP_MS) {
         return json({ error: "rate_limited" }, 429);
       }
       row.src = "push";
-      await env.KV.put(dayKey, JSON.stringify(row), {
-        expirationTtl: DAY_ROW_TTL_S,
-        metadata: { wts: Date.now() },
-      });
+      await env.DB.prepare(USAGE_UPSERT).bind(...usageBind(tid, date, mid, did, row, Date.now())).run();
       return new Response(null, { status: 204 });
     }
 
     if (leaf === "/token") {
       if (method === "DELETE") {
-        await env.KV.delete(`tesc:${tid}:${mid}`);
+        await env.DB.prepare("DELETE FROM escrow WHERE tid=? AND mid=?").bind(tid, mid).run();
         return new Response(null, { status: 204 });
       }
       if (method !== "PUT") return json({ error: "method" }, 405);
@@ -310,8 +313,10 @@ async function handleTeam(request, env, url, tid, sub) {
         if (org !== adm.org) return json({ error: "wrong_org" }, 403);
       }
       const sealed = await seal(env.TEAM_SEAL_KEY, tok);
-      const ttl = Math.max(60, Math.min(Math.floor((exp - Date.now()) / 1000), 7 * 86400));
-      await env.KV.put(`tesc:${tid}:${mid}`, JSON.stringify({ ...sealed, exp }), { expirationTtl: ttl });
+      await env.DB.prepare(
+        "INSERT INTO escrow(tid,mid,iv,ct,exp) VALUES(?1,?2,?3,?4,?5) " +
+        "ON CONFLICT(tid,mid) DO UPDATE SET iv=?3, ct=?4, exp=?5"
+      ).bind(tid, mid, sealed.iv, sealed.ct, exp).run();
       return new Response(null, { status: 204 });
     }
   }
@@ -325,74 +330,97 @@ async function handleTeam(request, env, url, tid, sub) {
     const today = tzParts(tz, now).date;
     const yesterday = tzParts(tz, new Date(now.getTime() - 86400_000)).date;
 
-    // One prefix list per day yields all members' device rows in a single sweep:
-    // {mid: {did: row}}. Cheaper than a get per member as the team grows.
-    const dayMap = async (date) => {
-      const out = {};
-      for (const key of await listAll(env, `tday:${tid}:${date}:`)) {
-        const rest = key.slice(`tday:${tid}:${date}:`.length); // "{mid}:{did}"
-        const i = rest.indexOf(":");
-        if (i < 0) continue;
-        const v = await env.KV.get(key);
-        if (v) ((out[rest.slice(0, i)] = out[rest.slice(0, i)] || {})[rest.slice(i + 1)] = JSON.parse(v));
-      }
-      return out;
-    };
-    const [todayRows, ydayRows] = await Promise.all([dayMap(today), dayMap(yesterday)]);
-
-    const members = [];
-    for (const key of await listAll(env, `tmem:${tid}:`)) {
-      const mid = key.slice(`tmem:${tid}:`.length);
-      const [memRaw, escRaw] = await Promise.all([env.KV.get(key), env.KV.get(`tesc:${tid}:${mid}`)]);
-      const mem = memRaw ? JSON.parse(memRaw) : {};
-      const esc = escRaw ? JSON.parse(escRaw) : null;
-      const tdev = todayRows[mid] || {};
-      const ydev = ydayRows[mid] || {};
-      const devices = Object.keys(tdev).filter((d) => d !== "account")
-        .map((d) => ({ did: d, ...tdev[d] }));
-      members.push({
-        mid,
-        name: mem.name || mid.slice(0, 8),
+    const [mRes, eRes, uRes] = await env.DB.batch([
+      env.DB.prepare("SELECT mid,name FROM members WHERE tid=?").bind(tid),
+      env.DB.prepare("SELECT mid,exp FROM escrow WHERE tid=? AND exp>?").bind(tid, Date.now()),
+      env.DB.prepare("SELECT * FROM usage_rows WHERE tid=? AND date IN (?,?)").bind(tid, today, yesterday),
+    ]);
+    const esc = {};
+    for (const r of eRes.results) esc[r.mid] = r.exp;
+    // Group rows into {date: {mid: {did: row}}}.
+    const byDate = { [today]: {}, [yesterday]: {} };
+    for (const r of uRes.results) {
+      const d = (byDate[r.date] = byDate[r.date] || {});
+      (d[r.mid] = d[r.mid] || {})[r.did] = rowFromDb(r);
+    }
+    const members = (mRes.results).map((m) => {
+      const tdev = (byDate[today] && byDate[today][m.mid]) || {};
+      const ydev = (byDate[yesterday] && byDate[yesterday][m.mid]) || {};
+      const devices = Object.keys(tdev).filter((d) => d !== "account").map((d) => ({ did: d, ...tdev[d] }));
+      return {
+        mid: m.mid,
+        name: m.name || m.mid.slice(0, 8),
         account: pickAccountRow(tdev) || pickAccountRow(ydev),
         account_is_today: !!pickAccountRow(tdev),
         devices,
-        escrow: esc ? { present: true, exp: esc.exp } : { present: false },
-      });
-    }
+        escrow: m.mid in esc ? { present: true, exp: esc[m.mid] } : { present: false },
+      };
+    });
     return json({ team: tid, tz, today, members });
   }
 
   if (sub === "/ledger" && method === "GET") {
     const month = (url.searchParams.get("month") || "").trim();
     if (!/^\d{4}-\d{2}$/.test(month)) return json({ error: "bad_month" }, 400);
+    const [mRes, uRes, fRes] = await env.DB.batch([
+      env.DB.prepare("SELECT mid,name FROM members WHERE tid=?").bind(tid),
+      env.DB.prepare("SELECT * FROM usage_rows WHERE tid=? AND date LIKE ?").bind(tid, month + "-%"),
+      env.DB.prepare("SELECT * FROM finals WHERE tid=? AND month=?").bind(tid, month),
+    ]);
     const names = {};
-    for (const key of await listAll(env, `tmem:${tid}:`)) {
-      const mid = key.slice(`tmem:${tid}:`.length);
-      const mem = JSON.parse((await env.KV.get(key)) || "{}");
-      names[mid] = mem.name || mid.slice(0, 8);
-    }
+    for (const m of mRes.results) names[m.mid] = m.name || m.mid.slice(0, 8);
     const days = {};
-    for (const key of await listAll(env, `tday:${tid}:${month}-`)) {
-      const rest = key.slice(`tday:${tid}:`.length); // "{date}:{mid}:{did}"
-      const date = rest.slice(0, 10);
-      const tail = rest.slice(11);                   // "{mid}:{did}"
-      const i = tail.indexOf(":");
-      if (i < 0) continue;
-      const mid = tail.slice(0, i);
-      const did = tail.slice(i + 1);
-      const row = await env.KV.get(key);
-      if (row) (((days[date] = days[date] || {})[mid] = days[date][mid] || {})[did] = JSON.parse(row));
+    for (const r of uRes.results) {
+      const d = (days[r.date] = days[r.date] || {});
+      (d[r.mid] = d[r.mid] || {})[r.did] = rowFromDb(r);
     }
     const finals = {};
-    for (const key of await listAll(env, `tfinal:${tid}:${month}:`)) {
-      const mid = key.slice(`tfinal:${tid}:${month}:`.length);
-      const row = await env.KV.get(key);
-      if (row) finals[mid] = JSON.parse(row);
-    }
+    for (const r of fRes.results) finals[r.mid] = rowFromDb(r);
     return json({ team: tid, month, members: names, days, finals });
   }
 
   return json({ error: "not_found" }, 404);
+}
+
+// usage_rows / finals row  ->  the client JSON shape the desktop parses (unchanged
+// from the KV era). extra_enabled NULL means "no extra block".
+function rowFromDb(r) {
+  if (!r) return null;
+  return {
+    name: r.name, fh_pct: r.fh_pct, sd_pct: r.sd_pct,
+    fh_resets_at: r.fh_resets_at, sd_resets_at: r.sd_resets_at,
+    extra: (r.extra_enabled === null || r.extra_enabled === undefined) ? null
+      : { enabled: !!r.extra_enabled, used: r.extra_used, limit: r.extra_limit, currency: r.extra_currency, pct: r.extra_pct },
+    did: r.did, device: r.device, tok_month: r.tok_month, ts: r.ts, src: r.src,
+  };
+}
+
+const USAGE_UPSERT =
+  "INSERT INTO usage_rows(tid,date,mid,did,name,fh_pct,sd_pct,fh_resets_at,sd_resets_at," +
+  "extra_enabled,extra_used,extra_limit,extra_currency,extra_pct,tok_month,device,src,ts,wts) " +
+  "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19) " +
+  "ON CONFLICT(tid,date,mid,did) DO UPDATE SET name=?5,fh_pct=?6,sd_pct=?7,fh_resets_at=?8,sd_resets_at=?9," +
+  "extra_enabled=?10,extra_used=?11,extra_limit=?12,extra_currency=?13,extra_pct=?14,tok_month=?15,device=?16,src=?17,ts=?18,wts=?19";
+
+function usageBind(tid, date, mid, did, row, wts) {
+  const e = row.extra;
+  return [tid, date, mid, did, row.name, row.fh_pct, row.sd_pct, row.fh_resets_at, row.sd_resets_at,
+    e ? (e.enabled ? 1 : 0) : null, e ? e.used : null, e ? e.limit : null, e ? e.currency : null, e ? e.pct : null,
+    row.tok_month ?? null, row.device ?? null, row.src ?? null, row.ts ?? null, wts ?? null];
+}
+
+const FINAL_UPSERT =
+  "INSERT INTO finals(tid,month,mid,name,fh_pct,sd_pct,fh_resets_at,sd_resets_at," +
+  "extra_enabled,extra_used,extra_limit,extra_currency,extra_pct,tok_month,ts) " +
+  "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) " +
+  "ON CONFLICT(tid,month,mid) DO UPDATE SET name=?4,fh_pct=?5,sd_pct=?6,fh_resets_at=?7,sd_resets_at=?8," +
+  "extra_enabled=?9,extra_used=?10,extra_limit=?11,extra_currency=?12,extra_pct=?13,tok_month=?14,ts=?15";
+
+function finalBind(tid, month, mid, row) {
+  const e = row.extra;
+  return [tid, month, mid, row.name, row.fh_pct, row.sd_pct, row.fh_resets_at, row.sd_resets_at,
+    e ? (e.enabled ? 1 : 0) : null, e ? e.used : null, e ? e.limit : null, e ? e.currency : null, e ? e.pct : null,
+    row.tok_month ?? null, row.ts ?? null];
 }
 
 // The authoritative account-level row for a member's day: the cron's row if
@@ -469,17 +497,6 @@ function tzParts(tz, d = new Date()) {
   };
 }
 
-async function listAll(env, prefix) {
-  const keys = [];
-  let cursor;
-  do {
-    const page = await env.KV.list({ prefix, cursor });
-    for (const k of page.keys) keys.push(k.name);
-    cursor = page.list_complete ? null : page.cursor;
-  } while (cursor);
-  return keys;
-}
-
 // ---- Team cron: the 23:59 ledger capture -----------------------------------
 //
 // Fires at 20:59 and 21:59 UTC (wrangler.toml). Exactly one of the two lands on
@@ -487,45 +504,48 @@ async function listAll(env, prefix) {
 // tz, so other zones just need cron entries that cover their offset.
 
 async function teamCron(env) {
+  // Housekeeping (runs regardless of the seal key): prune day rows past the retention
+  // window and expired escrow. D1 has no TTL, so this replaces KV's automatic expiry.
+  const cutoff = new Date(Date.now() - DAY_ROW_TTL_S * 1000).toISOString().slice(0, 10);
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM usage_rows WHERE date < ?").bind(cutoff),
+    env.DB.prepare("DELETE FROM escrow WHERE exp < ?").bind(Date.now()),
+  ]);
   if (!env.TEAM_SEAL_KEY) return;
-  for (const admKey of await listAll(env, "tadm:")) {
-    const tid = admKey.slice(5);
-    const adm = JSON.parse((await env.KV.get(admKey)) || "{}");
-    const tz = adm.tz || DEFAULT_TEAM_TZ;
+
+  const teams = (await env.DB.prepare("SELECT tid, tz FROM teams").all()).results;
+  for (const t of teams) {
+    const tz = t.tz || DEFAULT_TEAM_TZ;
     const local = tzParts(tz);
     if (local.hour !== 23 || local.minute < 50) continue; // not this team's end-of-day
     const lastDay = local.d === new Date(Date.UTC(local.y, local.m, 0)).getUTCDate();
     const month = local.date.slice(0, 7);
 
-    for (const memKey of await listAll(env, `tmem:${tid}:`)) {
-      const mid = memKey.slice(`tmem:${tid}:`.length);
-      const escRaw = await env.KV.get(`tesc:${tid}:${mid}`);
-      if (!escRaw) continue; // no escrow: the member's last push stands as the day's row
-      const esc = JSON.parse(escRaw);
-      if (esc.exp <= Date.now()) continue;
+    const escrowed = (await env.DB.prepare(
+      "SELECT e.mid AS mid, e.iv AS iv, e.ct AS ct, m.name AS name " +
+      "FROM escrow e JOIN members m ON e.tid=m.tid AND e.mid=m.mid WHERE e.tid=? AND e.exp>?"
+    ).bind(t.tid, Date.now()).all()).results;
+
+    for (const em of escrowed) {
       let token;
       try {
-        token = await unseal(env.TEAM_SEAL_KEY, esc);
+        token = await unseal(env.TEAM_SEAL_KEY, { iv: em.iv, ct: em.ct });
       } catch {
         continue;
       }
       const row = await fetchUsageRow(token);
       if (row === "dead") {
-        await env.KV.delete(`tesc:${tid}:${mid}`); // token revoked/expired server-side
+        await env.DB.prepare("DELETE FROM escrow WHERE tid=? AND mid=?").bind(t.tid, em.mid).run(); // revoked
         continue;
       }
-      if (!row) continue; // transient failure: keep the pushed row
-      const mem = JSON.parse((await env.KV.get(memKey)) || "{}");
-      row.name = mem.name || mid.slice(0, 8);
+      if (!row) continue; // transient failure: keep the pushed rows
+      row.name = em.name || em.mid.slice(0, 8);
       row.src = "cron";
-      // Reserved device id `account`: an account-level row (no single device),
-      // distinct from any device's push key so both survive on the same day.
-      await env.KV.put(`tday:${tid}:${local.date}:${mid}:account`, JSON.stringify(row), {
-        expirationTtl: DAY_ROW_TTL_S,
-        metadata: { wts: Date.now() },
-      });
+      // Reserved device id 'account': an account-level row distinct from any device's
+      // push row, so both survive on the same day.
+      await env.DB.prepare(USAGE_UPSERT).bind(...usageBind(t.tid, local.date, em.mid, "account", row, Date.now())).run();
       if (lastDay) {
-        await env.KV.put(`tfinal:${tid}:${month}:${mid}`, JSON.stringify(row)); // never expires
+        await env.DB.prepare(FINAL_UPSERT).bind(...finalBind(t.tid, month, em.mid, row)).run();
       }
     }
   }
