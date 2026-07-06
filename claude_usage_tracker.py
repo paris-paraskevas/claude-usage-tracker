@@ -2576,73 +2576,44 @@ DASHBOARD_HTML = r"""<!doctype html>
   </div>
 
   <div id="tab-home" class="tabpane">
-  <div class="gauges">
-    <div class="card gauge" id="g-five_hour">
-      <div class="gwrap">
-        <div class="gauge-dial">
-          <svg class="dial" viewBox="0 0 120 120">
-            <circle class="dial-track" cx="60" cy="60" r="50"></circle>
-            <circle class="dial-arc" id="arc-five_hour" cx="60" cy="60" r="50" transform="rotate(-90 60 60)"></circle>
-          </svg>
-          <div class="dial-val">
-            <div class="pct" id="p-five_hour">––<span>%</span></div>
-            <div class="glabel">5-hour</div>
-          </div>
-        </div>
-        <div class="ginfo">
-          <div class="reset"><b id="cd-five_hour">—</b><div class="abs" id="ab-five_hour"></div></div>
-          <div class="burn" id="bn-five_hour"></div>
-        </div>
-      </div>
+  <div class="bento">
+    <div class="card hero" id="home-hero">
+      <div class="clab" id="hero-lab">5-hour limit</div>
+      <div class="hnum" id="hero-num">––<small>%</small></div>
+      <div class="bar"><i id="hero-bar" style="width:0"></i></div>
+      <div class="hsub"><b id="hero-cd">—</b> <span id="hero-abs"></span></div>
+      <div class="hsub" id="hero-burn"></div>
+      <div style="margin-top:16px" class="clab" id="hero2-lab">Weekly</div>
+      <div class="hsub"><b id="hero2-val" style="color:var(--ink)">—</b> · <span id="hero2-cd">—</span></div>
+      <div class="bar"><i id="hero2-bar" style="width:0"></i></div>
     </div>
-    <div class="card gauge" id="g-seven_day">
-      <div class="gwrap">
-        <div class="gauge-dial">
-          <svg class="dial" viewBox="0 0 120 120">
-            <circle class="dial-track" cx="60" cy="60" r="50"></circle>
-            <circle class="dial-arc" id="arc-seven_day" cx="60" cy="60" r="50" transform="rotate(-90 60 60)"></circle>
-          </svg>
-          <div class="dial-val">
-            <div class="pct" id="p-seven_day">––<span>%</span></div>
-            <div class="glabel">Weekly</div>
-          </div>
-        </div>
-        <div class="ginfo">
-          <div class="reset"><b id="cd-seven_day">—</b><div class="abs" id="ab-seven_day"></div></div>
-          <div class="burn" id="bn-seven_day"></div>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div class="row">
-    <div class="card panel">
-      <div class="ptitle">Usage history
-        <span class="legend"><span><i style="background:#d97757"></i>5h</span><span><i style="background:#7f93b0"></i>weekly</span></span>
-      </div>
-      <svg class="spark" id="spark" preserveAspectRatio="none"></svg>
-    </div>
-    <div class="card panel">
-      <div class="ptitle">Overage credits &amp; scoped limits</div>
+    <div class="card">
+      <div class="clab">Extra usage · this month</div>
       <div id="extra"></div>
       <div id="scoped"></div>
     </div>
-  </div>
-
-  <div class="card panel" id="sesscard">
-    <div class="ptitle"><span>Sessions · last 5h</span>
-      <span class="srt">
-        <span class="stabs"><button class="stab on" data-m="context">Context&nbsp;%</button><button class="stab" data-m="tokens">Tokens</button></span>
-        <span class="legend" id="sesssub"></span>
-      </span>
+    <div class="card">
+      <div class="clab">Context · active</div>
+      <div id="home-ctx"><div class="hsub">—</div></div>
     </div>
-    <div id="sessions"></div>
-  </div>
-
-  <div class="scale">
-    <span><i style="background:#5e9e72"></i>ok · under 60%</span>
-    <span><i style="background:#cda24e"></i>busy · 60–80%</span>
-    <span><i style="background:#d4694f"></i>near limit · 80%+</span>
+    <div class="card" id="sesscard">
+      <div class="clab" style="display:flex;justify-content:space-between;align-items:center">Sessions · last 5h
+        <span class="stabs"><button class="stab on" data-m="context">Ctx</button><button class="stab" data-m="tokens">Tok</button></span></div>
+      <div id="sessions"></div>
+    </div>
+    <div class="card" id="home-team-card">
+      <div class="clab">Team</div>
+      <div id="home-team"><div class="hsub">—</div></div>
+    </div>
+    <div class="card span2">
+      <div class="clab" style="display:flex;justify-content:space-between">Usage · last 30 days
+        <span class="legend"><span><i style="background:#d97757"></i>5h</span><span><i style="background:#7f93b0"></i>weekly</span></span></div>
+      <svg class="spark" id="spark" preserveAspectRatio="none"></svg>
+    </div>
+    <div class="card">
+      <div class="clab">Anthropic status</div>
+      <div id="home-status"><div class="hsub">—</div></div>
+    </div>
   </div>
   </div><!-- /tab-home -->
 
@@ -2818,6 +2789,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 <script>
 const $=id=>document.getElementById(id);
 let WIN={};   // key -> {resets_at, color}
+let HEROKEY=null, SECKEY=null, HOME_TEAM_TS=0;   // Home hero windows + team-mini fetch throttle
 let LASTH=null;   // last history payload, for resize reflow
 function esc(s){ return (s||"").replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
 async function doSignin(email, terminal){
@@ -2874,6 +2846,11 @@ function tickCountdowns(){
     if(!w.resets_at){el.textContent="—";continue;}
     el.textContent="resets in "+fdur((w.resets_at-now)/1000);
   }
+  // Home hero + secondary countdowns (redesign)
+  [["hero-cd",HEROKEY],["hero2-cd",SECKEY]].forEach(([id,k])=>{
+    const el=$(id); if(!el||!k||!WIN[k])return;
+    el.textContent=WIN[k].resets_at?("resets in "+fdur((WIN[k].resets_at-now)/1000)):"—";
+  });
 }
 const DIAL_C=2*Math.PI*50;   // circumference of the dial arc (r=50)
 function buildTicks(){       // subtle measured tick ring — the instrument signature
@@ -2906,6 +2883,68 @@ function renderGauge(w){
       bn.innerHTML="<span class='ok'>steady</span> · no recent burn";
     }else{ bn.textContent="gathering rate…"; }
   }
+}
+function bcol(p){ return p==null?"var(--faint)":(p>=80?"var(--hot)":(p>=60?"var(--warn)":"var(--ok)")); }
+function burnText(w){
+  if(!w)return"";
+  if(w.eta_seconds!=null&&w.eta_seconds>=0&&w.rate_per_hour>0)
+    return "▲ "+w.rate_per_hour.toFixed(1)+"%/h · full in ~"+fdur(w.eta_seconds);
+  if(w.rate_per_hour!=null&&w.rate_per_hour>0.1) return "▲ "+w.rate_per_hour.toFixed(1)+"%/h · resets before limit";
+  if(w.rate_per_hour!=null) return "steady · no recent burn";
+  return "gathering rate…";
+}
+// Home bento: hero = the hotter of 5h/weekly; the other rides as a secondary bar.
+function renderHome(d){
+  if(!d)return;
+  const wins=d.windows||[];
+  const five=wins.find(w=>w.key==="five_hour"), week=wins.find(w=>w.key==="seven_day");
+  const both=[five,week].filter(Boolean);
+  if(both.length){
+    const hero=both.reduce((a,b)=>(b.pct>a.pct?b:a));
+    const sec=both.find(w=>w!==hero)||null;
+    HEROKEY=hero.key; SECKEY=sec?sec.key:null;
+    WIN[hero.key]={resets_at:hero.resets_at,color:hero.color};
+    if(sec)WIN[sec.key]={resets_at:sec.resets_at,color:sec.color};
+    $("hero-lab").textContent=hero.label+" limit";
+    $("hero-num").innerHTML=Math.round(hero.pct)+"<small>%</small>";
+    $("hero-num").style.color=hero.color;
+    $("hero-bar").style.width=Math.min(100,hero.pct)+"%"; $("hero-bar").style.background=hero.color;
+    $("hero-abs").textContent=fabs(hero.resets_at);
+    $("hero-burn").innerHTML=burnText(hero);
+    if(sec){
+      $("hero2-lab").textContent=sec.label;
+      $("hero2-val").textContent=Math.round(sec.pct)+"% used";
+      $("hero2-bar").style.width=Math.min(100,sec.pct)+"%"; $("hero2-bar").style.background=sec.color;
+    }
+    tickCountdowns();
+  }
+  // Context
+  const c=d.context||{}, cp=(c.used_percentage!=null?c.used_percentage:null);
+  $("home-ctx").innerHTML = cp==null
+    ? "<div class='hsub'>no active session</div>"
+    : "<div class='cval' style='color:"+bcol(cp)+"'>"+Math.round(cp)+"%</div><div class='bar'><i style='width:"+Math.min(100,cp)+"%;background:"+bcol(cp)+"'></i></div>"+
+      (c.total_input_tokens?"<div class='hsub'>"+fmtTok(c.total_input_tokens)+" tokens</div>":"");
+  // Status
+  const sv=statusView(d), st=$("home-status");
+  if(sv){ st.innerHTML="<div style='display:flex;align-items:center;gap:8px'><span class='sdot2' style='background:"+sv.color+"'></span><b>"+esc(sv.word)+"</b></div>"+
+    (sv.text?"<div class='hsub'>"+esc(sv.text)+"</div>":""); }
+  else { st.innerHTML="<div class='hsub'>status unavailable</div>"; }
+  // Team mini
+  fillHomeTeam();
+  const t=(d.team)||{};
+  if(t.in_team&&t.role==="admin"&&Date.now()-HOME_TEAM_TS>60000){ HOME_TEAM_TS=Date.now(); loadTeamOverview(); }
+}
+function fillHomeTeam(){
+  const box=$("home-team"); if(!box)return;
+  const t=(LASTD&&LASTD.team)||{};
+  if(!t.in_team){ box.innerHTML="<div class='hsub'>Not in a team — set one up in the Team tab.</div>"; return; }
+  if(t.role!=="admin"){ box.innerHTML="<div class='cval'>Member</div><div class='hsub'>of "+esc(t.name||"your team")+"</div>"; return; }
+  const k=(TMOV&&TMOV.kpis)||null;
+  if(!k){ box.innerHTML="<div class='hsub'>Open the Team tab for spend &amp; limits.</div>"; return; }
+  const near=k.near||[];
+  box.innerHTML="<div class='cval'>"+tmMoney(k.org_spend,tmCur(TMOV))+"</div>"+
+    "<div class='hsub'>"+(k.member_count||0)+" members"+
+    (near.length?" · <span style='color:var(--hot)'>"+near.length+" near limit</span>":" · all clear")+"</div>";
 }
 function renderSpark(h){
   const svg=$("spark"); svg.innerHTML="";
@@ -3159,7 +3198,7 @@ async function refresh(){
       $("livedot").style.background="#cda24e"; $("livetxt").textContent=wins.length?"stale":"offline";
       $("updated").textContent=wins.length?("paused · "+(d.error||"waiting for Claude Code activity")):(d.error||"—");
     }
-    wins.filter(w=>w.key==="five_hour"||w.key==="seven_day").forEach(renderGauge);
+    renderHome(d);
     LASTH=d.history; renderSpark(LASTH);
     renderExtra(d.extra);
     renderScoped(wins);
@@ -3255,6 +3294,7 @@ async function loadTeamOverview(){
   try{
     const d=await (await fetch("/api/team/overview",{cache:"no-store"})).json();
     TMOV=d;
+    fillHomeTeam();   // keep the Home team-mini in sync with the freshest overview
     if(d.error){ box.innerHTML="<div class='csub'>"+esc(d.error)+"</div>"; return; }
     $("tm-asof").textContent="today "+esc(d.today||"")+" · "+esc(d.tz||"");
     const k=d.kpis||{};
