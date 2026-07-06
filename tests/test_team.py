@@ -227,6 +227,27 @@ def test_join_allows_matching_or_unknown_org(tmp_path, monkeypatch):
     assert isinstance(m.team_join(_code(p)), dict)
 
 
+def test_team_overview_compact():
+    merged = {
+        "tz": "Europe/Athens",
+        "kpis": {"org_spend": 169.2, "member_count": 2,
+                 "near": [{"name": "A", "window": "5h", "pct": 99.0}]},
+        "members": [
+            {"mid": "a", "name": "A", "month_spend": 70.8, "month_tokens": 45,
+             "account": {"fh_pct": 99.0, "sd_pct": 19.0, "extra": {"currency": "EUR"}}},
+            {"mid": "b", "name": "B", "month_spend": 0.0, "month_tokens": 7,
+             "account": {"fh_pct": 10.0, "sd_pct": 85.0, "extra": None}},
+        ],
+    }
+    c = m.team_overview_compact(merged)
+    assert c["org_spend"] == 169.2 and c["member_count"] == 2 and c["tz"] == "Europe/Athens"
+    assert c["near"] == [{"name": "A", "window": "5h", "pct": 99.0}]
+    assert c["members"][0] == {"name": "A", "fh_pct": 99.0, "sd_pct": 19.0,
+                               "month_spend": 70.8, "month_tokens": 45, "currency": "EUR"}
+    assert c["members"][1]["currency"] is None      # no extra block → currency None
+    assert m.team_overview_compact(None) is None
+
+
 # ---- sync throttle ----------------------------------------------------------
 
 def test_teamsync_due_throttle():

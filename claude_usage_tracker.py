@@ -2003,6 +2003,47 @@ def team_overview_merge(ov: dict, led, prev_led=None) -> dict:
     return out
 
 
+def team_admin_overview_merged(ident):
+    """Admin: fetch the relay overview + this/previous-month ledger and merge them
+    (spend/tokens/KPIs). Returns the merged dict or None. Shared by the dashboard proxy
+    and the phone-snapshot embed so both compute team numbers the same way."""
+    if not ident or ident.get("role") != "admin":
+        return None
+    st, data = _team_get_json(ident, ident["admin_token"], f"/v1/team/{ident['team_id']}/overview")
+    if st != 200 or not data:
+        return None
+    month = (data.get("today") or "")[:7]
+    lpath = f"/v1/team/{ident['team_id']}/ledger?month="
+    led = None
+    if month:
+        _, led = _team_get_json(ident, ident["admin_token"], lpath + month)
+    prev = None
+    if led and month:
+        _, prev = _team_get_json(ident, ident["admin_token"], lpath + _prev_month(month))
+    return team_overview_merge(data, led, prev) if led else data
+
+
+def team_overview_compact(merged):
+    """Strip a merged overview to the small projection the phone renders — org totals +
+    per-member name / window percents / month €. Keeps the E2EE snapshot small."""
+    if not isinstance(merged, dict):
+        return None
+    k = merged.get("kpis") or {}
+    members = []
+    for m in merged.get("members") or []:
+        acct = m.get("account") or {}
+        members.append({
+            "name": m.get("name"),
+            "fh_pct": acct.get("fh_pct"),
+            "sd_pct": acct.get("sd_pct"),
+            "month_spend": m.get("month_spend"),
+            "month_tokens": m.get("month_tokens"),
+            "currency": (acct.get("extra") or {}).get("currency"),
+        })
+    return {"org_spend": k.get("org_spend"), "member_count": k.get("member_count"),
+            "near": k.get("near") or [], "tz": merged.get("tz"), "members": members}
+
+
 def _ledger_baseline(prev_led, mid: str):
     """The value to diff the month's first sample against: the previous month's
     frozen final if the cron caught it, else its last daily row."""
@@ -3598,20 +3639,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not ident or ident.get("role") != "admin":
                 self._send(200, "application/json", b'{"error":"not_admin"}')
             else:
-                st, data = _team_get_json(ident, ident["admin_token"],
-                                          f"/v1/team/{ident['team_id']}/overview")
-                if st == 200 and data:
-                    month = (data.get("today") or "")[:7]
-                    lpath = f"/v1/team/{ident['team_id']}/ledger?month="
-                    led = None
-                    if month:
-                        _, led = _team_get_json(ident, ident["admin_token"], lpath + month)
-                    prev = None
-                    if led and month:
-                        _, prev = _team_get_json(ident, ident["admin_token"], lpath + _prev_month(month))
-                    out = team_overview_merge(data, led, prev) if led else data
-                else:
-                    out = {"error": f"relay HTTP {st}" if st else "relay unreachable"}
+                merged = team_admin_overview_merged(ident)
+                out = merged if merged else {"error": "relay unreachable"}
                 self._send(200, "application/json", json.dumps(out).encode("utf-8"))
         elif path == "/api/team/ledger":
             from urllib.parse import parse_qs, urlsplit
@@ -4538,6 +4567,16 @@ class TrayApp:
         except Exception as exc:
             log(f"visual update failed: {exc}")
 
+    def _refresh_team_overview(self, ident):
+        """Admin: fetch + compact the team overview for the phone-embedded snapshot.
+        Runs off the poll thread; failures leave the last good value in place."""
+        try:
+            merged = team_admin_overview_merged(ident)
+            if merged:
+                self._team_overview = team_overview_compact(merged)
+        except Exception:
+            log("team overview embed error:\n" + traceback.format_exc())
+
     def _poll_loop(self):
         timeout = int(self.cfg.get("request_timeout_seconds", 20))
         cap = int(self.cfg.get("history_cap", 2880))
@@ -4556,6 +4595,7 @@ class TrayApp:
         self._update_available = getattr(self, "_update_available", None)
         self._update_url = getattr(self, "_update_url", None)
         self._status = getattr(self, "_status", None)
+        self._team_overview = getattr(self, "_team_overview", None)   # compact team KPIs embedded for the admin's phone
         status_iv = int(self.cfg.get("status_interval_seconds", 300))
         sessions_iv = int(self.cfg.get("sessions_interval_seconds", 45))
         sessions_top = int(self.cfg.get("sessions_top_n", 8))
@@ -4565,6 +4605,8 @@ class TrayApp:
         last_api = 0.0
         last_sessions = 0.0
         last_alltime = 0.0
+        last_team_ov = 0.0
+        team_ov_iv = 30   # how often the admin refetches the team overview to embed for the phone
         last_update = 0.0
         last_status = 0.0
         warned_token = False
@@ -4668,6 +4710,8 @@ class TrayApp:
                                 "report_seconds": int(self.cfg.get("team_report_seconds", 900)),
                                 "tz": self.cfg.get("team_tz", "Europe/Athens"),
                                 "last_ok": self._team.last_ok}
+                # Admin only: the compact team overview the phone renders (E2EE via the snapshot).
+                snap["team_overview"] = self._team_overview if (tid or {}).get("role") == "admin" else None
                 self._verdict = (snap.get("verdict") or {}).get("text", "")
                 with STORE_LOCK:
                     STORE["snapshot"] = snap
@@ -4687,6 +4731,12 @@ class TrayApp:
                     if self.cfg.get("remote_accept_prompts"):
                         threading.Thread(target=self._remote.handle_command,
                                          args=(self.cfg, self._sessions_cache, self._cwd), daemon=True).start()
+                # Admin + phone paired: refresh the compact team overview embedded for the phone.
+                # Off-thread + throttled so the relay round-trips never block the poll loop.
+                if (RemoteSync.enabled(self.cfg) and (tid or {}).get("role") == "admin"
+                        and now - last_team_ov >= team_ov_iv):
+                    last_team_ov = now
+                    threading.Thread(target=self._refresh_team_overview, args=(tid,), daemon=True).start()
                 # Fold newly-written session bytes into lifetime totals. Runs after
                 # the live snapshot is published so the first (full-history) backfill
                 # never delays first paint; the result lands in the next snapshot.

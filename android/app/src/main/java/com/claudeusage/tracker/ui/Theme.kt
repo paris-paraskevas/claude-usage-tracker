@@ -5,12 +5,15 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 
-val Bg = Color(0xFF0E0E10)
-val Panel = Color(0xFF161618)
-val Panel2 = Color(0xFF1D1D20)
-val Ink = Color(0xFFE7E6E3)
-val Dim = Color(0xFF9B9A95)
-val Faint = Color(0xFF6C6B66)
+// Warm dark palette — mirrors the desktop dashboard tokens (claude_usage_tracker.py :root).
+val Bg = Color(0xFF100E0C)
+val Panel = Color(0xFF1A1613)
+val Panel2 = Color(0xFF221E1A)
+val CardBg = Color(0xFF1E1A16)
+val Card2Bg = Color(0xFF26211C)
+val Ink = Color(0xFFF2EDE5)
+val Dim = Color(0xFFA99F93)
+val Faint = Color(0xFF786F65)
 val Accent = Color(0xFFD97757)
 
 // Exact mirror of the desktop palette in claude_usage_tracker.py (USAGE_BANDS + the

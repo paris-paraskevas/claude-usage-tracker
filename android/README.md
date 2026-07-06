@@ -5,6 +5,12 @@ A native Android client that pairs with the desktop tracker (QR scan) and shows 
 usage alerts. All data is **end-to-end encrypted**; the relay only sees ciphertext.
 Contract: [`../docs/REMOTE.md`](../docs/REMOTE.md).
 
+**v0.2.0 (redesign):** warm palette matching the desktop, a Home bento (hero 5h + weekly
++ **extra-usage €** + context + sessions preview), and — for **team admins** — a **Team**
+destination showing org spend, near-limit members, and per-member load. Team data reaches
+the admin's phone via the E2EE snapshot (no team credentials on the device). Bump on
+release: `versionCode`/`versionName` in `app/build.gradle.kts` (already at 15 / 0.2.0).
+
 > **Android only — no iOS.** iOS support is out of scope for now.
 
 > **Not built in CI / this repo's dev box.** There's no Gradle CLI or Firebase config
