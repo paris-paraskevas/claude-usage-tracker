@@ -1,8 +1,11 @@
 # Relay (Cloudflare Worker)
 
-Zero-knowledge dumb pipe between the desktop tracker and the Android app. Stores and
-forwards **end-to-end-encrypted** blobs only — it never sees the `e2eeKey` or any
-plaintext. Contract: [`../docs/REMOTE.md`](../docs/REMOTE.md).
+Two features on one Worker:
+- **Phone sync** — a zero-knowledge dumb pipe forwarding **end-to-end-encrypted** blobs
+  (never sees the `e2eeKey` or any plaintext). Stored in **KV**. Contract:
+  [`../docs/REMOTE.md`](../docs/REMOTE.md).
+- **Team mode** — an admin aggregator storing plaintext usage numbers in **D1** (SQLite).
+  Contract: [`../docs/TEAM.md`](../docs/TEAM.md).
 
 ## Deploy
 
@@ -12,6 +15,15 @@ npm install
 npx wrangler kv namespace create KV          # paste the id into wrangler.toml
 npx wrangler kv namespace create KV --preview # paste the preview_id into wrangler.toml
 npx wrangler deploy                          # prints your https://<worker> URL
+```
+
+## Team database (D1) — only if you use team mode
+
+```bash
+npx wrangler d1 create claude-usage-team               # paste database_id into wrangler.toml
+npx wrangler d1 execute claude-usage-team --file=schema.sql          # apply schema (remote)
+npx wrangler d1 execute claude-usage-team --local --file=schema.sql  # ...and for `wrangler dev --local`
+npx wrangler secret put TEAM_SEAL_KEY                  # 32-byte base64; enables token escrow
 ```
 
 ## Push (optional, enables phone notifications)
@@ -36,7 +48,8 @@ npm run dev          # local server with simulated KV (miniflare)
 
 ## API
 
-See [`../docs/REMOTE.md`](../docs/REMOTE.md). All routes require
+Phone sync — see [`../docs/REMOTE.md`](../docs/REMOTE.md); all routes require
 `Authorization: Bearer <readToken>`; the first `PUT .../snapshot` pins the token hash
-(trust-on-first-use). Storage is KV with a 7-day TTL, so accounts that stop syncing are
-forgotten automatically.
+(trust-on-first-use); KV with a 7-day TTL forgets accounts that stop syncing.
+Team mode — see [`../docs/TEAM.md`](../docs/TEAM.md); `/v1/team/*` routes backed by D1,
+with the cron pruning old rows in place of a TTL.
