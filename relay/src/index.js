@@ -428,9 +428,8 @@ async function mcpResolveTeam(request, env) {
 }
 
 async function handleMcp(request, env, url) {
-  if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
-  // Every /mcp call must present a valid bearer. Without one, 401 + WWW-Authenticate so the
-  // client discovers the OAuth server (MCP authorization spec).
+  // Auth first, for ANY method: an unauthenticated probe (GET or POST) must get 401 +
+  // WWW-Authenticate so the client discovers the OAuth server (MCP authorization spec).
   const team = await mcpResolveTeam(request, env);
   if (!team) {
     return new Response(
@@ -440,6 +439,7 @@ async function handleMcp(request, env, url) {
         "www-authenticate": `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource"`,
       } });
   }
+  if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
   const rpc = await readJson(request);
   if (!rpc || rpc.jsonrpc !== "2.0" || typeof rpc.method !== "string") {
     return json({ jsonrpc: "2.0", id: (rpc && rpc.id) || null, error: { code: -32600, message: "invalid request" } }, 400);
@@ -750,7 +750,7 @@ async function handleOAuth(request, env, url) {
   const p = url.pathname;
   const origin = url.origin;
 
-  if (p === "/.well-known/oauth-authorization-server" && request.method === "GET") {
+  if ((p === "/.well-known/oauth-authorization-server" || p === "/.well-known/oauth-authorization-server/mcp") && request.method === "GET") {
     return json({
       issuer: origin,
       authorization_endpoint: `${origin}/oauth/authorize`,
@@ -762,7 +762,7 @@ async function handleOAuth(request, env, url) {
       token_endpoint_auth_methods_supported: ["none"],
     });
   }
-  if (p === "/.well-known/oauth-protected-resource" && request.method === "GET") {
+  if ((p === "/.well-known/oauth-protected-resource" || p === "/.well-known/oauth-protected-resource/mcp") && request.method === "GET") {
     return json({ resource: `${origin}/mcp`, authorization_servers: [origin] });
   }
 
