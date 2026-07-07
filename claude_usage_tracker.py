@@ -46,7 +46,7 @@ from pathlib import Path
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 
 def _data_dir() -> Path:
