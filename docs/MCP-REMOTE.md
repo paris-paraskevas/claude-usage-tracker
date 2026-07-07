@@ -25,13 +25,24 @@ That's a real consequence of the zero-knowledge design, not a gap to fix.
 - **Identity → team:** each request must resolve to one `tid`. The OAuth subject maps to the
   admin of that team (the admin token's hash, or a dedicated MCP identity minted at connect).
 
-## Status
-- ✅ **Transport + tools (done, verified):** `POST /mcp` (stateless JSON-RPC) with
-  `get_team_overview` + `get_team_ledger` reading D1. Interim auth: Bearer = the team admin
-  token (hashed → tid). Verified via `wrangler dev` (initialize / tools-list / tools-call +
-  the unauthorized guard). Safe to deploy as-is (bearer-gated); claude.ai just can't use it
-  until the OAuth layer below exists.
-- ⏳ **OAuth layer (next):** the piece that lets claude.ai's connector actually authenticate.
+## Status — built & verified locally
+- ✅ **Transport + tools:** `POST /mcp` (stateless JSON-RPC) with `get_team_overview` +
+  `get_team_ledger` reading D1.
+- ✅ **OAuth 2.1 provider:** metadata + DCR + PKCE authorize/token, consent authenticates the
+  team admin (paste admin token) and binds the issued token to that `tid`. Tokens/codes stored
+  as sha256 hashes; codes single-use; `/mcp` 401s with `WWW-Authenticate` for discovery.
+- ✅ **Verified end-to-end via `wrangler dev`:** register → PKCE authorize (wrong token→403) →
+  token (bad PKCE→invalid_grant; replay→rejected) → `/mcp` tools/call returns team data;
+  no-auth → 401 + `WWW-Authenticate`.
+- ⏳ **Real claude.ai handshake:** validated only after deploy + adding the connector (below).
+
+## Turn it on (Owner, once)
+1. Deploy: `cd relay && wrangler d1 execute claude-usage-team --remote --file=schema.sql`
+   (adds the `oauth_*` tables) then `wrangler deploy`.
+2. claude.ai → **Organization settings → Connectors → Add → Custom** → URL
+   `https://<worker>/mcp`. Claude auto-discovers the OAuth server and registers a client (DCR).
+3. On the consent screen, **paste your team admin token** (from the tracker's `team.json` /
+   the Team tab) to authorize. Members then enable the connector per chat via **+ → Connectors**.
 
 ## Auth (the hard part)
 claude.ai custom connectors authenticate via **OAuth**, and Anthropic's client uses **Dynamic

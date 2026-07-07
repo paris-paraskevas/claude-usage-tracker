@@ -72,6 +72,29 @@ CREATE TABLE IF NOT EXISTS escrow (
   PRIMARY KEY (tid, mid)
 );
 
+-- OAuth 2.1 provider (docs/MCP-REMOTE.md) for the claude.ai remote MCP connector.
+-- Codes + tokens are stored as sha256 hashes (never raw). Consent authenticates the
+-- team admin (they paste their admin token), binding the grant to a tid.
+CREATE TABLE IF NOT EXISTS oauth_clients (
+  client_id     TEXT PRIMARY KEY,
+  redirect_uris TEXT NOT NULL,                 -- JSON array of exact-match redirect URIs
+  name          TEXT,
+  created       INTEGER
+);
+CREATE TABLE IF NOT EXISTS oauth_codes (
+  code_hash      TEXT PRIMARY KEY,             -- sha256(authorization code)
+  client_id      TEXT NOT NULL,
+  redirect_uri   TEXT NOT NULL,
+  code_challenge TEXT NOT NULL,                -- PKCE S256 challenge
+  tid            TEXT NOT NULL,                -- team this grant authorizes
+  exp            INTEGER NOT NULL              -- short-lived (epoch ms)
+);
+CREATE TABLE IF NOT EXISTS oauth_tokens (
+  token_hash TEXT PRIMARY KEY,                 -- sha256(access token)
+  tid        TEXT NOT NULL,
+  exp        INTEGER NOT NULL                  -- epoch ms
+);
+
 -- Phone-sync snapshots. Moved off KV so the desktop can push every ~10s without
 -- blowing KV's 1,000-writes/day free cap (D1 allows 100k/day). Still E2EE: the row
 -- holds only the opaque ciphertext blob; the auth-token hash stays in KV. The cron
