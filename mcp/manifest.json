@@ -1,0 +1,39 @@
+{
+  "manifest_version": "0.2",
+  "name": "claude-usage-tracker",
+  "display_name": "Claude Usage Tracker",
+  "version": "0.1.0",
+  "description": "Query and drive the Claude Usage Tracker from a Claude chat — 5h/weekly usage, extra-usage spend, and (for team admins) the team overview + monthly ledger.",
+  "author": { "name": "paris-paraskevas" },
+  "server": {
+    "type": "node",
+    "entry_point": "server.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server.mjs"],
+      "env": {
+        "CUT_PORT": "${user_config.port}"
+      }
+    }
+  },
+  "tools": [
+    { "name": "get_usage", "description": "Live 5-hour/weekly utilization, context, and extra-usage spend." },
+    { "name": "get_status", "description": "Tracker live/stale, Anthropic status, and update availability." },
+    { "name": "get_team_overview", "description": "Team-admin: per-member load, month-to-date spend, near-limit members." },
+    { "name": "get_team_ledger", "description": "Team-admin: per-member monthly spend + tokens for a month." },
+    { "name": "sync_now", "description": "Force an immediate usage refresh." },
+    { "name": "import_spend_report", "description": "Ingest an exported spend-report CSV into the ledger." }
+  ],
+  "user_config": {
+    "port": {
+      "type": "number",
+      "title": "Tracker port (optional)",
+      "description": "Only set this if the tracker isn't on its default port. Leave blank to auto-detect from the tracker's server_port file.",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": ["win32", "darwin", "linux"],
+    "runtimes": { "node": ">=18.0.0" }
+  }
+}

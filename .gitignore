@@ -39,3 +39,4 @@ docs/HANDOFF.md
 # Local npm lockfile for the relay (devDeps only; intentionally not committed)
 relay/package-lock.json
 .superpowers/
+node_modules/

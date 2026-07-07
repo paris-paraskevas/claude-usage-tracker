@@ -59,6 +59,11 @@ async function handle(request, env, ctx) {
     return cors(json({ ok: true, service: "claude-usage-relay", v: 1 }));
   }
 
+  if (url.pathname.startsWith("/.well-known/oauth") || url.pathname.startsWith("/oauth/")) {
+    return cors(await handleOAuth(request, env, url));
+  }
+  if (url.pathname === "/mcp") return cors(await handleMcp(request, env, url));
+
   const tm = url.pathname.match(/^\/v1\/team\/([A-Za-z0-9_-]{8,64})(\/.*)?$/);
   if (tm) return cors(await handleTeam(request, env, url, tm[1], tm[2] || ""));
 
@@ -323,61 +328,146 @@ async function handleTeam(request, env, url, tid, sub) {
   if (!isAdmin) return json({ error: "forbidden" }, 403);
 
   if (sub === "/overview" && method === "GET") {
-    const tz = adm.tz || DEFAULT_TEAM_TZ;
-    const now = new Date();
-    const today = tzParts(tz, now).date;
-    const yesterday = tzParts(tz, new Date(now.getTime() - 86400_000)).date;
-
-    const [mRes, eRes, uRes] = await env.DB.batch([
-      env.DB.prepare("SELECT mid,name FROM members WHERE tid=?").bind(tid),
-      env.DB.prepare("SELECT mid,exp FROM escrow WHERE tid=? AND exp>?").bind(tid, Date.now()),
-      env.DB.prepare("SELECT * FROM usage_rows WHERE tid=? AND date IN (?,?)").bind(tid, today, yesterday),
-    ]);
-    const esc = {};
-    for (const r of eRes.results) esc[r.mid] = r.exp;
-    // Group rows into {date: {mid: {did: row}}}.
-    const byDate = { [today]: {}, [yesterday]: {} };
-    for (const r of uRes.results) {
-      const d = (byDate[r.date] = byDate[r.date] || {});
-      (d[r.mid] = d[r.mid] || {})[r.did] = rowFromDb(r);
-    }
-    const members = (mRes.results).map((m) => {
-      const tdev = (byDate[today] && byDate[today][m.mid]) || {};
-      const ydev = (byDate[yesterday] && byDate[yesterday][m.mid]) || {};
-      const devices = Object.keys(tdev).filter((d) => d !== "account").map((d) => ({ did: d, ...tdev[d] }));
-      return {
-        mid: m.mid,
-        name: m.name || m.mid.slice(0, 8),
-        account: pickAccountRow(tdev) || pickAccountRow(ydev),
-        account_is_today: !!pickAccountRow(tdev),
-        devices,
-        escrow: m.mid in esc ? { present: true, exp: esc[m.mid] } : { present: false },
-      };
-    });
-    return json({ team: tid, tz, today, members });
+    return json(await teamOverviewData(env, tid, adm.tz || DEFAULT_TEAM_TZ));
   }
 
   if (sub === "/ledger" && method === "GET") {
     const month = (url.searchParams.get("month") || "").trim();
     if (!/^\d{4}-\d{2}$/.test(month)) return json({ error: "bad_month" }, 400);
-    const [mRes, uRes, fRes] = await env.DB.batch([
-      env.DB.prepare("SELECT mid,name FROM members WHERE tid=?").bind(tid),
-      env.DB.prepare("SELECT * FROM usage_rows WHERE tid=? AND date LIKE ?").bind(tid, month + "-%"),
-      env.DB.prepare("SELECT * FROM finals WHERE tid=? AND month=?").bind(tid, month),
-    ]);
-    const names = {};
-    for (const m of mRes.results) names[m.mid] = m.name || m.mid.slice(0, 8);
-    const days = {};
-    for (const r of uRes.results) {
-      const d = (days[r.date] = days[r.date] || {});
-      (d[r.mid] = d[r.mid] || {})[r.did] = rowFromDb(r);
-    }
-    const finals = {};
-    for (const r of fRes.results) finals[r.mid] = rowFromDb(r);
-    return json({ team: tid, month, members: names, days, finals });
+    return json(await teamLedgerData(env, tid, month));
   }
 
   return json({ error: "not_found" }, 404);
+}
+
+// Shared team reads — used by the HTTP admin routes above and the remote MCP tools below.
+async function teamOverviewData(env, tid, tz) {
+  const now = new Date();
+  const today = tzParts(tz, now).date;
+  const yesterday = tzParts(tz, new Date(now.getTime() - 86400_000)).date;
+  const [mRes, eRes, uRes] = await env.DB.batch([
+    env.DB.prepare("SELECT mid,name FROM members WHERE tid=?").bind(tid),
+    env.DB.prepare("SELECT mid,exp FROM escrow WHERE tid=? AND exp>?").bind(tid, Date.now()),
+    env.DB.prepare("SELECT * FROM usage_rows WHERE tid=? AND date IN (?,?)").bind(tid, today, yesterday),
+  ]);
+  const esc = {};
+  for (const r of eRes.results) esc[r.mid] = r.exp;
+  const byDate = { [today]: {}, [yesterday]: {} };
+  for (const r of uRes.results) {
+    const d = (byDate[r.date] = byDate[r.date] || {});
+    (d[r.mid] = d[r.mid] || {})[r.did] = rowFromDb(r);
+  }
+  const members = mRes.results.map((m) => {
+    const tdev = (byDate[today] && byDate[today][m.mid]) || {};
+    const ydev = (byDate[yesterday] && byDate[yesterday][m.mid]) || {};
+    const devices = Object.keys(tdev).filter((d) => d !== "account").map((d) => ({ did: d, ...tdev[d] }));
+    return {
+      mid: m.mid, name: m.name || m.mid.slice(0, 8),
+      account: pickAccountRow(tdev) || pickAccountRow(ydev),
+      account_is_today: !!pickAccountRow(tdev), devices,
+      escrow: m.mid in esc ? { present: true, exp: esc[m.mid] } : { present: false },
+    };
+  });
+  return { team: tid, tz, today, members };
+}
+
+async function teamLedgerData(env, tid, month) {
+  const [mRes, uRes, fRes] = await env.DB.batch([
+    env.DB.prepare("SELECT mid,name FROM members WHERE tid=?").bind(tid),
+    env.DB.prepare("SELECT * FROM usage_rows WHERE tid=? AND date LIKE ?").bind(tid, month + "-%"),
+    env.DB.prepare("SELECT * FROM finals WHERE tid=? AND month=?").bind(tid, month),
+  ]);
+  const names = {};
+  for (const m of mRes.results) names[m.mid] = m.name || m.mid.slice(0, 8);
+  const days = {};
+  for (const r of uRes.results) {
+    const d = (days[r.date] = days[r.date] || {});
+    (d[r.mid] = d[r.mid] || {})[r.did] = rowFromDb(r);
+  }
+  const finals = {};
+  for (const r of fRes.results) finals[r.mid] = rowFromDb(r);
+  return { team: tid, month, members: names, days, finals };
+}
+
+// ---- Remote MCP (docs/MCP-REMOTE.md) — team tools over Streamable HTTP (stateless JSON) --
+//
+// Serves the plaintext team data (D1) to claude.ai / mobile. The personal usage snapshot is
+// E2EE, so it stays on the local MCP server — never here. Interim auth: Bearer = the team
+// admin token (hashed, matched to a team). The claude.ai OAuth layer (DCR + PKCE) is added on
+// top next; it will mint tokens that resolve to a tid the same way.
+
+const MCP_TOOLS = [
+  {
+    name: "get_team_overview",
+    description: "Team admin: live per-member 5h/weekly load, month-to-date spend, and near-limit members.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "get_team_ledger",
+    description: "Team admin: per-member calendar-month extra-usage spend and tokens for a month.",
+    inputSchema: {
+      type: "object",
+      properties: { month: { type: "string", description: "Month as YYYY-MM (defaults to the current month)." } },
+      additionalProperties: false,
+    },
+  },
+];
+
+// Resolve the caller's Bearer to a team ({tid, tz}) — an OAuth access token or, as a
+// fallback, the team admin token directly. Returns null if neither matches / is expired.
+async function mcpResolveTeam(request, env) {
+  const bearer = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "").trim();
+  if (!bearer) return null;
+  const hash = await sha256hex(bearer);
+  const tok = await env.DB.prepare("SELECT tid, exp FROM oauth_tokens WHERE token_hash=?").bind(hash).first();
+  if (tok && tok.exp > Date.now()) {
+    const t = await env.DB.prepare("SELECT tid, tz FROM teams WHERE tid=?").bind(tok.tid).first();
+    if (t) return t;
+  }
+  return (await env.DB.prepare("SELECT tid, tz FROM teams WHERE admin_hash=?").bind(hash).first()) || null;
+}
+
+async function handleMcp(request, env, url) {
+  if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+  // Every /mcp call must present a valid bearer. Without one, 401 + WWW-Authenticate so the
+  // client discovers the OAuth server (MCP authorization spec).
+  const team = await mcpResolveTeam(request, env);
+  if (!team) {
+    return new Response(
+      JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "unauthorized" } }),
+      { status: 401, headers: {
+        "content-type": "application/json",
+        "www-authenticate": `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource"`,
+      } });
+  }
+  const rpc = await readJson(request);
+  if (!rpc || rpc.jsonrpc !== "2.0" || typeof rpc.method !== "string") {
+    return json({ jsonrpc: "2.0", id: (rpc && rpc.id) || null, error: { code: -32600, message: "invalid request" } }, 400);
+  }
+  const reply = (result) => json({ jsonrpc: "2.0", id: rpc.id, result });
+
+  if (rpc.method === "initialize") {
+    return reply({ protocolVersion: "2024-11-05", capabilities: { tools: {} },
+      serverInfo: { name: "claude-usage-tracker-team", version: "0.1.0" } });
+  }
+  if (rpc.method === "notifications/initialized") return new Response(null, { status: 202 });
+  if (rpc.method === "tools/list") return reply({ tools: MCP_TOOLS });
+  if (rpc.method === "tools/call") {
+    const name = rpc.params && rpc.params.name;
+    const args = (rpc.params && rpc.params.arguments) || {};
+    const asText = (obj) => reply({ content: [{ type: "text", text: JSON.stringify(obj, null, 2) }] });
+    try {
+      if (name === "get_team_overview") return asText(await teamOverviewData(env, team.tid, team.tz || DEFAULT_TEAM_TZ));
+      if (name === "get_team_ledger") {
+        const month = /^\d{4}-\d{2}$/.test(args.month || "") ? args.month : new Date().toISOString().slice(0, 7);
+        return asText(await teamLedgerData(env, team.tid, month));
+      }
+      return reply({ content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true });
+    } catch (e) {
+      return reply({ content: [{ type: "text", text: `Tool error: ${String((e && e.message) || e)}` }], isError: true });
+    }
+  }
+  return json({ jsonrpc: "2.0", id: rpc.id ?? null, error: { code: -32601, message: "method not found" } });
 }
 
 // usage_rows / finals row  ->  the client JSON shape the desktop parses (unchanged
@@ -631,6 +721,138 @@ function b64urlToBytes(s) {
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
+}
+
+// ---- OAuth 2.1 provider (docs/MCP-REMOTE.md) -------------------------------
+//
+// The minimum a claude.ai custom connector needs: metadata + Dynamic Client Registration
+// + an authorization-code flow with PKCE. Consent authenticates the team admin (they paste
+// their admin token), so the issued token is bound to exactly their team (tid).
+
+const OAUTH_TOKEN_TTL_MS = 30 * 86400 * 1000;
+const OAUTH_CODE_TTL_MS = 5 * 60 * 1000;
+
+async function sha256b64url(s) {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return b64urlBytes(new Uint8Array(d));
+}
+function randB64url(bytes = 32) {
+  return b64urlBytes(crypto.getRandomValues(new Uint8Array(bytes)));
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function html(body, status = 200) {
+  return new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8" } });
+}
+
+async function handleOAuth(request, env, url) {
+  const p = url.pathname;
+  const origin = url.origin;
+
+  if (p === "/.well-known/oauth-authorization-server" && request.method === "GET") {
+    return json({
+      issuer: origin,
+      authorization_endpoint: `${origin}/oauth/authorize`,
+      token_endpoint: `${origin}/oauth/token`,
+      registration_endpoint: `${origin}/oauth/register`,
+      response_types_supported: ["code"],
+      grant_types_supported: ["authorization_code"],
+      code_challenge_methods_supported: ["S256"],
+      token_endpoint_auth_methods_supported: ["none"],
+    });
+  }
+  if (p === "/.well-known/oauth-protected-resource" && request.method === "GET") {
+    return json({ resource: `${origin}/mcp`, authorization_servers: [origin] });
+  }
+
+  // Dynamic Client Registration (RFC 7591).
+  if (p === "/oauth/register" && request.method === "POST") {
+    const body = (await readJson(request)) || {};
+    const uris = Array.isArray(body.redirect_uris) ? body.redirect_uris.filter((u) => typeof u === "string") : [];
+    if (!uris.length) return json({ error: "invalid_redirect_uri", error_description: "redirect_uris required" }, 400);
+    const clientId = randB64url(16);
+    await env.DB.prepare("INSERT INTO oauth_clients(client_id,redirect_uris,name,created) VALUES(?1,?2,?3,?4)")
+      .bind(clientId, JSON.stringify(uris), cleanName(body.client_name) || "MCP client", Date.now()).run();
+    return json({
+      client_id: clientId, redirect_uris: uris,
+      token_endpoint_auth_method: "none", grant_types: ["authorization_code"], response_types: ["code"],
+    }, 201);
+  }
+
+  // Authorization endpoint — consent page (GET) + submission (POST).
+  if (p === "/oauth/authorize") {
+    const q = request.method === "POST" ? await request.text().then((t) => new URLSearchParams(t)) : url.searchParams;
+    const clientId = q.get("client_id") || "";
+    const redirectUri = q.get("redirect_uri") || "";
+    const challenge = q.get("code_challenge") || "";
+    const method = q.get("code_challenge_method") || "";
+    const state = q.get("state") || "";
+    const client = await env.DB.prepare("SELECT redirect_uris FROM oauth_clients WHERE client_id=?").bind(clientId).first();
+    const registered = client ? JSON.parse(client.redirect_uris) : [];
+    if (!client || !registered.includes(redirectUri)) return html("<h3>Invalid client or redirect_uri.</h3>", 400);
+    if (method !== "S256" || !challenge) return html("<h3>PKCE (code_challenge_method=S256) is required.</h3>", 400);
+
+    if (request.method === "GET") {
+      const hid = (n, v) => `<input type="hidden" name="${n}" value="${escapeHtml(v)}">`;
+      return html(`<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>Connect Claude to your team tracker</title>
+<body style="font:15px system-ui;max-width:460px;margin:8vh auto;padding:0 20px;background:#100e0c;color:#f2ede5">
+<h2 style="color:#d97757">Connect your team tracker</h2>
+<p style="color:#a99f93">Paste your <b>team admin token</b> to let Claude read this team's analytics. It's matched to your team and never shown again.</p>
+<form method="POST" action="/oauth/authorize">
+${hid("client_id", clientId)}${hid("redirect_uri", redirectUri)}${hid("code_challenge", challenge)}${hid("code_challenge_method", method)}${hid("state", state)}${hid("response_type", "code")}
+<input name="admin_token" type="password" placeholder="team admin token" autocomplete="off" required
+  style="width:100%;box-sizing:border-box;padding:11px;border-radius:8px;border:1px solid #332e28;background:#1e1a16;color:#f2ede5;font:13px monospace">
+<button type="submit" style="margin-top:12px;padding:11px 18px;border:0;border-radius:8px;background:#d97757;color:#1c0f08;font-weight:600;cursor:pointer">Authorize</button>
+</form></body>`);
+    }
+
+    // POST — validate the admin token → tid, mint a single-use code.
+    const adminToken = (q.get("admin_token") || "").trim();
+    if (!adminToken) return html("<h3>Missing admin token.</h3>", 400);
+    const team = await env.DB.prepare("SELECT tid FROM teams WHERE admin_hash=?").bind(await sha256hex(adminToken)).first();
+    if (!team) {
+      return html(`<h3 style="color:#d4694f">That admin token doesn't match a team.</h3><p><a href="javascript:history.back()">Try again</a></p>`, 403);
+    }
+    const code = randB64url(32);
+    await env.DB.prepare(
+      "INSERT INTO oauth_codes(code_hash,client_id,redirect_uri,code_challenge,tid,exp) VALUES(?1,?2,?3,?4,?5,?6)"
+    ).bind(await sha256hex(code), clientId, redirectUri, challenge, team.tid, Date.now() + OAUTH_CODE_TTL_MS).run();
+    const sep = redirectUri.includes("?") ? "&" : "?";
+    const loc = `${redirectUri}${sep}code=${encodeURIComponent(code)}${state ? "&state=" + encodeURIComponent(state) : ""}`;
+    return new Response(null, { status: 302, headers: { location: loc } });
+  }
+
+  // Token endpoint — authorization_code + PKCE.
+  if (p === "/oauth/token" && request.method === "POST") {
+    const ct = request.headers.get("content-type") || "";
+    const q = ct.includes("application/json")
+      ? new URLSearchParams(Object.entries((await readJson(request)) || {}).map(([k, v]) => [k, String(v)]))
+      : new URLSearchParams(await request.text());
+    if (q.get("grant_type") !== "authorization_code") return json({ error: "unsupported_grant_type" }, 400);
+    const code = q.get("code") || "";
+    const verifier = q.get("code_verifier") || "";
+    const redirectUri = q.get("redirect_uri") || "";
+    const clientId = q.get("client_id") || "";
+    const row = await env.DB.prepare("SELECT client_id,redirect_uri,code_challenge,tid,exp FROM oauth_codes WHERE code_hash=?")
+      .bind(await sha256hex(code)).first();
+    // Single-use: delete on any lookup hit so a code can never be replayed.
+    if (row) await env.DB.prepare("DELETE FROM oauth_codes WHERE code_hash=?").bind(await sha256hex(code)).run();
+    if (!row || row.exp < Date.now() || row.client_id !== clientId || row.redirect_uri !== redirectUri) {
+      return json({ error: "invalid_grant" }, 400);
+    }
+    if (!verifier || (await sha256b64url(verifier)) !== row.code_challenge) {
+      return json({ error: "invalid_grant", error_description: "PKCE verification failed" }, 400);
+    }
+    const token = randB64url(32);
+    const exp = Date.now() + OAUTH_TOKEN_TTL_MS;
+    await env.DB.prepare("INSERT INTO oauth_tokens(token_hash,tid,exp) VALUES(?1,?2,?3)")
+      .bind(await sha256hex(token), row.tid, exp).run();
+    return json({ access_token: token, token_type: "Bearer", expires_in: Math.floor(OAUTH_TOKEN_TTL_MS / 1000) });
+  }
+
+  return json({ error: "not_found" }, 404);
 }
 
 // ---- FCM HTTP v1 ----------------------------------------------------------
