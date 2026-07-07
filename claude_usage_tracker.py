@@ -1886,10 +1886,13 @@ def team_join(code: str):
     return ident
 
 
-def build_team_report(snap: dict, dev=None) -> dict:
-    """The compact plaintext row a device shares with the team: window percents,
-    reset times, overage euros, and THIS device's month tokens. Nothing else."""
-    row = {"fh_pct": None, "sd_pct": None, "fh_resets_at": None, "sd_resets_at": None,
+def build_team_report(snap: dict, dev=None, account=None) -> dict:
+    """The compact plaintext row a reporter shares with the team: window percents, reset
+    times, overage euros, THIS device's month tokens, and which pooled Claude ACCOUNT
+    (email + display name + org uuid) the numbers belong to. Nothing else."""
+    a = account or {}
+    row = {"acct": a.get("acct"), "name": a.get("name"), "org": a.get("org"),
+           "fh_pct": None, "sd_pct": None, "fh_resets_at": None, "sd_resets_at": None,
            "extra": None, "ts": int(time.time()),
            "did": (dev or {}).get("did"), "device": (dev or {}).get("device"),
            "tok_month": (dev or {}).get("tok_month")}
@@ -1980,26 +1983,26 @@ def member_month_tokens(led: dict, mid: str) -> int:
 
 
 def team_overview_merge(ov: dict, led, prev_led=None) -> dict:
-    """Attach month spend/tokens per member and the KPI aggregates to a relay
+    """Attach month spend/tokens per ACCOUNT and the KPI aggregates to a relay pool
     overview. Pure — the dashboard JS only formats what this returns."""
     out = dict(ov)
-    members = [dict(m0) for m0 in (ov.get("members") or [])]
+    accounts = [dict(a0) for a0 in (ov.get("accounts") or [])]
     near = []
     org_spend = 0.0
     spend = team_ledger_computed(led, prev_led) if led else {}
-    for m0 in members:
-        m0["month_spend"] = spend.get(m0.get("mid"))
-        m0["month_tokens"] = member_month_tokens(led, m0.get("mid")) if led else 0
-        if isinstance(m0["month_spend"], (int, float)):
-            org_spend += m0["month_spend"]
-        acct = m0.get("account") or {}
+    for a0 in accounts:
+        a0["month_spend"] = spend.get(a0.get("acct"))
+        a0["month_tokens"] = member_month_tokens(led, a0.get("acct")) if led else 0
+        if isinstance(a0["month_spend"], (int, float)):
+            org_spend += a0["month_spend"]
+        row = a0.get("account") or {}
         for key, label in (("fh_pct", "5h"), ("sd_pct", "weekly")):
-            p = acct.get(key)
+            p = row.get(key)
             if isinstance(p, (int, float)) and p >= 80:
-                near.append({"name": m0.get("name"), "window": label, "pct": p})
+                near.append({"name": a0.get("name"), "window": label, "pct": p})
     near.sort(key=lambda x: -x["pct"])
-    out["members"] = members
-    out["kpis"] = {"org_spend": round(org_spend, 2), "member_count": len(members), "near": near}
+    out["accounts"] = accounts
+    out["kpis"] = {"org_spend": round(org_spend, 2), "account_count": len(accounts), "near": near}
     return out
 
 
@@ -2024,23 +2027,24 @@ def team_admin_overview_merged(ident):
 
 
 def team_overview_compact(merged):
-    """Strip a merged overview to the small projection the phone renders — org totals +
-    per-member name / window percents / month €. Keeps the E2EE snapshot small."""
+    """Strip a merged pool overview to the small projection the phone renders — org totals +
+    per-account name / window percents / month €. Keeps the E2EE snapshot small. Output keeps the
+    `members`/`member_count` keys for the phone's existing contract; each entry is a pooled account."""
     if not isinstance(merged, dict):
         return None
     k = merged.get("kpis") or {}
     members = []
-    for m in merged.get("members") or []:
-        acct = m.get("account") or {}
+    for a in merged.get("accounts") or []:
+        row = a.get("account") or {}
         members.append({
-            "name": m.get("name"),
-            "fh_pct": acct.get("fh_pct"),
-            "sd_pct": acct.get("sd_pct"),
-            "month_spend": m.get("month_spend"),
-            "month_tokens": m.get("month_tokens"),
-            "currency": (acct.get("extra") or {}).get("currency"),
+            "name": a.get("name"),
+            "fh_pct": row.get("fh_pct"),
+            "sd_pct": row.get("sd_pct"),
+            "month_spend": a.get("month_spend"),
+            "month_tokens": a.get("month_tokens"),
+            "currency": (row.get("extra") or {}).get("currency"),
         })
-    return {"org_spend": k.get("org_spend"), "member_count": k.get("member_count"),
+    return {"org_spend": k.get("org_spend"), "member_count": k.get("account_count"),
             "near": k.get("near") or [], "tz": merged.get("tz"), "members": members}
 
 
@@ -2058,7 +2062,7 @@ def _ledger_baseline(prev_led, mid: str):
 
 def team_ledger_computed(led: dict, prev_led=None) -> dict:
     """Per-member calendar-month spend for a relay ledger response."""
-    mids = set(led.get("members") or {})
+    mids = set(led.get("accounts") or {})
     for d in (led.get("days") or {}).values():
         mids.update(d)
     return {mid: team_month_spend(_ledger_samples(led, mid), _ledger_baseline(prev_led, mid))
@@ -2074,6 +2078,8 @@ class TeamSync:
         self._last_report = 0.0
         self._last_tok_hash = None      # last escrowed token, to push only on rotation
         self._escrow_unsupported = False  # relay said 503 (no TEAM_SEAL_KEY) — log once, stop trying
+        self._acct_email = None         # currently-logged-in account; a change = login switch
+        self._acct_org = None           # its org uuid (cached; re-fetched only on switch)
         self.last_ok: bool | None = None
 
     @staticmethod
@@ -2096,27 +2102,42 @@ class TeamSync:
             if not ident or not ident.get("member_id"):
                 return
             ident = ensure_team_device(ident)
+            acct = read_account() or {}
+            email = (acct.get("email") or "").strip().lower()
+            if not email:
+                return  # no Claude account logged in — nothing to pool
+            if email != self._acct_email:
+                # Login switched to a different pooled account: refresh its org uuid (for the
+                # relay's org gate), push it promptly, and re-escrow the new account's token.
+                self._acct_email = email
+                self._acct_org = fetch_profile_org()
+                self.reset_throttle()
+                self._last_tok_hash = None
             month = _now_local().strftime("%Y-%m")
             dev = {"did": ident.get("did"), "device": ident.get("device"),
                    "tok_month": device_month_tokens(alltime_cache, month)}
+            account = {"acct": email, "name": acct.get("name"), "org": self._acct_org}
             base = f"/v1/team/{ident['team_id']}/member/{ident['member_id']}"
-            row = build_team_report(snap, dev)
+            row = build_team_report(snap, dev, account)
             status = _team_call("PUT", ident, ident["member_token"], base + "/report", row)
             self.last_ok = status == 204
             if status in (403, 404):
                 log(f"team: report rejected (HTTP {status}) — removed from the team? (Settings → Team)")
                 return
-            self._escrow(ident, base, cfg)
+            self._escrow(ident, base, cfg, email)
         except Exception:
             self.last_ok = False
             log("team: sync error:\n" + traceback.format_exc())
 
-    def _escrow(self, ident: dict, base: str, cfg: dict) -> None:
-        """Keep the relay's sealed copy of our CURRENT access token fresh (rotation-driven,
-        so steady state is ~2 writes/day). Never touches the refresh token."""
+    def _escrow(self, ident: dict, base: str, cfg: dict, acct: str) -> None:
+        """Keep the relay's sealed copy of the CURRENT account's access token fresh
+        (rotation-driven, ~2 writes/day). Escrow is per pooled account so the cron can
+        refresh each one when nobody's logged in. Never touches the refresh token."""
         if not cfg.get("team_share_token"):
-            if self._last_tok_hash:      # user turned escrow off: withdraw the stored token
-                _team_call("DELETE", ident, ident["member_token"], base + "/token")
+            if self._last_tok_hash:      # user turned escrow off: withdraw this account's token
+                from urllib.parse import quote
+                _team_call("DELETE", ident, ident["member_token"],
+                           base + "/token?acct=" + quote(acct))
                 self._last_tok_hash = None
             return
         if self._escrow_unsupported:
@@ -2129,7 +2150,7 @@ class TeamSync:
         if h == self._last_tok_hash:
             return
         status = _team_call("PUT", ident, ident["member_token"], base + "/token",
-                            {"access_token": tok, "expires_at": int(exp)})
+                            {"access_token": tok, "expires_at": int(exp), "acct": acct})
         if status == 204:
             self._last_tok_hash = h
         elif status == 503:
@@ -2924,7 +2945,7 @@ function fillHomeTeam(){
   if(!k){ box.innerHTML="<div class='hsub'>Open the Team tab for spend &amp; limits.</div>"; return; }
   const near=k.near||[];
   box.innerHTML="<div class='cval'>"+tmMoney(k.org_spend,tmCur(TMOV))+"</div>"+
-    "<div class='hsub'>"+(k.member_count||0)+" members"+
+    "<div class='hsub'>"+(k.account_count||0)+" accounts"+
     (near.length?" · <span style='color:var(--hot)'>"+near.length+" near limit</span>":" · all clear")+"</div>";
 }
 function renderSpark(h){
@@ -3269,7 +3290,7 @@ function tmReset(iso){ if(!iso)return ""; const d=new Date(iso); if(isNaN(d))ret
   const now=new Date(); return d.toDateString()===now.toDateString()
     ? d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})
     : d.toLocaleDateString([],{weekday:"short"}); }
-function tmCur(d){ for(const mm of (d.members||[])){ const c=((mm.account||{}).extra||{}).currency; if(c)return c; } return ""; }
+function tmCur(d){ for(const mm of (d.accounts||[])){ const c=((mm.account||{}).extra||{}).currency; if(c)return c; } return ""; }
 async function loadTeamOverview(){
   const box=$("tm-members");
   try{
@@ -3280,25 +3301,30 @@ async function loadTeamOverview(){
     $("tm-asof").textContent="today "+esc(d.today||"")+" · "+esc(d.tz||"");
     const k=d.kpis||{};
     $("tm-kpi-spend").textContent=(k.org_spend!=null)?tmMoney(k.org_spend,tmCur(d)):"—";
-    $("tm-kpi-spend-sub").textContent="across "+(k.member_count||0)+" member"+((k.member_count||0)===1?"":"s")+" since the 1st";
+    $("tm-kpi-spend-sub").textContent="across "+(k.account_count||0)+" account"+((k.account_count||0)===1?"":"s")+" since the 1st";
     const near=k.near||[];
     $("tm-kpi-near").textContent=near.length;
     $("tm-kpi-near-sub").textContent=near.slice(0,3).map(n=>n.name+" "+n.window).join(" · ")||"all clear";
     $("tm-kpi-near-card").className="tmkpi"+(near.length?" warn":"");
-    if(!(d.members||[]).length){ box.innerHTML="<div class='csub'>No members yet — add one below.</div>"; return; }
-    box.innerHTML=d.members.map(m=>{
-      const r=m.account||{}, e=r.extra||{};
-      const seen=r.ts?new Date(r.ts*1000).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):"no data";
-      const tag=(m.account_is_today===false&&r.ts?"yday · ":"")+seen+((m.escrow||{}).present?" · escrow ✓":" · no escrow");
+    if(!(d.accounts||[]).length){ box.innerHTML="<div class='csub'>No accounts in the pool yet — a teammate reports one by logging into it.</div>"; return; }
+    // Freshest first: lowest 5h load on top so the team grabs the least-used account.
+    const pool=(d.accounts||[]).slice().sort((a,b)=>{
+      const pa=(a.account||{}).fh_pct, pb=(b.account||{}).fh_pct;
+      return (pa==null?1e9:pa)-(pb==null?1e9:pb);
+    });
+    box.innerHTML=pool.map(m=>{
+      const r=m.account||{}, e=r.extra||{}, lu=m.last_used||{};
+      const at=lu.ts||r.ts;
+      const seen=at?new Date(at*1000).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):"no data";
+      const tag="last used "+esc(seen)+(lu.device?" · "+esc(lu.device):"")+(lu.by?" · by "+esc(lu.by):"")+((m.escrow||{}).present?" · escrow ✓":"");
       const devs=(m.devices||[]).map(dv=>"<span class='tmdev'>"+esc(dv.device||dv.did||"device")+" <b>"+tmTok(dv.tok_month)+"</b></span>").join("");
       const sum=(m.devices||[]).length>1?"<span class='csub' style='align-self:center'>"+tmTok(m.month_tokens)+" this month</span>":"";
       return "<div class='tmrow'><div class='tmtop'>"+
-        "<div class='tmname'><b>"+esc(m.name)+"</b><span class='csub'>"+esc(tag)+"</span></div>"+
+        "<div class='tmname'><b>"+esc(m.name)+"</b><span class='csub'>"+tag+"</span></div>"+
         tmWin("5h",r.fh_pct,tmReset(r.fh_resets_at))+
         tmWin("weekly",r.sd_pct,tmReset(r.sd_resets_at))+
         "<div class='tmspend'><b>"+(m.month_spend!=null?tmMoney(m.month_spend,e.currency):"—")+"</b>"+
         "<br><span class='csub'>since the 1st"+(e.enabled&&e.pct!=null?" · "+Math.round(e.pct)+"% of cap":"")+"</span></div>"+
-        "<button class='sbtn' data-mid='"+esc(m.mid)+"' title='remove member'>×</button>"+
         "</div>"+(devs?"<div class='tmdevs'>"+devs+sum+"</div>":"")+"</div>";
     }).join("");
   }catch(e){ box.innerHTML="<div class='csub'>relay unreachable</div>"; }
@@ -3311,12 +3337,12 @@ async function loadTeamLedger(){
     const d=await (await fetch("/api/team/ledger?month="+TMMONTH,{cache:"no-store"})).json();
     TMLED=d;
     if(d.error){ box.innerHTML="<div class='csub'>"+esc(d.error)+"</div>"; return; }
-    const names=d.members||{}, spend=d.computed_spend||{}, finals=d.finals||{}, days=d.days||{}, monthTok=d.month_tokens||{};
+    const names=d.accounts||{}, spend=d.computed_spend||{}, finals=d.finals||{}, days=d.days||{}, monthTok=d.month_tokens||{};
     const dates=Object.keys(days).sort();
     const mids=Object.keys(names); Object.keys(spend).forEach(m=>{ if(mids.indexOf(m)<0)mids.push(m); });
     if(!mids.length){ box.innerHTML="<div class='csub'>No data for "+esc(TMMONTH)+" yet.</div>"; return; }
     const lastRow=m=>{ for(let i=dates.length-1;i>=0;i--){ const a=tmAcct((days[dates[i]]||{})[m]); if(a)return a; } return finals[m]||null; };
-    let html="<table class='tmtable'><tr><th>member</th><th class='r'>€ month</th><th class='r'>tokens</th><th class='r'>meter</th><th class='r'>cap</th><th class='r'>days</th><th>state</th></tr>";
+    let html="<table class='tmtable'><tr><th>account</th><th class='r'>€ month</th><th class='r'>tokens</th><th class='r'>meter</th><th class='r'>cap</th><th class='r'>days</th><th>state</th></tr>";
     mids.sort((a,b)=>(spend[b]||0)-(spend[a]||0)).forEach(m=>{
       const fin=finals[m], lr=fin||lastRow(m)||{}, e=lr.extra||{};
       const nDays=dates.filter(dt=>{ const a=tmAcct((days[dt]||{})[m]); return a&&((a.extra||{}).used!=null); }).length;
@@ -3337,10 +3363,10 @@ function tmAcct(devmap){ if(!devmap)return null; if(devmap.account)return devmap
   let best=null; for(const k of Object.keys(devmap)){ const r=devmap[k]; if(r&&(!best||(r.ts||0)>(best.ts||0)))best=r; } return best; }
 function tmCsv(){
   if(!TMLED||TMLED.error)return;
-  const names=TMLED.members||{}, spend=TMLED.computed_spend||{}, finals=TMLED.finals||{}, days=TMLED.days||{}, monthTok=TMLED.month_tokens||{};
+  const names=TMLED.accounts||{}, spend=TMLED.computed_spend||{}, finals=TMLED.finals||{}, days=TMLED.days||{}, monthTok=TMLED.month_tokens||{};
   const dates=Object.keys(days).sort();
   const lastRow=m=>{ for(let i=dates.length-1;i>=0;i--){ const a=tmAcct((days[dates[i]]||{})[m]); if(a)return a; } return finals[m]||null; };
-  let csv="member,month,spend,currency,tokens,meter_end,cap,days_sampled,final_frozen\r\n";
+  let csv="account,month,spend,currency,tokens,meter_end,cap,days_sampled,final_frozen\r\n";
   const mids=Object.keys(names); Object.keys(spend).forEach(m=>{ if(mids.indexOf(m)<0)mids.push(m); });
   mids.forEach(m=>{
     const lr=finals[m]||lastRow(m)||{}, e=lr.extra||{};
@@ -3356,13 +3382,9 @@ async function tmPost(body){
   try{ return await (await fetch("/api/team",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json(); }
   catch(e){ return {ok:false,error:"tracker unreachable"}; }
 }
-async function tmRemove(mid){
-  const m=((TMOV||{}).members||[]).find(x=>x.mid===mid);
-  if(!confirm("Remove "+((m&&m.name)||"this member")+" from the team? Their ledger history stays readable."))return;
-  const r=await tmPost({action:"member-remove",mid:mid});
-  if(!r.ok)alert(r.error||"failed");
-  loadTeamOverview();
-}
+// Pool accounts are read-only cards (they auto-discover as teammates log in); there is no
+// per-card remove. Reporter enrolment stays in "add member" (join codes); the relay's
+// /member DELETE endpoint remains for revoking a reporter out-of-band.
 function renderTeamPage(){
   renderTeamState(LASTD||{});
   const t=((LASTD||{}).team)||{};
@@ -3401,9 +3423,6 @@ $("tm-prevm").onclick=function(){ TMMONTH=tmShiftMonth(TMMONTH||tmMonthNow(),-1)
 $("tm-nextm").onclick=function(){ TMMONTH=tmShiftMonth(TMMONTH||tmMonthNow(),1); loadTeamLedger(); };
 $("tm-csv").onclick=tmCsv;
 $("tm-share").onchange=function(){ postCfg({team_share_token:this.checked}); };
-$("tm-members").addEventListener("click",function(e){
-  const b=e.target.closest("button[data-mid]"); if(b)tmRemove(b.dataset.mid);
-});
 setInterval(function(){ if(!$("tab-team").hidden&&(((LASTD||{}).team)||{}).role==="admin")loadTeamOverview(); },10000);
 </script>
 </body>
@@ -3669,8 +3688,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if st == 200 and led:
                     _, prev = _team_get_json(ident, ident["admin_token"], tid_path + _prev_month(month))
                     led["computed_spend"] = team_ledger_computed(led, prev)
-                    led["month_tokens"] = {mid: member_month_tokens(led, mid)
-                                           for mid in (led.get("members") or {})}
+                    led["month_tokens"] = {acct: member_month_tokens(led, acct)
+                                           for acct in (led.get("accounts") or {})}
                     out = led
                 else:
                     out = {"error": f"relay HTTP {st}" if st else "relay unreachable"}

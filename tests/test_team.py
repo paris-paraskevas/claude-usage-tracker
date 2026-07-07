@@ -58,12 +58,14 @@ def test_build_team_report():
         "extra": {"enabled": True, "used": 70.8, "limit": 75.0, "currency": "EUR", "pct": 94.4},
     }
     dev = {"did": "d1d1d1d1", "device": "DESKTOP-X", "tok_month": 12345}
-    row = m.build_team_report(snap, dev)
+    account = {"acct": "paris.paraskevas@skg-t.com", "name": "Paris", "org": "org-uuid"}
+    row = m.build_team_report(snap, dev, account)
     assert row["fh_pct"] == 99.0 and row["sd_pct"] == 19.0
     assert row["fh_resets_at"] and row["fh_resets_at"].startswith("20")
     assert row["sd_resets_at"] is None
     assert row["did"] == "d1d1d1d1" and row["device"] == "DESKTOP-X"
     assert row["tok_month"] == 12345
+    assert row["acct"] == "paris.paraskevas@skg-t.com" and row["name"] == "Paris" and row["org"] == "org-uuid"
     assert row["extra"] == {"enabled": True, "used": 70.8, "limit": 75.0,
                             "currency": "EUR", "pct": 94.4}
     assert row["ts"] > 0
@@ -73,6 +75,7 @@ def test_build_team_report_minimal():
     row = m.build_team_report({"windows": [], "extra": None})
     assert row["fh_pct"] is None and row["sd_pct"] is None and row["extra"] is None
     assert row["did"] is None and row["tok_month"] is None
+    assert row["acct"] is None and row["name"] is None and row["org"] is None
     row = m.build_team_report({"windows": [], "extra": {"enabled": False}})
     assert row["extra"] is None                                # disabled overage isn't shared
 
@@ -118,7 +121,7 @@ def test_day_account_row_prefers_cron_then_newest():
 
 def test_ledger_computed_device_rows():
     led = {
-        "members": {"a": "A", "b": "B"},
+        "accounts": {"a": "A", "b": "B"},
         "days": {
             "2026-07-01": {"a": {"d1": _dev(10.0, 100)}, "b": {"d9": _dev(1.0, 100)}},
             "2026-07-02": {"a": {"d1": _dev(11.0, 100), "account": _dev(12.5, 90, "cron")}},
@@ -135,7 +138,7 @@ def test_ledger_computed_device_rows():
 
 
 def test_ledger_computed_no_prev_month():
-    led = {"members": {"a": "A"},
+    led = {"accounts": {"a": "A"},
            "days": {"2026-07-01": {"a": {"d1": _dev(3.0, 1)}},
                     "2026-07-02": {"a": {"d1": _dev(7.0, 2)}}},
            "finals": {}}
@@ -152,24 +155,24 @@ def test_member_month_tokens_sums_last_per_device():
 
 
 def test_team_overview_merge():
-    ov = {"team": "t", "tz": "Europe/Athens", "today": "2026-07-06", "members": [
-        {"mid": "a", "name": "A", "account": {"fh_pct": 99.0, "sd_pct": 10.0,
-                                              "extra": {"used": 70.8, "limit": 75.0, "currency": "EUR", "pct": 94.4}},
+    ov = {"team": "t", "tz": "Europe/Athens", "today": "2026-07-06", "accounts": [
+        {"acct": "a", "name": "A", "account": {"fh_pct": 99.0, "sd_pct": 10.0,
+                                               "extra": {"used": 70.8, "limit": 75.0, "currency": "EUR", "pct": 94.4}},
          "devices": [], "escrow": {"present": True}},
-        {"mid": "b", "name": "B", "account": {"fh_pct": 10.0, "sd_pct": 85.0, "extra": None},
+        {"acct": "b", "name": "B", "account": {"fh_pct": 10.0, "sd_pct": 85.0, "extra": None},
          "devices": [], "escrow": {"present": False}},
     ]}
     led = {"days": {"2026-07-06": {"a": {"d1": _dev(70.8, 5, tok=45)},
-                                   "b": {"d2": _dev(ts=5, tok=7)}}}, "finals": {}, "members": {}}
+                                   "b": {"d2": _dev(ts=5, tok=7)}}}, "finals": {}, "accounts": {}}
     # Steady state: the overview proxy always supplies the prior month as a baseline
-    # (here A entered July having spent nothing through June).
+    # (here account A entered July having spent nothing through June).
     prev = {"days": {}, "finals": {"a": {"extra": {"used": 0.0}}}}
     out = m.team_overview_merge(ov, led, prev)
     ka = out["kpis"]
-    assert ka["org_spend"] == 70.8 and ka["member_count"] == 2
+    assert ka["org_spend"] == 70.8 and ka["account_count"] == 2
     assert ka["near"] == [{"name": "A", "window": "5h", "pct": 99.0},
                           {"name": "B", "window": "weekly", "pct": 85.0}]
-    ma = out["members"][0]
+    ma = out["accounts"][0]
     assert ma["month_spend"] == 70.8 and ma["month_tokens"] == 45
 
 
@@ -230,16 +233,17 @@ def test_join_allows_matching_or_unknown_org(tmp_path, monkeypatch):
 def test_team_overview_compact():
     merged = {
         "tz": "Europe/Athens",
-        "kpis": {"org_spend": 169.2, "member_count": 2,
+        "kpis": {"org_spend": 169.2, "account_count": 2,
                  "near": [{"name": "A", "window": "5h", "pct": 99.0}]},
-        "members": [
-            {"mid": "a", "name": "A", "month_spend": 70.8, "month_tokens": 45,
+        "accounts": [
+            {"acct": "a", "name": "A", "month_spend": 70.8, "month_tokens": 45,
              "account": {"fh_pct": 99.0, "sd_pct": 19.0, "extra": {"currency": "EUR"}}},
-            {"mid": "b", "name": "B", "month_spend": 0.0, "month_tokens": 7,
+            {"acct": "b", "name": "B", "month_spend": 0.0, "month_tokens": 7,
              "account": {"fh_pct": 10.0, "sd_pct": 85.0, "extra": None}},
         ],
     }
     c = m.team_overview_compact(merged)
+    # Output keeps the phone's `members`/`member_count` keys (sourced from the account pool).
     assert c["org_spend"] == 169.2 and c["member_count"] == 2 and c["tz"] == "Europe/Athens"
     assert c["near"] == [{"name": "A", "window": "5h", "pct": 99.0}]
     assert c["members"][0] == {"name": "A", "fh_pct": 99.0, "sd_pct": 19.0,

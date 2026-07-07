@@ -199,11 +199,12 @@ async function handle(request, env, ctx) {
 // ---- Team mode (docs/TEAM.md) ---------------------------------------------
 //
 // Storage: Cloudflare D1 (SQLite), schema in relay/schema.sql —
-//   teams(tid, admin_hash, tz, org)          · members(tid, mid, token_hash, name)
-//   usage_rows(tid, date, mid, did, …)        one row per member DEVICE per LOCAL day;
+//   teams(tid, admin_hash, tz, org)          · members(tid, mid, token_hash, name)  [reporters — auth only]
+//   accounts(tid, acct, email, name, org)     the shared POOL (auto-discovered, org-verified)
+//   usage_rows(tid, date, acct, did, …)        one row per ACCOUNT per reporting DEVICE per day;
 //                                             did='account' is the cron's account row
-//   finals(tid, month, mid, …)                frozen month-end row (never pruned)
-//   escrow(tid, mid, iv, ct, exp)             sealed OAuth access token
+//   finals(tid, month, acct, …)               frozen month-end row per account (never pruned)
+//   escrow(tid, acct, iv, ct, exp)            sealed OAuth token per account (cron refresh)
 // Phone sync stays in KV. The HTTP contract is unchanged from the KV era, so the
 // desktop/phone clients don't change — this is purely a storage swap.
 
@@ -253,11 +254,9 @@ async function handleTeam(request, env, url, tid, sub) {
         return new Response(null, { status: 204 });
       }
       if (method === "DELETE") {
-        // Drop the registry entry + escrow; ledger rows are kept for history.
-        await env.DB.batch([
-          env.DB.prepare("DELETE FROM members WHERE tid=? AND mid=?").bind(tid, mid),
-          env.DB.prepare("DELETE FROM escrow WHERE tid=? AND mid=?").bind(tid, mid),
-        ]);
+        // Drop the reporter registry entry. Account escrow + ledger rows are keyed by
+        // ACCOUNT (not reporter) and persist — the pool outlives any one reporter.
+        await env.DB.prepare("DELETE FROM members WHERE tid=? AND mid=?").bind(tid, mid).run();
         return new Response(null, { status: 204 });
       }
       return json({ error: "method" }, 405);
@@ -273,34 +272,53 @@ async function handleTeam(request, env, url, tid, sub) {
       const body = await readJson(request);
       const did = body && typeof body.did === "string" && /^[A-Za-z0-9_-]{4,64}$/.test(body.did)
         ? body.did : null;
-      const row = sanitizeReport(body, mem.name);
-      // Device rows are keyed per did, distinct from the cron's reserved `account`
-      // row, so a device push and the 23:59 cron row can coexist without clobbering.
+      // The pool keys usage by the Claude ACCOUNT the reporter is logged into (email),
+      // not by the reporter; by_name records which teammate drove it (the authed member).
+      let acct = body && typeof body.acct === "string" ? body.acct.trim().toLowerCase().slice(0, 128) : "";
+      const row = sanitizeReport(body);
       if (!row || !did || did === "account") return json({ error: "bad_report" }, 400);
+      // Only pool accounts in the team's org (trusted-reporter claim here; the escrow
+      // path verifies the org cryptographically against the account's own token).
+      if (adm.org && typeof body.org === "string" && body.org !== adm.org) return json({ error: "wrong_org" }, 403);
+      // Back-compat: pre-pool reporters (v0.2.1) send no account — key them by the reporter so
+      // they keep reporting through a rollout, shown as a single member-named pseudo-account.
+      if (!acct.includes("@")) acct = "mid:" + mid;
+      if (!row.name) row.name = mem.name || mid.slice(0, 8);
+      row.by_name = mem.name || mid.slice(0, 8);
+      row.src = "push";
       const date = tzParts(adm.tz).date;
-      const prev = await env.DB.prepare("SELECT wts FROM usage_rows WHERE tid=? AND date=? AND mid=? AND did=?")
-        .bind(tid, date, mid, did).first();
+      const prev = await env.DB.prepare("SELECT wts FROM usage_rows WHERE tid=? AND date=? AND acct=? AND did=?")
+        .bind(tid, date, acct, did).first();
       if (prev && prev.wts && Date.now() - prev.wts < REPORT_MIN_GAP_MS) {
         return json({ error: "rate_limited" }, 429);
       }
-      row.src = "push";
-      await env.DB.prepare(USAGE_UPSERT).bind(...usageBind(tid, date, mid, did, row, Date.now())).run();
+      // Auto-discover the account into the pool registry (org-verified above).
+      await env.DB.prepare(
+        "INSERT INTO accounts(tid,acct,email,name,org) VALUES(?1,?2,?3,?4,?5) " +
+        "ON CONFLICT(tid,acct) DO UPDATE SET email=?3, name=COALESCE(?4,name), org=COALESCE(?5,org)"
+      ).bind(tid, acct, acct, row.name || null, (typeof body.org === "string" ? body.org : null)).run();
+      await env.DB.prepare(USAGE_UPSERT).bind(...usageBind(tid, date, acct, did, row, Date.now())).run();
       return new Response(null, { status: 204 });
     }
 
     if (leaf === "/token") {
+      // Escrow is per-ACCOUNT (the pooled account's own token), so the cron can refresh
+      // it when nobody's logged in. `acct` comes from the body (PUT) or query (DELETE).
       if (method === "DELETE") {
-        await env.DB.prepare("DELETE FROM escrow WHERE tid=? AND mid=?").bind(tid, mid).run();
+        const acct = (url.searchParams.get("acct") || "").trim().toLowerCase() || ("mid:" + mid);
+        await env.DB.prepare("DELETE FROM escrow WHERE tid=? AND acct=?").bind(tid, acct).run();
         return new Response(null, { status: 204 });
       }
       if (method !== "PUT") return json({ error: "method" }, 405);
       if (!env.TEAM_SEAL_KEY) return json({ error: "escrow_unconfigured" }, 503);
       const body = await readJson(request);
       const tok = body && typeof body.access_token === "string" ? body.access_token : null;
+      let acct = body && typeof body.acct === "string" ? body.acct.trim().toLowerCase().slice(0, 128) : "";
       const exp = body && Number(body.expires_at) || 0; // epoch ms
       if (!tok || tok.length > 4096 || exp <= Date.now()) return json({ error: "bad_token" }, 400);
-      // Org binding: a token escrowed to this team must belong to the team's org.
-      // Defeats a leaked join code being used from an outside account.
+      if (!acct.includes("@")) acct = "mid:" + mid;   // back-compat: pre-pool reporter escrow
+      // Org binding: the escrowed token must belong to the team's org (verified via the
+      // account's own profile). Defeats a leaked join code escrowing an outside account.
       if (adm.org) {
         let prof;
         try {
@@ -317,9 +335,9 @@ async function handleTeam(request, env, url, tid, sub) {
       }
       const sealed = await seal(env.TEAM_SEAL_KEY, tok);
       await env.DB.prepare(
-        "INSERT INTO escrow(tid,mid,iv,ct,exp) VALUES(?1,?2,?3,?4,?5) " +
-        "ON CONFLICT(tid,mid) DO UPDATE SET iv=?3, ct=?4, exp=?5"
-      ).bind(tid, mid, sealed.iv, sealed.ct, exp).run();
+        "INSERT INTO escrow(tid,acct,iv,ct,exp) VALUES(?1,?2,?3,?4,?5) " +
+        "ON CONFLICT(tid,acct) DO UPDATE SET iv=?3, ct=?4, exp=?5"
+      ).bind(tid, acct, sealed.iv, sealed.ct, exp).run();
       return new Response(null, { status: 204 });
     }
   }
@@ -345,48 +363,145 @@ async function teamOverviewData(env, tid, tz) {
   const now = new Date();
   const today = tzParts(tz, now).date;
   const yesterday = tzParts(tz, new Date(now.getTime() - 86400_000)).date;
-  const [mRes, eRes, uRes] = await env.DB.batch([
-    env.DB.prepare("SELECT mid,name FROM members WHERE tid=?").bind(tid),
-    env.DB.prepare("SELECT mid,exp FROM escrow WHERE tid=? AND exp>?").bind(tid, Date.now()),
+  const [aRes, eRes, uRes] = await env.DB.batch([
+    env.DB.prepare("SELECT acct,name FROM accounts WHERE tid=?").bind(tid),
+    env.DB.prepare("SELECT acct,exp FROM escrow WHERE tid=? AND exp>?").bind(tid, Date.now()),
     env.DB.prepare("SELECT * FROM usage_rows WHERE tid=? AND date IN (?,?)").bind(tid, today, yesterday),
   ]);
   const esc = {};
-  for (const r of eRes.results) esc[r.mid] = r.exp;
+  for (const r of eRes.results) esc[r.acct] = r.exp;
   const byDate = { [today]: {}, [yesterday]: {} };
   for (const r of uRes.results) {
     const d = (byDate[r.date] = byDate[r.date] || {});
-    (d[r.mid] = d[r.mid] || {})[r.did] = rowFromDb(r);
+    (d[r.acct] = d[r.acct] || {})[r.did] = rowFromDb(r);
   }
-  const members = mRes.results.map((m) => {
-    const tdev = (byDate[today] && byDate[today][m.mid]) || {};
-    const ydev = (byDate[yesterday] && byDate[yesterday][m.mid]) || {};
+  const accounts = aRes.results.map((a) => {
+    const tdev = (byDate[today] && byDate[today][a.acct]) || {};
+    const ydev = (byDate[yesterday] && byDate[yesterday][a.acct]) || {};
     const devices = Object.keys(tdev).filter((d) => d !== "account").map((d) => ({ did: d, ...tdev[d] }));
     return {
-      mid: m.mid, name: m.name || m.mid.slice(0, 8),
+      acct: a.acct, name: a.name || a.acct,
       account: pickAccountRow(tdev) || pickAccountRow(ydev),
-      account_is_today: !!pickAccountRow(tdev), devices,
-      escrow: m.mid in esc ? { present: true, exp: esc[m.mid] } : { present: false },
+      account_is_today: !!pickAccountRow(tdev),
+      last_used: lastUsed(tdev) || lastUsed(ydev),   // {ts, device, by} of the newest human push
+      devices,
+      escrow: a.acct in esc ? { present: true, exp: esc[a.acct] } : { present: false },
     };
   });
-  return { team: tid, tz, today, members };
+  return { team: tid, tz, today, accounts };
 }
 
 async function teamLedgerData(env, tid, month) {
-  const [mRes, uRes, fRes] = await env.DB.batch([
-    env.DB.prepare("SELECT mid,name FROM members WHERE tid=?").bind(tid),
+  const [aRes, uRes, fRes] = await env.DB.batch([
+    env.DB.prepare("SELECT acct,name FROM accounts WHERE tid=?").bind(tid),
     env.DB.prepare("SELECT * FROM usage_rows WHERE tid=? AND date LIKE ?").bind(tid, month + "-%"),
     env.DB.prepare("SELECT * FROM finals WHERE tid=? AND month=?").bind(tid, month),
   ]);
   const names = {};
-  for (const m of mRes.results) names[m.mid] = m.name || m.mid.slice(0, 8);
+  for (const a of aRes.results) names[a.acct] = a.name || a.acct;
   const days = {};
   for (const r of uRes.results) {
     const d = (days[r.date] = days[r.date] || {});
-    (d[r.mid] = d[r.mid] || {})[r.did] = rowFromDb(r);
+    (d[r.acct] = d[r.acct] || {})[r.did] = rowFromDb(r);
   }
   const finals = {};
-  for (const r of fRes.results) finals[r.mid] = rowFromDb(r);
-  return { team: tid, month, members: names, days, finals };
+  for (const r of fRes.results) finals[r.acct] = rowFromDb(r);
+  return { team: tid, month, accounts: names, days, finals };
+}
+
+// ---- Computed team metrics — mirrors the Python merge in claude_usage_tracker.py so the
+// remote MCP tools return the same enriched shape (per-member month €spend + tokens + KPIs)
+// the desktop computes locally, instead of raw D1. Keep byte-for-byte semantics with the
+// Python originals (team_month_spend / member_month_tokens / team_ledger_computed /
+// team_overview_merge) — the two must agree or claude.ai and the desktop diverge.
+
+function prevMonth(month) {
+  const y = +month.slice(0, 4), m = +month.slice(5, 7);
+  return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, "0")}`;
+}
+
+// A member's account-level extra.used values for a ledger month, in date order.
+function ledgerSamples(led, mid) {
+  const vals = [], days = led.days || {};
+  for (const date of Object.keys(days).sort()) {
+    const row = pickAccountRow((days[date] || {})[mid]);
+    const used = row && row.extra && row.extra.used;
+    if (typeof used === "number" && isFinite(used)) vals.push(used);
+  }
+  return vals;
+}
+
+// Calendar-month spend from day-by-day extra.used samples: sum day-over-day increases;
+// a drop means the billing cycle reset in the gap, so the new value is all fresh spend.
+// baseline = previous month's last sample (seeds the first diff); null = seed only.
+function monthSpend(samples, baseline) {
+  let spend = 0, prev = baseline;
+  for (const v of samples) {
+    if (typeof v !== "number" || !isFinite(v)) continue;
+    if (prev === null || prev === undefined) { /* unknown history: seed only */ }
+    else if (v >= prev) spend += v - prev;
+    else spend += v;
+    prev = v;
+  }
+  return Math.round(spend * 100) / 100;
+}
+
+// Tokens a member burnt this month across devices: per device take the LAST cumulative
+// tok_month seen in the month, then sum devices. The cron's `account` rows carry none.
+function memberMonthTokens(led, mid) {
+  const last = {}, days = led.days || {};
+  for (const date of Object.keys(days).sort()) {
+    const devmap = (days[date] || {})[mid] || {};
+    for (const did of Object.keys(devmap)) {
+      if (did === "account") continue;
+      const row = devmap[did];
+      if (row && typeof row.tok_month === "number" && isFinite(row.tok_month)) last[did] = Math.floor(row.tok_month);
+    }
+  }
+  return Object.values(last).reduce((a, b) => a + b, 0);
+}
+
+// The value to diff the month's first sample against: the previous month's frozen final
+// if the cron caught it, else its last daily row.
+function ledgerBaseline(prevLed, mid) {
+  if (!prevLed) return null;
+  const f = ((prevLed.finals || {})[mid] || {}).extra || {};
+  if (typeof f.used === "number" && isFinite(f.used)) return f.used;
+  const prior = ledgerSamples(prevLed, mid);
+  return prior.length ? prior[prior.length - 1] : null;
+}
+
+// Per-member calendar-month spend for a ledger response.
+function ledgerComputed(led, prevLed) {
+  const accts = new Set(Object.keys(led.accounts || {}));
+  for (const d of Object.values(led.days || {})) for (const a of Object.keys(d)) accts.add(a);
+  const out = {};
+  for (const a of accts) out[a] = monthSpend(ledgerSamples(led, a), ledgerBaseline(prevLed, a));
+  return out;
+}
+
+// Attach month spend/tokens per account + KPI aggregates (org spend, count, near-limit) to a
+// relay overview. Pure — matches team_overview_merge so the connector shows what the desktop does.
+function overviewMerge(ov, led, prevLed) {
+  const out = { ...ov };
+  const accounts = (ov.accounts || []).map((a) => ({ ...a }));
+  const spend = led ? ledgerComputed(led, prevLed) : {};
+  const near = [];
+  let orgSpend = 0;
+  for (const a of accounts) {
+    a.month_spend = spend[a.acct] ?? null;
+    a.month_tokens = led ? memberMonthTokens(led, a.acct) : 0;
+    if (typeof a.month_spend === "number") orgSpend += a.month_spend;
+    const row = a.account || {};
+    for (const [key, label] of [["fh_pct", "5h"], ["sd_pct", "weekly"]]) {
+      const p = row[key];
+      if (typeof p === "number" && p >= 80) near.push({ name: a.name, window: label, pct: p });
+    }
+  }
+  near.sort((x, y) => y.pct - x.pct);
+  out.accounts = accounts;
+  out.kpis = { org_spend: Math.round(orgSpend * 100) / 100, account_count: accounts.length, near };
+  return out;
 }
 
 // ---- Remote MCP (docs/MCP-REMOTE.md) — team tools over Streamable HTTP (stateless JSON) --
@@ -396,15 +511,99 @@ async function teamLedgerData(env, tid, month) {
 // admin token (hashed, matched to a team). The claude.ai OAuth layer (DCR + PKCE) is added on
 // top next; it will mint tokens that resolve to a tid the same way.
 
+// MCP Apps (blog.modelcontextprotocol.io/posts/2026-01-26-mcp-apps) — an interactive pool
+// widget. get_team_overview links this ui:// resource via _meta.ui.resourceUri and returns
+// structuredContent; MCP-Apps hosts (claude.ai, Claude Desktop) render it in a sandboxed
+// iframe, and non-UI hosts fall back to the text content. NOTE: the JSON-RPC wire shapes here
+// are correct, but in-chat render on a non-partner custom server is UNVERIFIED (ext-apps#671)
+// — the client-side data bridge field names may need tuning against the live host.
+const POOL_UI_URI = "ui://claude-usage-tracker/pool";
+const MCP_RESOURCES = [
+  { uri: POOL_UI_URI, name: "Team account pool", description: "Interactive account-pool dashboard.", mimeType: "text/html;profile=mcp-app" },
+];
+const POOL_WIDGET_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Team account pool</title>
+<style>
+ :root{color-scheme:dark light}
+ html,body{margin:0;background:transparent;font:13px system-ui,'Segoe UI',sans-serif}
+ #wrap{background:#1c1712;color:#e8e2d6;border:1px solid #2a2620;border-radius:12px;padding:14px 16px;max-width:860px}
+ .ttl{color:#cda24e;font-weight:600;font-size:15px}
+ .sub{color:#8a857c;font-size:11px}
+ .hot{color:#d4694f}
+ #hd{margin-bottom:8px}
+ .row{border-top:1px solid #2a2620;padding:10px 0}
+ .row.first{border-top:none}
+ .top{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+ .nm{min-width:200px;display:flex;flex-direction:column}
+ .w{min-width:150px}
+ .wc{font-size:11px;color:#b8b2a6;margin-bottom:3px}
+ .bar{background:#2a2620;border-radius:4px;height:8px;overflow:hidden}
+ .bar i{display:block;height:100%}
+ .sp{margin-left:auto;text-align:right;display:flex;flex-direction:column}
+</style></head><body>
+<div id="wrap"><div id="hd"></div><div id="cards" class="sub">connecting to the tracker…</div></div>
+<script>
+(function(){
+  function esc(s){ return (s||"").replace(/[&<>]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c];}); }
+  function money(v,cur){ return v==null?"—":((cur?cur+" ":"")+Number(v).toFixed(2)); }
+  function tok(n){ if(n==null)return "—"; if(n>=1e9)return (n/1e9).toFixed(1)+"B"; if(n>=1e6)return (n/1e6).toFixed(1)+"M"; if(n>=1e3)return (n/1e3).toFixed(1)+"k"; return String(n); }
+  function bar(label,p){
+    var pct=(p==null)?"—":Math.round(p)+"%";
+    var c=p==null?"#3a352f":(p>=80?"#d4694f":(p>=60?"#cda24e":"#5e9e72"));
+    return "<div class='w'><div class='wc'>"+label+" · "+pct+"</div><div class='bar'><i style='width:"+(p==null?0:Math.min(100,p))+"%;background:"+c+"'></i></div></div>";
+  }
+  function cur(d){ var a=(d.accounts||[]); for(var i=0;i<a.length;i++){ var c=((a[i].account||{}).extra||{}).currency; if(c)return c; } return ""; }
+  function render(d){
+    if(!d||(!d.accounts&&!d.kpis))return;
+    var k=d.kpis||{};
+    document.getElementById("hd").innerHTML="<div class='ttl'>Team account pool</div>"+
+      "<div class='sub'>"+esc(d.today||"")+" · "+esc(d.tz||"")+" · org spend <b>"+money(k.org_spend,cur(d))+"</b> across "+(k.account_count||0)+" account"+((k.account_count||0)===1?"":"s")+
+      (k.near&&k.near.length?" · <span class='hot'>"+k.near.length+" near limit</span>":"")+"</div>";
+    var pool=(d.accounts||[]).slice().sort(function(a,b){ var pa=(a.account||{}).fh_pct, pb=(b.account||{}).fh_pct; return (pa==null?1e9:pa)-(pb==null?1e9:pb); });
+    var box=document.getElementById("cards");
+    if(!pool.length){ box.className=""; box.innerHTML="<div class='sub'>No accounts in the pool yet — a teammate reports one by logging into it.</div>"; return; }
+    box.className="";
+    box.innerHTML=pool.map(function(m,i){
+      var r=m.account||{}, e=r.extra||{}, lu=m.last_used||{};
+      var at=lu.ts||r.ts; var seen=at?new Date(at*1000).toLocaleString():"no data";
+      var meta="last used "+esc(seen)+(lu.device?" · "+esc(lu.device):"")+(lu.by?" · by "+esc(lu.by):"")+((m.escrow||{}).present?" · escrow ✓":"");
+      return "<div class='row"+(i===0?" first":"")+"'><div class='top'>"+
+        "<div class='nm'><b>"+esc(m.name||m.acct||"")+"</b><span class='sub'>"+meta+"</span></div>"+
+        bar("5h",r.fh_pct)+bar("weekly",r.sd_pct)+
+        "<div class='sp'><b>"+(m.month_spend!=null?money(m.month_spend,e.currency):"—")+"</b>"+
+        "<span class='sub'>since the 1st"+(e.enabled&&e.pct!=null?" · "+Math.round(e.pct)+"% cap":"")+"</span></div>"+
+        "</div></div>";
+    }).join("");
+  }
+  function tryData(){
+    try{ if(window.openai&&window.openai.toolOutput){ render(window.openai.toolOutput); return true; } }catch(e){}
+    try{ if(window.openai&&window.openai.structuredContent){ render(window.openai.structuredContent); return true; } }catch(e){}
+    try{ if(window.__mcpToolOutput){ render(window.__mcpToolOutput); return true; } }catch(e){}
+    return false;
+  }
+  window.addEventListener("message", function(ev){
+    var d=ev.data; if(!d)return;
+    var payload=d.structuredContent||d.toolOutput||(d.result&&d.result.structuredContent)||((d.accounts||d.kpis)?d:null);
+    if(payload)render(payload);
+  });
+  window.render=render;
+  try{ parent.postMessage({type:"ui/ready"},"*"); }catch(e){}
+  try{ parent.postMessage({type:"openai:ready"},"*"); }catch(e){}
+  if(!tryData()){ setTimeout(tryData,300); setTimeout(tryData,1200); }
+})();
+</script></body></html>`;
+
 const MCP_TOOLS = [
   {
     name: "get_team_overview",
-    description: "Team admin: live per-member 5h/weekly load, month-to-date spend, and near-limit members.",
+    description: "Team admin: the live account POOL — per-account 5h/weekly load, month-to-date €spend, and near-limit accounts. Renders as an interactive widget where the host supports MCP Apps.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    _meta: { "ui": { "resourceUri": POOL_UI_URI } },
   },
   {
     name: "get_team_ledger",
-    description: "Team admin: per-member calendar-month extra-usage spend and tokens for a month.",
+    description: "Team admin: per-account calendar-month extra-usage €spend and tokens for a month.",
     inputSchema: {
       type: "object",
       properties: { month: { type: "string", description: "Month as YYYY-MM (defaults to the current month)." } },
@@ -447,20 +646,46 @@ async function handleMcp(request, env, url) {
   const reply = (result) => json({ jsonrpc: "2.0", id: rpc.id, result });
 
   if (rpc.method === "initialize") {
-    return reply({ protocolVersion: "2024-11-05", capabilities: { tools: {} },
+    return reply({ protocolVersion: "2024-11-05", capabilities: { tools: {}, resources: {} },
       serverInfo: { name: "claude-usage-tracker-team", version: "0.1.0" } });
   }
   if (rpc.method === "notifications/initialized") return new Response(null, { status: 202 });
   if (rpc.method === "tools/list") return reply({ tools: MCP_TOOLS });
+  if (rpc.method === "resources/list") return reply({ resources: MCP_RESOURCES });
+  if (rpc.method === "resources/read") {
+    const uri = rpc.params && rpc.params.uri;
+    if (uri === POOL_UI_URI) return reply({ contents: [{ uri, mimeType: "text/html;profile=mcp-app", text: POOL_WIDGET_HTML }] });
+    return json({ jsonrpc: "2.0", id: rpc.id, error: { code: -32002, message: "resource not found" } });
+  }
   if (rpc.method === "tools/call") {
     const name = rpc.params && rpc.params.name;
     const args = (rpc.params && rpc.params.arguments) || {};
     const asText = (obj) => reply({ content: [{ type: "text", text: JSON.stringify(obj, null, 2) }] });
     try {
-      if (name === "get_team_overview") return asText(await teamOverviewData(env, team.tid, team.tz || DEFAULT_TEAM_TZ));
+      if (name === "get_team_overview") {
+        // Enrich to match the desktop: fetch this + previous month's ledger and merge in
+        // per-account month €spend / tokens + KPIs, instead of raw today/yesterday.
+        const ov = await teamOverviewData(env, team.tid, team.tz || DEFAULT_TEAM_TZ);
+        const month = (ov.today || "").slice(0, 7);
+        const merged = month
+          ? overviewMerge(ov, await teamLedgerData(env, team.tid, month), await teamLedgerData(env, team.tid, prevMonth(month)))
+          : ov;
+        // structuredContent + the ui:// link → MCP-Apps hosts render the pool widget; the
+        // text block is the graceful fallback for hosts without UI support.
+        return reply({
+          content: [{ type: "text", text: JSON.stringify(merged, null, 2) }],
+          structuredContent: merged,
+          _meta: { "ui": { "resourceUri": POOL_UI_URI } },
+        });
+      }
       if (name === "get_team_ledger") {
         const month = /^\d{4}-\d{2}$/.test(args.month || "") ? args.month : new Date().toISOString().slice(0, 7);
-        return asText(await teamLedgerData(env, team.tid, month));
+        const led = await teamLedgerData(env, team.tid, month);
+        const prev = await teamLedgerData(env, team.tid, prevMonth(month));
+        led.spend = ledgerComputed(led, prev);            // per-account calendar-month € spend
+        led.tokens = {};                                  // per-account month tokens
+        for (const a of Object.keys(led.accounts || {})) led.tokens[a] = memberMonthTokens(led, a);
+        return asText(led);
       }
       return reply({ content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true });
     } catch (e) {
@@ -479,34 +704,34 @@ function rowFromDb(r) {
     fh_resets_at: r.fh_resets_at, sd_resets_at: r.sd_resets_at,
     extra: (r.extra_enabled === null || r.extra_enabled === undefined) ? null
       : { enabled: !!r.extra_enabled, used: r.extra_used, limit: r.extra_limit, currency: r.extra_currency, pct: r.extra_pct },
-    did: r.did, device: r.device, tok_month: r.tok_month, ts: r.ts, src: r.src,
+    did: r.did, device: r.device, by_name: r.by_name, tok_month: r.tok_month, ts: r.ts, src: r.src,
   };
 }
 
 const USAGE_UPSERT =
-  "INSERT INTO usage_rows(tid,date,mid,did,name,fh_pct,sd_pct,fh_resets_at,sd_resets_at," +
+  "INSERT INTO usage_rows(tid,date,acct,did,name,by_name,fh_pct,sd_pct,fh_resets_at,sd_resets_at," +
   "extra_enabled,extra_used,extra_limit,extra_currency,extra_pct,tok_month,device,src,ts,wts) " +
-  "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19) " +
-  "ON CONFLICT(tid,date,mid,did) DO UPDATE SET name=?5,fh_pct=?6,sd_pct=?7,fh_resets_at=?8,sd_resets_at=?9," +
-  "extra_enabled=?10,extra_used=?11,extra_limit=?12,extra_currency=?13,extra_pct=?14,tok_month=?15,device=?16,src=?17,ts=?18,wts=?19";
+  "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20) " +
+  "ON CONFLICT(tid,date,acct,did) DO UPDATE SET name=?5,by_name=?6,fh_pct=?7,sd_pct=?8,fh_resets_at=?9,sd_resets_at=?10," +
+  "extra_enabled=?11,extra_used=?12,extra_limit=?13,extra_currency=?14,extra_pct=?15,tok_month=?16,device=?17,src=?18,ts=?19,wts=?20";
 
-function usageBind(tid, date, mid, did, row, wts) {
+function usageBind(tid, date, acct, did, row, wts) {
   const e = row.extra;
-  return [tid, date, mid, did, row.name, row.fh_pct, row.sd_pct, row.fh_resets_at, row.sd_resets_at,
+  return [tid, date, acct, did, row.name, row.by_name ?? null, row.fh_pct, row.sd_pct, row.fh_resets_at, row.sd_resets_at,
     e ? (e.enabled ? 1 : 0) : null, e ? e.used : null, e ? e.limit : null, e ? e.currency : null, e ? e.pct : null,
     row.tok_month ?? null, row.device ?? null, row.src ?? null, row.ts ?? null, wts ?? null];
 }
 
 const FINAL_UPSERT =
-  "INSERT INTO finals(tid,month,mid,name,fh_pct,sd_pct,fh_resets_at,sd_resets_at," +
+  "INSERT INTO finals(tid,month,acct,name,by_name,fh_pct,sd_pct,fh_resets_at,sd_resets_at," +
   "extra_enabled,extra_used,extra_limit,extra_currency,extra_pct,tok_month,ts) " +
-  "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) " +
-  "ON CONFLICT(tid,month,mid) DO UPDATE SET name=?4,fh_pct=?5,sd_pct=?6,fh_resets_at=?7,sd_resets_at=?8," +
-  "extra_enabled=?9,extra_used=?10,extra_limit=?11,extra_currency=?12,extra_pct=?13,tok_month=?14,ts=?15";
+  "VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16) " +
+  "ON CONFLICT(tid,month,acct) DO UPDATE SET name=?4,by_name=?5,fh_pct=?6,sd_pct=?7,fh_resets_at=?8,sd_resets_at=?9," +
+  "extra_enabled=?10,extra_used=?11,extra_limit=?12,extra_currency=?13,extra_pct=?14,tok_month=?15,ts=?16";
 
-function finalBind(tid, month, mid, row) {
+function finalBind(tid, month, acct, row) {
   const e = row.extra;
-  return [tid, month, mid, row.name, row.fh_pct, row.sd_pct, row.fh_resets_at, row.sd_resets_at,
+  return [tid, month, acct, row.name, row.by_name ?? null, row.fh_pct, row.sd_pct, row.fh_resets_at, row.sd_resets_at,
     e ? (e.enabled ? 1 : 0) : null, e ? e.used : null, e ? e.limit : null, e ? e.currency : null, e ? e.pct : null,
     row.tok_month ?? null, row.ts ?? null];
 }
@@ -524,13 +749,26 @@ function pickAccountRow(devmap) {
   return best;
 }
 
-// Compact plaintext usage row a member pushes: display numbers only, no content.
-function sanitizeReport(body, fallbackName) {
+// "Last used by whom/where/when" for a pooled account: the newest HUMAN push (skip the
+// cron's did='account' row, which has no driver). Returns {ts, device, by} or null.
+function lastUsed(devmap) {
+  if (!devmap || typeof devmap !== "object") return null;
+  let best = null;
+  for (const did of Object.keys(devmap)) {
+    if (did === "account") continue;
+    const r = devmap[did];
+    if (r && (!best || (r.ts || 0) > (best.ts || 0))) best = r;
+  }
+  return best ? { ts: best.ts, device: best.device, by: best.by_name } : null;
+}
+
+// Compact plaintext usage row a reporter pushes: display numbers only, no content.
+function sanitizeReport(body) {
   if (!body || typeof body !== "object") return null;
   const pct = (v) => (typeof v === "number" && isFinite(v) ? Math.max(0, Math.min(100, v)) : null);
   const money = (v) => (typeof v === "number" && isFinite(v) && v >= 0 && v < 1e7 ? Math.round(v * 100) / 100 : null);
   const row = {
-    name: cleanName(body.name) || fallbackName,
+    name: cleanName(body.name) || null,   // Claude account display name (not the reporter)
     fh_pct: pct(body.fh_pct),
     sd_pct: pct(body.sd_pct),
     fh_resets_at: cleanTs(body.fh_resets_at),
@@ -611,8 +849,8 @@ async function teamCron(env) {
     const month = local.date.slice(0, 7);
 
     const escrowed = (await env.DB.prepare(
-      "SELECT e.mid AS mid, e.iv AS iv, e.ct AS ct, m.name AS name " +
-      "FROM escrow e JOIN members m ON e.tid=m.tid AND e.mid=m.mid WHERE e.tid=? AND e.exp>?"
+      "SELECT e.acct AS acct, e.iv AS iv, e.ct AS ct, a.name AS name " +
+      "FROM escrow e JOIN accounts a ON e.tid=a.tid AND e.acct=a.acct WHERE e.tid=? AND e.exp>?"
     ).bind(t.tid, Date.now()).all()).results;
 
     for (const em of escrowed) {
@@ -624,17 +862,17 @@ async function teamCron(env) {
       }
       const row = await fetchUsageRow(token);
       if (row === "dead") {
-        await env.DB.prepare("DELETE FROM escrow WHERE tid=? AND mid=?").bind(t.tid, em.mid).run(); // revoked
+        await env.DB.prepare("DELETE FROM escrow WHERE tid=? AND acct=?").bind(t.tid, em.acct).run(); // revoked
         continue;
       }
       if (!row) continue; // transient failure: keep the pushed rows
-      row.name = em.name || em.mid.slice(0, 8);
+      row.name = em.name || em.acct;
       row.src = "cron";
       // Reserved device id 'account': an account-level row distinct from any device's
       // push row, so both survive on the same day.
-      await env.DB.prepare(USAGE_UPSERT).bind(...usageBind(t.tid, local.date, em.mid, "account", row, Date.now())).run();
+      await env.DB.prepare(USAGE_UPSERT).bind(...usageBind(t.tid, local.date, em.acct, "account", row, Date.now())).run();
       if (lastDay) {
-        await env.DB.prepare(FINAL_UPSERT).bind(...finalBind(t.tid, month, em.mid, row)).run();
+        await env.DB.prepare(FINAL_UPSERT).bind(...finalBind(t.tid, month, em.acct, row)).run();
       }
     }
   }

@@ -10,6 +10,9 @@ CREATE TABLE IF NOT EXISTS teams (
   org        TEXT                              -- Claude org uuid; null = org binding off
 );
 
+-- A person/device enrolled to REPORT (auth only). The admin mints the token; what a
+-- reporter pushes is keyed by the Claude ACCOUNT it is logged into, not by the reporter.
+-- `name` is the teammate's label, surfaced as "last used by" on each pooled account.
 CREATE TABLE IF NOT EXISTS members (
   tid        TEXT NOT NULL,
   mid        TEXT NOT NULL,
@@ -18,13 +21,27 @@ CREATE TABLE IF NOT EXISTS members (
   PRIMARY KEY (tid, mid)
 );
 
--- One row per member DEVICE per LOCAL day. did='account' is the cron's account-level row.
+-- The POOL: one row per shared Claude account, auto-discovered as reporters log into it
+-- (org-verified against teams.org). acct = stable key (lowercased email).
+CREATE TABLE IF NOT EXISTS accounts (
+  tid   TEXT NOT NULL,
+  acct  TEXT NOT NULL,
+  email TEXT,
+  name  TEXT,                                  -- Claude display name
+  org   TEXT,                                  -- org uuid (must match teams.org)
+  PRIMARY KEY (tid, acct)
+);
+
+-- One row per ACCOUNT per reporting DEVICE per LOCAL day. did='account' is the cron's row.
+-- Re-keyed from member→account: a device that switches Claude logins writes a distinct row
+-- per account, so the pool never collapses two accounts into one member.
 CREATE TABLE IF NOT EXISTS usage_rows (
   tid            TEXT NOT NULL,
   date           TEXT NOT NULL,                -- YYYY-MM-DD in the team's tz
-  mid            TEXT NOT NULL,
+  acct           TEXT NOT NULL,                -- the pooled Claude account (lowercased email)
   did            TEXT NOT NULL,
-  name           TEXT,
+  name           TEXT,                         -- account display name (denormalized)
+  by_name        TEXT,                         -- teammate who drove it (reporter) — "last used by"
   fh_pct         REAL,
   sd_pct         REAL,
   fh_resets_at   TEXT,
@@ -35,20 +52,21 @@ CREATE TABLE IF NOT EXISTS usage_rows (
   extra_currency TEXT,
   extra_pct      REAL,
   tok_month      INTEGER,
-  device         TEXT,                         -- hostname (per-device rows); NULL for 'account'
+  device         TEXT,                         -- reporting hostname; NULL for the cron 'account' row
   src            TEXT,                         -- 'push' | 'cron'
   ts             INTEGER,                      -- report time (epoch seconds)
   wts            INTEGER,                      -- last write (epoch ms) — the per-device throttle
-  PRIMARY KEY (tid, date, mid, did)
+  PRIMARY KEY (tid, date, acct, did)
 );
 CREATE INDEX IF NOT EXISTS idx_usage_tid_date ON usage_rows (tid, date);
 
--- Frozen month-end row (written by the 23:59 cron on the last local day). Never pruned.
+-- Frozen month-end row per ACCOUNT (written by the 23:59 cron on the last local day). Never pruned.
 CREATE TABLE IF NOT EXISTS finals (
   tid            TEXT NOT NULL,
   month          TEXT NOT NULL,                -- YYYY-MM
-  mid            TEXT NOT NULL,
+  acct           TEXT NOT NULL,
   name           TEXT,
+  by_name        TEXT,
   fh_pct         REAL,
   sd_pct         REAL,
   fh_resets_at   TEXT,
@@ -60,16 +78,18 @@ CREATE TABLE IF NOT EXISTS finals (
   extra_pct      REAL,
   tok_month      INTEGER,
   ts             INTEGER,
-  PRIMARY KEY (tid, month, mid)
+  PRIMARY KEY (tid, month, acct)
 );
 
+-- Sealed OAuth token PER ACCOUNT so the cron can refresh each pooled account's usage even
+-- when nobody is logged into it right now (keeps the pool near-live).
 CREATE TABLE IF NOT EXISTS escrow (
-  tid TEXT NOT NULL,
-  mid TEXT NOT NULL,
-  iv  TEXT NOT NULL,                           -- AES-GCM nonce (b64url)
-  ct  TEXT NOT NULL,                           -- sealed access token (b64url)
-  exp INTEGER NOT NULL,                        -- token expiry (epoch ms)
-  PRIMARY KEY (tid, mid)
+  tid  TEXT NOT NULL,
+  acct TEXT NOT NULL,
+  iv   TEXT NOT NULL,                          -- AES-GCM nonce (b64url)
+  ct   TEXT NOT NULL,                          -- sealed access token (b64url)
+  exp  INTEGER NOT NULL,                       -- token expiry (epoch ms)
+  PRIMARY KEY (tid, acct)
 );
 
 -- OAuth 2.1 provider (docs/MCP-REMOTE.md) for the claude.ai remote MCP connector.
