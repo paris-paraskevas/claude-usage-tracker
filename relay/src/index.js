@@ -59,6 +59,8 @@ async function handle(request, env, ctx) {
     return cors(json({ ok: true, service: "claude-usage-relay", v: 1 }));
   }
 
+  if (url.pathname === "/mcp") return cors(await handleMcp(request, env));
+
   const tm = url.pathname.match(/^\/v1\/team\/([A-Za-z0-9_-]{8,64})(\/.*)?$/);
   if (tm) return cors(await handleTeam(request, env, url, tm[1], tm[2] || ""));
 
@@ -323,61 +325,138 @@ async function handleTeam(request, env, url, tid, sub) {
   if (!isAdmin) return json({ error: "forbidden" }, 403);
 
   if (sub === "/overview" && method === "GET") {
-    const tz = adm.tz || DEFAULT_TEAM_TZ;
-    const now = new Date();
-    const today = tzParts(tz, now).date;
-    const yesterday = tzParts(tz, new Date(now.getTime() - 86400_000)).date;
-
-    const [mRes, eRes, uRes] = await env.DB.batch([
-      env.DB.prepare("SELECT mid,name FROM members WHERE tid=?").bind(tid),
-      env.DB.prepare("SELECT mid,exp FROM escrow WHERE tid=? AND exp>?").bind(tid, Date.now()),
-      env.DB.prepare("SELECT * FROM usage_rows WHERE tid=? AND date IN (?,?)").bind(tid, today, yesterday),
-    ]);
-    const esc = {};
-    for (const r of eRes.results) esc[r.mid] = r.exp;
-    // Group rows into {date: {mid: {did: row}}}.
-    const byDate = { [today]: {}, [yesterday]: {} };
-    for (const r of uRes.results) {
-      const d = (byDate[r.date] = byDate[r.date] || {});
-      (d[r.mid] = d[r.mid] || {})[r.did] = rowFromDb(r);
-    }
-    const members = (mRes.results).map((m) => {
-      const tdev = (byDate[today] && byDate[today][m.mid]) || {};
-      const ydev = (byDate[yesterday] && byDate[yesterday][m.mid]) || {};
-      const devices = Object.keys(tdev).filter((d) => d !== "account").map((d) => ({ did: d, ...tdev[d] }));
-      return {
-        mid: m.mid,
-        name: m.name || m.mid.slice(0, 8),
-        account: pickAccountRow(tdev) || pickAccountRow(ydev),
-        account_is_today: !!pickAccountRow(tdev),
-        devices,
-        escrow: m.mid in esc ? { present: true, exp: esc[m.mid] } : { present: false },
-      };
-    });
-    return json({ team: tid, tz, today, members });
+    return json(await teamOverviewData(env, tid, adm.tz || DEFAULT_TEAM_TZ));
   }
 
   if (sub === "/ledger" && method === "GET") {
     const month = (url.searchParams.get("month") || "").trim();
     if (!/^\d{4}-\d{2}$/.test(month)) return json({ error: "bad_month" }, 400);
-    const [mRes, uRes, fRes] = await env.DB.batch([
-      env.DB.prepare("SELECT mid,name FROM members WHERE tid=?").bind(tid),
-      env.DB.prepare("SELECT * FROM usage_rows WHERE tid=? AND date LIKE ?").bind(tid, month + "-%"),
-      env.DB.prepare("SELECT * FROM finals WHERE tid=? AND month=?").bind(tid, month),
-    ]);
-    const names = {};
-    for (const m of mRes.results) names[m.mid] = m.name || m.mid.slice(0, 8);
-    const days = {};
-    for (const r of uRes.results) {
-      const d = (days[r.date] = days[r.date] || {});
-      (d[r.mid] = d[r.mid] || {})[r.did] = rowFromDb(r);
-    }
-    const finals = {};
-    for (const r of fRes.results) finals[r.mid] = rowFromDb(r);
-    return json({ team: tid, month, members: names, days, finals });
+    return json(await teamLedgerData(env, tid, month));
   }
 
   return json({ error: "not_found" }, 404);
+}
+
+// Shared team reads — used by the HTTP admin routes above and the remote MCP tools below.
+async function teamOverviewData(env, tid, tz) {
+  const now = new Date();
+  const today = tzParts(tz, now).date;
+  const yesterday = tzParts(tz, new Date(now.getTime() - 86400_000)).date;
+  const [mRes, eRes, uRes] = await env.DB.batch([
+    env.DB.prepare("SELECT mid,name FROM members WHERE tid=?").bind(tid),
+    env.DB.prepare("SELECT mid,exp FROM escrow WHERE tid=? AND exp>?").bind(tid, Date.now()),
+    env.DB.prepare("SELECT * FROM usage_rows WHERE tid=? AND date IN (?,?)").bind(tid, today, yesterday),
+  ]);
+  const esc = {};
+  for (const r of eRes.results) esc[r.mid] = r.exp;
+  const byDate = { [today]: {}, [yesterday]: {} };
+  for (const r of uRes.results) {
+    const d = (byDate[r.date] = byDate[r.date] || {});
+    (d[r.mid] = d[r.mid] || {})[r.did] = rowFromDb(r);
+  }
+  const members = mRes.results.map((m) => {
+    const tdev = (byDate[today] && byDate[today][m.mid]) || {};
+    const ydev = (byDate[yesterday] && byDate[yesterday][m.mid]) || {};
+    const devices = Object.keys(tdev).filter((d) => d !== "account").map((d) => ({ did: d, ...tdev[d] }));
+    return {
+      mid: m.mid, name: m.name || m.mid.slice(0, 8),
+      account: pickAccountRow(tdev) || pickAccountRow(ydev),
+      account_is_today: !!pickAccountRow(tdev), devices,
+      escrow: m.mid in esc ? { present: true, exp: esc[m.mid] } : { present: false },
+    };
+  });
+  return { team: tid, tz, today, members };
+}
+
+async function teamLedgerData(env, tid, month) {
+  const [mRes, uRes, fRes] = await env.DB.batch([
+    env.DB.prepare("SELECT mid,name FROM members WHERE tid=?").bind(tid),
+    env.DB.prepare("SELECT * FROM usage_rows WHERE tid=? AND date LIKE ?").bind(tid, month + "-%"),
+    env.DB.prepare("SELECT * FROM finals WHERE tid=? AND month=?").bind(tid, month),
+  ]);
+  const names = {};
+  for (const m of mRes.results) names[m.mid] = m.name || m.mid.slice(0, 8);
+  const days = {};
+  for (const r of uRes.results) {
+    const d = (days[r.date] = days[r.date] || {});
+    (d[r.mid] = d[r.mid] || {})[r.did] = rowFromDb(r);
+  }
+  const finals = {};
+  for (const r of fRes.results) finals[r.mid] = rowFromDb(r);
+  return { team: tid, month, members: names, days, finals };
+}
+
+// ---- Remote MCP (docs/MCP-REMOTE.md) — team tools over Streamable HTTP (stateless JSON) --
+//
+// Serves the plaintext team data (D1) to claude.ai / mobile. The personal usage snapshot is
+// E2EE, so it stays on the local MCP server — never here. Interim auth: Bearer = the team
+// admin token (hashed, matched to a team). The claude.ai OAuth layer (DCR + PKCE) is added on
+// top next; it will mint tokens that resolve to a tid the same way.
+
+const MCP_TOOLS = [
+  {
+    name: "get_team_overview",
+    description: "Team admin: live per-member 5h/weekly load, month-to-date spend, and near-limit members.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "get_team_ledger",
+    description: "Team admin: per-member calendar-month extra-usage spend and tokens for a month.",
+    inputSchema: {
+      type: "object",
+      properties: { month: { type: "string", description: "Month as YYYY-MM (defaults to the current month)." } },
+      additionalProperties: false,
+    },
+  },
+];
+
+// Resolve the caller's Bearer to a team ({tid, tz}) via the admin-token hash, or null.
+async function mcpResolveTeam(request, env) {
+  const bearer = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "").trim();
+  if (!bearer) return null;
+  const hash = await sha256hex(bearer);
+  return (await env.DB.prepare("SELECT tid, tz FROM teams WHERE admin_hash=?").bind(hash).first()) || null;
+}
+
+async function handleMcp(request, env) {
+  if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+  const rpc = await readJson(request);
+  if (!rpc || rpc.jsonrpc !== "2.0" || typeof rpc.method !== "string") {
+    return json({ jsonrpc: "2.0", id: (rpc && rpc.id) || null, error: { code: -32600, message: "invalid request" } }, 400);
+  }
+  const reply = (result) => json({ jsonrpc: "2.0", id: rpc.id, result });
+  const rpcErr = (code, message) => json({ jsonrpc: "2.0", id: rpc.id ?? null, error: { code, message } });
+
+  if (rpc.method === "initialize") {
+    return reply({
+      protocolVersion: "2024-11-05",
+      capabilities: { tools: {} },
+      serverInfo: { name: "claude-usage-tracker-team", version: "0.1.0" },
+    });
+  }
+  if (rpc.method === "notifications/initialized") return new Response(null, { status: 202 });
+  if (rpc.method === "tools/list") return reply({ tools: MCP_TOOLS });
+
+  if (rpc.method === "tools/call") {
+    const team = await mcpResolveTeam(request, env);
+    if (!team) return rpcErr(-32001, "Unauthorized — present a team admin token as the Bearer.");
+    const name = rpc.params && rpc.params.name;
+    const args = (rpc.params && rpc.params.arguments) || {};
+    const asText = (obj) => reply({ content: [{ type: "text", text: JSON.stringify(obj, null, 2) }] });
+    try {
+      if (name === "get_team_overview") {
+        return asText(await teamOverviewData(env, team.tid, team.tz || DEFAULT_TEAM_TZ));
+      }
+      if (name === "get_team_ledger") {
+        const month = /^\d{4}-\d{2}$/.test(args.month || "") ? args.month : new Date().toISOString().slice(0, 7);
+        return asText(await teamLedgerData(env, team.tid, month));
+      }
+      return reply({ content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true });
+    } catch (e) {
+      return reply({ content: [{ type: "text", text: `Tool error: ${String((e && e.message) || e)}` }], isError: true });
+    }
+  }
+  return rpcErr(-32601, "method not found");
 }
 
 // usage_rows / finals row  ->  the client JSON shape the desktop parses (unchanged
