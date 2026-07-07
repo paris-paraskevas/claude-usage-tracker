@@ -21,7 +21,7 @@ preview_id = "c459a83c77494a6eb01c50d6f69f3a10"
 [[d1_databases]]
 binding = "DB"
 database_name = "claude-usage-team"
-database_id = "PLACEHOLDER_RUN_wrangler_d1_create"
+database_id = "ee600614-6646-4b2d-8637-9ecad2c087e3"
 
 # Push secrets (do NOT put these here — set them out of band):
 #   npx wrangler secret put FCM_PROJECT_ID
