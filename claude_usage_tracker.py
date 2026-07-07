@@ -2695,6 +2695,12 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
 
     <div id="tm-adminview" hidden>
+      <div class="card panel" style="margin-bottom:12px">
+        <div class="ptitle"><span>claude.ai connector</span></div>
+        <div class="setrow"><span class="setlbl">Admin token</span>
+          <button class="sbtn" id="tm-copytoken">Copy admin token</button>
+          <span class="csub" id="tm-copytoken-msg">paste it at the connector's consent screen in claude.ai</span></div>
+      </div>
       <div class="card panel">
         <div class="ptitle"><span>Members · live</span>
           <span class="srt"><span class="legend" id="tm-asof"></span><button class="sbtn" id="tm-reload">Refresh</button></span></div>
@@ -3384,6 +3390,13 @@ $("tm-add").onclick=async function(){
   else alert(r.error||"failed");
 };
 $("tm-reload").onclick=loadTeamOverview;
+$("tm-copytoken").onclick=async function(){
+  const msg=$("tm-copytoken-msg");
+  const r=await tmPost({action:"admin-token"});
+  if(!r.ok||!r.token){ msg.textContent="✗ "+(r.error||"couldn't get token"); return; }
+  try{ await navigator.clipboard.writeText(r.token); msg.textContent="copied ✓ — paste it at the claude.ai consent screen"; }
+  catch(e){ msg.style.userSelect="all"; msg.textContent=r.token; }
+};
 $("tm-prevm").onclick=function(){ TMMONTH=tmShiftMonth(TMMONTH||tmMonthNow(),-1); loadTeamLedger(); };
 $("tm-nextm").onclick=function(){ TMMONTH=tmShiftMonth(TMMONTH||tmMonthNow(),1); loadTeamLedger(); };
 $("tm-csv").onclick=tmCsv;
@@ -3780,6 +3793,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 st = _team_call("DELETE", ident, ident["admin_token"],
                                 f"/v1/team/{ident['team_id']}/member/{mid}")
                 res = {} if st == 204 else f"relay HTTP {st}"
+            elif action == "admin-token":
+                # The token for the claude.ai remote MCP connector consent. Only served over the
+                # loopback control plane (this POST is already origin/host-guarded), never relayed.
+                ident = load_team_identity()
+                if not ident or ident.get("role") != "admin":
+                    return {"ok": False, "error": "not a team admin"}
+                return {"ok": True, "token": ident.get("admin_token", "")}
             else:
                 return {"ok": False, "error": "unknown action"}
         except Exception as exc:
