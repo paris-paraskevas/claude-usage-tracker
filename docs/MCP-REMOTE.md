@@ -25,6 +25,14 @@ That's a real consequence of the zero-knowledge design, not a gap to fix.
 - **Identity → team:** each request must resolve to one `tid`. The OAuth subject maps to the
   admin of that team (the admin token's hash, or a dedicated MCP identity minted at connect).
 
+## Status
+- ✅ **Transport + tools (done, verified):** `POST /mcp` (stateless JSON-RPC) with
+  `get_team_overview` + `get_team_ledger` reading D1. Interim auth: Bearer = the team admin
+  token (hashed → tid). Verified via `wrangler dev` (initialize / tools-list / tools-call +
+  the unauthorized guard). Safe to deploy as-is (bearer-gated); claude.ai just can't use it
+  until the OAuth layer below exists.
+- ⏳ **OAuth layer (next):** the piece that lets claude.ai's connector actually authenticate.
+
 ## Auth (the hard part)
 claude.ai custom connectors authenticate via **OAuth**, and Anthropic's client uses **Dynamic
 Client Registration**. So the Worker must implement an OAuth provider:
@@ -36,6 +44,19 @@ Client Registration**. So the Worker must implement an OAuth provider:
 
 This is an **authentication boundary on your production relay** — it needs careful review, not a
 rushed pass. Scope it as its own change with its own verification.
+
+**Planned shape (hand-rolled, dependency-free to match the Worker):**
+- New D1 tables: `oauth_clients` (from DCR), `oauth_codes` (short-lived, single-use, PKCE
+  challenge), `oauth_tokens` (opaque bearer → tid + expiry).
+- `GET /.well-known/oauth-authorization-server` + `/.well-known/oauth-protected-resource`
+  metadata; `POST /oauth/register` (DCR); `GET/POST /oauth/authorize` (consent); `POST /oauth/token`.
+- **Consent = prove you're the team admin:** the authorize page asks the admin to paste their
+  **team admin token**; we match it to a `tid` and mint the code. That's the human-auth step
+  (we have no other way to tie a claude.ai user to a team).
+- `/mcp` accepts either an OAuth token (→ tid) or the admin token (interim); a 401 returns
+  `WWW-Authenticate: Bearer resource_metadata=...` so the client discovers the auth server.
+- Verifiable locally with a mock client (register → authorize → token → `/mcp`); the **real
+  claude.ai DCR + redirect handshake** is validated only after you deploy and add the connector.
 
 ## Setup once built (Team plan)
 Remote connectors on a Team plan are added by the **Owner**, org-wide:
