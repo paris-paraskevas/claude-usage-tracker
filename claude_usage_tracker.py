@@ -2498,6 +2498,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="csub" style="margin-bottom:14px">Sign in with your work email to join your team's shared account pool — see every pooled
         Claude account's 5-hour / weekly load and monthly extra-usage spend in one place. Only <b>usage numbers</b> are shared,
         never sessions, projects, or conversation content. Your team is your email <b>domain</b>.</div>
+      <label class="chk" style="display:block;margin-bottom:12px"><input type="checkbox" id="tm-consent"> I understand my Claude account email, extra-usage € and token counts are stored in a central EU database (not end-to-end encrypted) and are visible to teammates on my email domain.</label>
       <div class="setrow"><span class="setlbl">Email</span>
         <input type="email" id="tm-email" class="tminput" placeholder="you@yourcompany.com" spellcheck="false" autocomplete="email">
         <button class="sbtn" id="tm-sendcode">Send code</button></div>
@@ -3185,6 +3186,7 @@ async function renderTeamPage(){
   if(WHOAMI.signed_in){ loadTeamOverview(); loadTeamLedger(); }
 }
 $("tm-sendcode").onclick=async function(){
+  if(!$("tm-consent").checked){ $("tm-err").textContent="please accept the data notice first"; return; }
   const email=$("tm-email").value.trim(); if(!email){ $("tm-email").focus(); return; }
   this.disabled=true; const r=await tmPost({action:"login-start",email:email}); this.disabled=false;
   if(r.ok){ $("tm-codewrap").hidden=false; $("tm-err").textContent="code sent to "+email; $("tm-otp").focus(); }
