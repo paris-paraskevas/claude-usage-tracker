@@ -50,4 +50,14 @@ assertions, real OTP signup → JWT `app_metadata.team`, push/read, admin connec
 - Mark `docs/SUPABASE-MIGRATION.md` slices 1–6 done.
 
 ## Sequence
-1. Legal read + DPA (owner). 2. Consent gate (code). 3. Worker connector + phone-feature removal + repo-sync (code). 4. Supabase hardening + Pro (owner). 5. Screenshots + docs. 6. Bump `0.3.0`, tag, GitHub release, PyPI (`pipx`). Merge branch first.
+1. Legal read + DPA (owner). 2. Consent gate (code) ✅. 3. Worker connector + phone-feature removal + repo-sync (code). 4. Supabase hardening + Pro (owner). 5. Screenshots + docs (docs ✅; screenshots captured as proof-of-look, need a clean scrubbed capture). 6. Bump `0.3.0`, tag, GitHub release, PyPI (`pipx`). Merge branch first.
+
+## Worker connector — implementation spec (deploy session; needs Cloudflare auth + `SUPABASE_SECRET`)
+Migrate the relay's claude.ai connector from D1 to the Supabase pool. Keep D1/KV for phone sync + FCM. In `relay/src/index.js`:
+- Add `async function rpc(env, fn, body)` → `POST ${env.SUPABASE_URL}/rest/v1/rpc/${fn}` with headers `apikey: env.SUPABASE_SECRET` + `Authorization: Bearer ${env.SUPABASE_SECRET}`, JSON body; return `res.json()`.
+- `mcpResolveTeam` (617) + OAuth consent (1021–1088): validate the pasted **connector token** via `rpc(env,'resolve_connector_token',{p_hash: sha256hex(token)})` → **team (domain)**; store `team` in `oauth_codes`/`oauth_tokens` (repurpose the `tid` column to hold the domain).
+- `teamOverviewData(env, team, tz)` (362): swap the D1 `SELECT … usage_rows` for `rpc(env,'get_team_usage',{p_team:team, p_dates:[today,yesterday]})`; reshape via `rowFromDb` (device = `device` col) into the existing `{tz,today,accounts[]}` shape.
+- `teamLedgerData(env, team, month)` (394): swap for `rpc(env,'get_team_month',{p_team:team, p_month:month})` (rows `{kind:'usage'|'final', r}`); split into `days`/`finals`, reshape via `rowFromDb`.
+- `overviewMerge`/`ledgerComputed`/`memberMonthTokens` (451–513) + `handleMcp` (665/681): unchanged except pass `team` instead of `tid`.
+- `relay/wrangler.toml`: add `[vars] SUPABASE_URL = "https://sxciunvkygtehhztfjjo.supabase.co"`. Secret out-of-band: `cd relay && npx wrangler secret put SUPABASE_SECRET` (the `sb_secret_…` key — never in the repo), then `npx wrangler deploy`. Add a startup assertion `SUPABASE_SECRET !== publishable key`.
+- **Verify:** claude.ai connector consent with a freshly-minted token → `get_team_overview` returns the domain's pool; an expired/foreign token is rejected.
