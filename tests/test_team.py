@@ -105,12 +105,12 @@ def test_ledger_computed_no_prev_month():
     assert m.team_ledger_computed(led)["a"] == 4.0
 
 
-def test_member_month_tokens_sums_last_per_device():
+def test_member_month_tokens_latest_wins():
     led = {"days": {
         "2026-07-01": {"a": {"d1": _dev(ts=1, tok=100), "d2": _dev(ts=1, tok=10)}},
         "2026-07-03": {"a": {"d1": _dev(ts=2, tok=250), "account": _dev(ts=9, src="cron")}},
     }}
-    assert m.member_month_tokens(led, "a") == 260        # d1 last=250 + d2 last=10; account ignored
+    assert m.member_month_tokens(led, "a") == 250        # latest push (ts=2) wins; account row ignored
     assert m.member_month_tokens(led, "zz") == 0
 
 
