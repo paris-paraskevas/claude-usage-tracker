@@ -1709,128 +1709,6 @@ def _sha256_hex(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
-def load_team_identity():
-    """{role, url, team_id, admin_token?, member_id?, member_token?, name?} or None.
-    Read fresh each time (cheap, rare) so server-thread joins need no cache dance."""
-    data = load_json(TEAM_PATH, None)
-    if isinstance(data, dict) and data.get("team_id") and data.get("url"):
-        return data
-    return None
-
-
-def team_leave() -> None:
-    """Forget the local identity. A member's escrowed token is deleted best-effort
-    (it would expire on its own TTL within hours anyway)."""
-    ident = load_team_identity()
-    if ident and ident.get("member_id") and ident.get("member_token"):
-        _team_call("DELETE", ident, ident["member_token"],
-                   f"/v1/team/{ident['team_id']}/member/{ident['member_id']}/token")
-    try:
-        TEAM_PATH.unlink(missing_ok=True)
-    except Exception:
-        pass
-
-
-def _team_call(method: str, ident: dict, bearer: str, path: str, body=None, timeout: int = 8):
-    """Authenticated relay request for team routes. Returns HTTP status or None."""
-    url = (ident.get("url") or "").rstrip("/")
-    if not url or not bearer:
-        return None
-    data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(url + path, data=data, method=method)
-    req.add_header("Authorization", "Bearer " + bearer)
-    req.add_header("User-Agent", f"claude-usage-tracker/{__version__}")
-    if data is not None:
-        req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status
-    except urllib.error.HTTPError as e:
-        return e.code
-    except Exception as exc:
-        log(f"team: {method} {path} failed: {exc}")
-        return None
-
-
-def _team_get_json(ident: dict, bearer: str, path: str, timeout: int = 10):
-    """GET a team route. Returns (status, parsed_json_or_None)."""
-    url = (ident.get("url") or "").rstrip("/")
-    req = urllib.request.Request(url + path, method="GET")
-    req.add_header("Authorization", "Bearer " + bearer)
-    req.add_header("User-Agent", f"claude-usage-tracker/{__version__}")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, json.loads(r.read().decode("utf-8", errors="replace"))
-    except urllib.error.HTTPError as e:
-        return e.code, None
-    except Exception as exc:
-        log(f"team: GET {path} failed: {exc}")
-        return None, None
-
-
-def team_create(cfg: dict, name: str = ""):
-    """Admin: mint a team on the relay (TOFU pins our admin bearer), then enroll
-    ourselves as the first member so our own usage shows up too. Returns the
-    identity dict or an error string."""
-    import os as _os
-    if load_team_identity():
-        return "already in a team — leave it first"
-    url = (cfg.get("remote_relay_url") or "").rstrip("/")
-    if not url:
-        return "set a relay URL first (Settings → Remote)"
-    org = fetch_profile_org()
-    ident = {"v": 1, "role": "admin", "url": url, "org": org,
-             "team_id": _b64u(_os.urandom(16)), "admin_token": _b64u(_os.urandom(32))}
-    status = _team_call("POST", ident, ident["admin_token"], f"/v1/team/{ident['team_id']}/init",
-                        {"tz": cfg.get("team_tz") or "Europe/Athens", "org": org})
-    if status != 200:
-        return f"relay rejected team init (HTTP {status})" if status else "relay unreachable"
-    acct = read_account() or {}
-    my_name = name or acct.get("name") or acct.get("email") or "Admin"
-    code = team_add_member(ident, my_name)
-    if isinstance(code, str) and code.startswith("cutteam1:"):
-        me = team_parse_join(code)
-        ident.update({"member_id": me["m"], "member_token": me["k"], "name": me["n"]})
-    save_json(TEAM_PATH, ident)
-    return ident
-
-
-def team_add_member(ident: dict, name: str):
-    """Admin: pre-register a member (relay stores only the token HASH) and return the
-    one-time join code carrying the plaintext token. Lost codes: just re-add the member —
-    the hash is overwritten and the old code stops working."""
-    import os as _os
-    if not ident or ident.get("role") != "admin":
-        return "not a team admin"
-    mid, mtok = _b64u(_os.urandom(16)), _b64u(_os.urandom(32))
-    status = _team_call("PUT", ident, ident["admin_token"],
-                        f"/v1/team/{ident['team_id']}/member/{mid}",
-                        {"token_hash": _sha256_hex(mtok), "name": name})
-    if status != 204:
-        return f"relay rejected member add (HTTP {status})" if status else "relay unreachable"
-    payload = {"u": ident["url"], "t": ident["team_id"], "m": mid, "k": mtok,
-               "n": name, "o": ident.get("org")}
-    import base64
-    return "cutteam1:" + base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
-
-
-def team_parse_join(code: str):
-    """Decode a cutteam1: join code → {u,t,m,k,n} or None."""
-    import base64
-    try:
-        raw = code.strip()
-        if not raw.startswith("cutteam1:"):
-            return None
-        b = raw[len("cutteam1:"):]
-        b += "=" * (-len(b) % 4)
-        p = json.loads(base64.urlsafe_b64decode(b.encode()).decode("utf-8"))
-        if all(isinstance(p.get(k), str) and p.get(k) for k in ("u", "t", "m", "k")):
-            return p
-    except Exception:
-        pass
-    return None
-
-
 def device_month_tokens(cache, month: str) -> int:
     """This machine's Claude Code tokens for a calendar month, from the all-time
     cache's per-day buckets. Same headline metric as the All-time tab (in+out+cw;
@@ -1845,47 +1723,6 @@ def device_month_tokens(cache, month: str) -> int:
             except Exception:
                 pass
     return total
-
-
-def ensure_team_device(ident):
-    """Guarantee the identity carries a per-install device id + display name.
-    Minted once and persisted; a member's second machine (same join code) gets
-    its own did, so its rows never clobber the first machine's."""
-    if not ident:
-        return ident
-    if ident.get("did") and ident.get("device"):
-        return ident
-    import os as _os
-    ident = dict(ident)
-    ident.setdefault("did", _b64u(_os.urandom(8)))
-    if not ident.get("device"):
-        try:
-            ident["device"] = socket.gethostname()[:32] or "device"
-        except Exception:
-            ident["device"] = "device"
-    save_json(TEAM_PATH, ident)
-    return ident
-
-
-def team_join(code: str):
-    """Member: adopt a join code from the admin. Returns identity dict or error string."""
-    if load_team_identity():
-        return "already in a team — leave it first"
-    p = team_parse_join(code)
-    if not p:
-        return "that doesn't look like a team join code"
-    want = p.get("o")
-    if want:
-        mine = fetch_profile_org()
-        if mine and mine != want:
-            return "this join code is for a different Claude org"
-        if not mine:
-            log("team: could not verify org (offline?) — joining anyway")
-    ident = {"v": 1, "role": "member", "url": p["u"], "team_id": p["t"],
-             "member_id": p["m"], "member_token": p["k"], "name": p.get("n", ""),
-             "org": want}
-    save_json(TEAM_PATH, ident)
-    return ident
 
 
 def build_team_report(snap: dict, dev=None, account=None) -> dict:
@@ -2006,26 +1843,6 @@ def team_overview_merge(ov: dict, led, prev_led=None) -> dict:
     out["accounts"] = accounts
     out["kpis"] = {"org_spend": round(org_spend, 2), "account_count": len(accounts), "near": near}
     return out
-
-
-def team_admin_overview_merged(ident):
-    """Admin: fetch the relay overview + this/previous-month ledger and merge them
-    (spend/tokens/KPIs). Returns the merged dict or None. Shared by the dashboard proxy
-    and the phone-snapshot embed so both compute team numbers the same way."""
-    if not ident or ident.get("role") != "admin":
-        return None
-    st, data = _team_get_json(ident, ident["admin_token"], f"/v1/team/{ident['team_id']}/overview")
-    if st != 200 or not data:
-        return None
-    month = (data.get("today") or "")[:7]
-    lpath = f"/v1/team/{ident['team_id']}/ledger?month="
-    led = None
-    if month:
-        _, led = _team_get_json(ident, ident["admin_token"], lpath + month)
-    prev = None
-    if led and month:
-        _, prev = _team_get_json(ident, ident["admin_token"], lpath + _prev_month(month))
-    return team_overview_merge(data, led, prev) if led else data
 
 
 def supabase_team_overview():
