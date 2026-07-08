@@ -4580,11 +4580,11 @@ class TrayApp:
         except Exception as exc:
             log(f"visual update failed: {exc}")
 
-    def _refresh_team_overview(self, ident):
-        """Admin: fetch + compact the team overview for the phone-embedded snapshot.
+    def _refresh_team_overview(self):
+        """Admin: fetch + compact the pool overview for the phone-embedded snapshot.
         Runs off the poll thread; failures leave the last good value in place."""
         try:
-            merged = team_admin_overview_merged(ident)
+            merged = supabase_team_overview()
             if merged:
                 self._team_overview = team_overview_compact(merged)
         except Exception:
@@ -4714,17 +4714,17 @@ class TrayApp:
                                   "available": remote_available(),
                                   "paired": load_remote_identity(create=False) is not None,
                                   "last_sync_ok": self._remote.last_ok}
-                tid = load_team_identity()
-                snap["team"] = {"in_team": tid is not None,
-                                "role": (tid or {}).get("role"),
-                                "name": (tid or {}).get("name"),
-                                "team_id": (tid or {}).get("team_id"),
-                                "share_token": bool(self.cfg.get("team_share_token")),
-                                "report_seconds": int(self.cfg.get("team_report_seconds", 900)),
+                team_signed_in = supabase_pool.configured() and supabase_pool.has_session()
+                is_team_admin = supabase_pool.is_admin() if team_signed_in else False
+                snap["team"] = {"in_team": team_signed_in,
+                                "role": ("admin" if is_team_admin else "member") if team_signed_in else None,
+                                "email": supabase_pool.email() if team_signed_in else None,
+                                "team": supabase_pool.team() if team_signed_in else None,
+                                "report_seconds": int(self.cfg.get("team_report_seconds", 10)),
                                 "tz": self.cfg.get("team_tz", "Europe/Athens"),
                                 "last_ok": self._team.last_ok}
-                # Admin only: the compact team overview the phone renders (E2EE via the snapshot).
-                snap["team_overview"] = self._team_overview if (tid or {}).get("role") == "admin" else None
+                # Admin only: the compact pool overview the phone renders (E2EE via the snapshot).
+                snap["team_overview"] = self._team_overview if is_team_admin else None
                 self._verdict = (snap.get("verdict") or {}).get("text", "")
                 with STORE_LOCK:
                     STORE["snapshot"] = snap
@@ -4746,10 +4746,10 @@ class TrayApp:
                                          args=(self.cfg, self._sessions_cache, self._cwd), daemon=True).start()
                 # Admin + phone paired: refresh the compact team overview embedded for the phone.
                 # Off-thread + throttled so the relay round-trips never block the poll loop.
-                if (RemoteSync.enabled(self.cfg) and (tid or {}).get("role") == "admin"
+                if (RemoteSync.enabled(self.cfg) and is_team_admin
                         and now - last_team_ov >= team_ov_iv):
                     last_team_ov = now
-                    threading.Thread(target=self._refresh_team_overview, args=(tid,), daemon=True).start()
+                    threading.Thread(target=self._refresh_team_overview, daemon=True).start()
                 # Fold newly-written session bytes into lifetime totals. Runs after
                 # the live snapshot is published so the first (full-history) backfill
                 # never delays first paint; the result lands in the next snapshot.
