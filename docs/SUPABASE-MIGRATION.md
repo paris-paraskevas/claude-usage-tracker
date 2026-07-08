@@ -52,7 +52,7 @@ create table public.usage (
   extra_currency text, extra_pct real,
   tok_month bigint, src text, ts bigint,
   updated_at timestamptz not null default now(),
-  primary key (team, acct, device, date)
+  primary key (team, acct, date)   -- latest-wins-per-account; device demoted to an informational column
 );
 create index usage_team_date_idx on public.usage (team, date);
 create index usage_team_updated_idx on public.usage (team, updated_at desc);
@@ -395,7 +395,7 @@ sb.table("usage").upsert({
     "extra_used": (row["extra"] or {}).get("used"),  "extra_limit": (row["extra"] or {}).get("limit"),
     "extra_currency": (row["extra"] or {}).get("currency"), "extra_pct": (row["extra"] or {}).get("pct"),
     "tok_month": dev["tok_month"], "src": "push", "ts": row["ts"],
-}, on_conflict="team,acct,device,date", returning="minimal").execute()
+}, on_conflict="team,acct,date", returning="minimal").execute()
 ```
 Cadence unchanged: the `self._team.due(now, ≈10s)` gate (4764-4768) stays. Writes are unlimited on Free; table stays tiny (accounts × devices × retention).
 
@@ -511,7 +511,7 @@ end $$;
 3. **Isolation test harness (ship-gate).** Two users in domains A and B via the SDK; assert every cross-team read/write and `get_team_usage(p_team=other)` is denied/empty. *Verify:* all assertions pass.
 4. **Signup gate** (denylist + `app_metadata.team`/`role` stamping). *Verify:* gmail signup rejected; `@skg-t.com` → `jwt_team()`='skg-t.com', first user `is_admin`.
 5. **Desktop auth gate** (OTP→username→device claim) + keyring session. *Verify:* login, restart persists session, wrong-device self-logout fires.
-6. **Push path** (two upserts, `by_name` dropped from payload). *Verify:* row lands with `by_name`=pusher username, correct team; a second user cannot overwrite the first's `(acct,device,date)` row.
+6. **Push path** (two upserts, `by_name` dropped from payload). *Verify:* row lands with `by_name`=pusher username, correct team; latest-wins-per-account — a second user's push of the same `(acct,date)` overwrites the first's row (device demoted from the key, `usage_update` gated on team only).
 7. **Read path** (overview + ledger from Supabase, reuse merge fns; poll only when Team tab visible). *Verify:* dashboard renders the pool identically to today; egress meter sane.
 8. **pg_cron finals + retention prune** (probe the tz/month math first). *Verify:* `capture_finals()` on a forced last-day timestamp writes correct `finals`; prune deletes >90 d.
 9. **Worker connector** — consent validates connector token→team via `resolve_connector_token`; reads via `get_team_usage`/`get_team_month` (service_role; `oauth_*.tid→team`). *Verify:* connector shows only the bound team; an expired/foreign token is rejected.

@@ -9,7 +9,9 @@
 --     profiles policy -> no RLS recursion; DEFINER just tripped the exposed-DEFINER lint);
 --   * every function's EXECUTE is revoked from anon/authenticated EXPLICITLY (Supabase grants
 --     them independently of PUBLIC, so `revoke ... from public` alone is a no-op) — §5;
---   * capture_finals derives teams from `distinct usage.team` + takes an optional p_now (§7).
+--   * capture_finals derives teams from `distinct usage.team` + takes an optional p_now (§7);
+--   * usage is latest-wins-per-account: PK (team,acct,date), `device` demoted to an informational
+--     column, and usage_update gated on team only so any member's push overwrites the row.
 -- Verified: Security Advisor clean; authenticated cannot EXECUTE the connector RPCs or CREATE
 -- in public; real OTP signup stamps app_metadata.team/role into the JWT.
 
@@ -48,7 +50,9 @@ create table public.usage (
   extra_currency text, extra_pct real,
   tok_month bigint, src text, ts bigint,
   updated_at timestamptz not null default now(),
-  primary key (team, acct, device, date)
+  -- latest-wins-per-account: one authoritative row per (team,acct,date); `device` is kept as an
+  -- informational column (the last pusher's machine), not part of the key.
+  primary key (team, acct, date)
 );
 create index usage_team_date_idx on public.usage (team, date);
 create index usage_team_updated_idx on public.usage (team, updated_at desc);
@@ -145,7 +149,7 @@ create policy usage_select on public.usage for select to authenticated
 create policy usage_insert on public.usage for insert to authenticated
   with check ( team = (select public.jwt_team()) );
 create policy usage_update on public.usage for update to authenticated
-  using ( team = (select public.jwt_team()) and writer_uid = (select auth.uid()) )
+  using ( team = (select public.jwt_team()) )                 -- team-wide: any member may overwrite (latest-wins); force_usage_owner restamps writer_uid/by_name
   with check ( team = (select public.jwt_team()) );
 
 create or replace function public.force_usage_owner()

@@ -48,7 +48,7 @@ import supabase_pool  # Supabase account-pool client (stdlib + keyring). See doc
 APP_NAME = "Claude Usage Tracker"
 
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 
 def _data_dir() -> Path:
@@ -1674,17 +1674,20 @@ def _ledger_samples(led: dict, mid: str) -> list:
 
 
 def member_month_tokens(led: dict, mid: str) -> int:
-    """Tokens a member burnt this month across devices: per device take the LAST
-    cumulative tok_month value seen in the month, then sum devices. The cron's
-    `account` rows carry no tokens and are skipped."""
-    last = {}
-    for date in sorted((led.get("days") or {})):
+    """An account's tokens this month: the tok_month of its LATEST push in the month
+    (latest-wins-per-account -- tok_month is month-cumulative, so the freshest sample is
+    the total). The cron's `account` rows carry no tokens and are skipped."""
+    best_ts, best_tok = None, 0
+    for date in (led.get("days") or {}):
         for did, row in ((led["days"][date] or {}).get(mid) or {}).items():
             if did == "account" or not isinstance(row, dict):
                 continue
-            if isinstance(row.get("tok_month"), (int, float)):
-                last[did] = int(row["tok_month"])
-    return sum(last.values())
+            if not isinstance(row.get("tok_month"), (int, float)):
+                continue
+            ts = row.get("ts") or 0
+            if best_ts is None or ts > best_ts:
+                best_ts, best_tok = ts, int(row["tok_month"])
+    return best_tok
 
 
 def team_overview_merge(ov: dict, led, prev_led=None) -> dict:

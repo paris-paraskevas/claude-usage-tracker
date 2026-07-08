@@ -276,7 +276,7 @@ def push(row: dict, dev: dict, account: dict, local_date: str) -> bool:
     st1, _ = _http("POST", "/rest/v1/accounts?on_conflict=team,acct", token=tok,
                    prefer="resolution=merge-duplicates,return=minimal",
                    body={"acct": acct, "display_name": row.get("name"), "org": account.get("org")})
-    st2, _ = _http("POST", "/rest/v1/usage?on_conflict=team,acct,device,date", token=tok,
+    st2, _ = _http("POST", "/rest/v1/usage?on_conflict=team,acct,date", token=tok,
                    prefer="resolution=merge-duplicates,return=minimal",
                    body={
                        "acct": acct, "device": dev.get("did"), "date": local_date,

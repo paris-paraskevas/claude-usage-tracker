@@ -517,19 +517,23 @@ function monthSpend(samples, baseline) {
   return Math.round(spend * 100) / 100;
 }
 
-// Tokens a member burnt this month across devices: per device take the LAST cumulative
-// tok_month seen in the month, then sum devices. The cron's `account` rows carry none.
+// An account's tokens this month: the tok_month of its LATEST push in the month
+// (latest-wins-per-account -- tok_month is month-cumulative, so the freshest sample is the
+// total). The cron's `account` rows carry none. Mirrors member_month_tokens in Python.
 function memberMonthTokens(led, mid) {
-  const last = {}, days = led.days || {};
-  for (const date of Object.keys(days).sort()) {
+  const days = led.days || {};
+  let bestTs = null, bestTok = 0;
+  for (const date of Object.keys(days)) {
     const devmap = (days[date] || {})[mid] || {};
     for (const did of Object.keys(devmap)) {
       if (did === "account") continue;
       const row = devmap[did];
-      if (row && typeof row.tok_month === "number" && isFinite(row.tok_month)) last[did] = Math.floor(row.tok_month);
+      if (!row || typeof row.tok_month !== "number" || !isFinite(row.tok_month)) continue;
+      const ts = row.ts || 0;
+      if (bestTs === null || ts > bestTs) { bestTs = ts; bestTok = Math.floor(row.tok_month); }
     }
   }
-  return Object.values(last).reduce((a, b) => a + b, 0);
+  return bestTok;
 }
 
 // The value to diff the month's first sample against: the previous month's frozen final
