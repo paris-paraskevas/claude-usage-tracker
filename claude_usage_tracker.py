@@ -3761,53 +3761,59 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(404, "text/plain", b"not found")
 
     def _team_action(self) -> dict:
-        """POST /api/team {action, ...} — create/join/leave and member management,
-        proxied to the relay with the locally-stored team identity."""
+        """POST /api/team {action, ...} -- Supabase account-pool session control: login (email
+        OTP), logout, set-username, and the admin connector-token mint. Runs only on this
+        loopback control plane (already origin/host-guarded); the user JWT never enters the DOM."""
         body = self._read_json() or {}
         action = body.get("action", "")
         try:
-            if action == "create":
-                res = team_create(load_config(), (body.get("name") or "").strip())
-            elif action == "join":
-                res = team_join(body.get("code") or "")
-            elif action == "leave":
-                team_leave()
-                res = {}
-            elif action == "member-add":
-                name = (body.get("name") or "").strip()
-                if not name:
-                    return {"ok": False, "error": "member name required"}
-                res = team_add_member(load_team_identity(), name)
-                if isinstance(res, str) and res.startswith("cutteam1:"):
-                    return {"ok": True, "code": res}
-            elif action == "member-remove":
-                ident = load_team_identity()
-                mid = body.get("mid") or ""
-                if not ident or ident.get("role") != "admin" or not mid:
-                    return {"ok": False, "error": "not a team admin"}
-                st = _team_call("DELETE", ident, ident["admin_token"],
-                                f"/v1/team/{ident['team_id']}/member/{mid}")
-                res = {} if st == 204 else f"relay HTTP {st}"
-            elif action == "admin-token":
-                # The token for the claude.ai remote MCP connector consent. Only served over the
-                # loopback control plane (this POST is already origin/host-guarded), never relayed.
-                ident = load_team_identity()
-                if not ident or ident.get("role") != "admin":
-                    return {"ok": False, "error": "not a team admin"}
-                return {"ok": True, "token": ident.get("admin_token", "")}
+            if action == "login-start":
+                email = (body.get("email") or "").strip().lower()
+                if not email:
+                    return {"ok": False, "error": "email required"}
+                ok, resp = supabase_pool.sign_in_start(email)
+                return {"ok": True} if ok else {"ok": False, "error": f"could not send code: {resp}"}
+            elif action == "login-verify":
+                email = (body.get("email") or "").strip().lower()
+                code = (body.get("code") or "").strip()
+                username = (body.get("username") or "").strip()
+                if not (email and code):
+                    return {"ok": False, "error": "email and code required"}
+                ok, _res = supabase_pool.sign_in_verify_code(email, code)
+                if not ok:
+                    return {"ok": False, "error": "invalid or expired code"}
+                if username:
+                    supabase_pool.set_username(username)
+                self._team_changed()
+                return {"ok": True, "team": supabase_pool.team(), "is_admin": supabase_pool.is_admin()}
+            elif action == "set-username":
+                username = (body.get("username") or "").strip()
+                if not username:
+                    return {"ok": False, "error": "username required"}
+                return ({"ok": True} if supabase_pool.set_username(username)
+                        else {"ok": False, "error": "not signed in"})
+            elif action == "logout":
+                supabase_pool.sign_out()
+                self._team_changed()
+                return {"ok": True}
+            elif action == "connector-token":
+                if not supabase_pool.is_admin():
+                    return {"ok": False, "error": "admin only"}
+                tok, err = supabase_pool.mint_connector_token(int(body.get("days") or 30))
+                return {"ok": True, "token": tok} if tok else {"ok": False, "error": err or "mint failed"}
             else:
                 return {"ok": False, "error": "unknown action"}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
-        if isinstance(res, str):
-            return {"ok": False, "error": res}
+
+    def _team_changed(self) -> None:
+        """Nudge the poll loop after a team-session change (login/logout) so it re-reads state."""
         fn = CONTROL.get("team_changed")
-        if fn and action in ("create", "join"):
+        if fn:
             try:
                 fn()
             except Exception:
                 pass
-        return {"ok": True}
 
 
 def start_server(port: int) -> tuple[ThreadingHTTPServer | None, int]:
