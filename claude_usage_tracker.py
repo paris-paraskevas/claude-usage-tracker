@@ -2028,6 +2028,23 @@ def team_admin_overview_merged(ident):
     return team_overview_merge(data, led, prev) if led else data
 
 
+def supabase_team_overview():
+    """Build the merged pool overview from Supabase (read_overview + this/prev-month ledger),
+    reusing the existing merge fns. RLS scopes every read to the caller's team, so any signed-in
+    member sees their team's pool (no admin gate). Returns the merged dict or None."""
+    if not supabase_pool.signed_in():
+        return None
+    tz = load_config().get("team_tz", "Europe/Athens")
+    today = _now_local()
+    tstr = today.strftime("%Y-%m-%d")
+    ystr = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+    ov = supabase_pool.read_overview(tz, tstr, ystr)
+    month = tstr[:7]
+    led = supabase_pool.read_ledger(month)
+    prev = supabase_pool.read_ledger(_prev_month(month))
+    return team_overview_merge(ov, led, prev)
+
+
 def team_overview_compact(merged):
     """Strip a merged pool overview to the small projection the phone renders — org totals +
     per-account name / window percents / month €. Keeps the E2EE snapshot small. Output keeps the
@@ -3634,33 +3651,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
             else:
                 self._send(404, "text/plain", b"pairing unavailable")
         elif path == "/api/team/overview":
-            ident = load_team_identity()
-            if not ident or ident.get("role") != "admin":
-                self._send(200, "application/json", b'{"error":"not_admin"}')
+            if not supabase_pool.signed_in():
+                self._send(200, "application/json", b'{"error":"not_signed_in"}')
             else:
-                merged = team_admin_overview_merged(ident)
-                out = merged if merged else {"error": "relay unreachable"}
+                merged = supabase_team_overview()
+                out = merged if merged else {"error": "supabase unreachable"}
                 self._send(200, "application/json", json.dumps(out).encode("utf-8"))
         elif path == "/api/team/ledger":
             from urllib.parse import parse_qs, urlsplit
             month = (parse_qs(urlsplit(self.path).query).get("month") or [""])[0]
-            ident = load_team_identity()
-            if not ident or ident.get("role") != "admin":
-                self._send(200, "application/json", b'{"error":"not_admin"}')
+            if not supabase_pool.signed_in():
+                self._send(200, "application/json", b'{"error":"not_signed_in"}')
             elif not (len(month) == 7 and month[:4].isdigit() and month[4] == "-" and month[5:].isdigit()):
                 self._send(200, "application/json", b'{"error":"bad_month"}')
             else:
-                tid_path = f"/v1/team/{ident['team_id']}/ledger?month="
-                st, led = _team_get_json(ident, ident["admin_token"], tid_path + month)
-                if st == 200 and led:
-                    _, prev = _team_get_json(ident, ident["admin_token"], tid_path + _prev_month(month))
-                    led["computed_spend"] = team_ledger_computed(led, prev)
-                    led["month_tokens"] = {acct: member_month_tokens(led, acct)
-                                           for acct in (led.get("accounts") or {})}
-                    out = led
-                else:
-                    out = {"error": f"relay HTTP {st}" if st else "relay unreachable"}
-                self._send(200, "application/json", json.dumps(out).encode("utf-8"))
+                led = supabase_pool.read_ledger(month)
+                led["computed_spend"] = team_ledger_computed(led, supabase_pool.read_ledger(_prev_month(month)))
+                led["month_tokens"] = {acct: member_month_tokens(led, acct)
+                                       for acct in (led.get("accounts") or {})}
+                self._send(200, "application/json", json.dumps(led).encode("utf-8"))
         elif path == "/favicon.ico":
             self._send(204, "image/x-icon", b"")
         else:
