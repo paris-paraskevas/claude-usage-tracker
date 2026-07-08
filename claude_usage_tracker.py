@@ -2676,52 +2676,45 @@ DASHBOARD_HTML = r"""<!doctype html>
   </div>
 
   <div id="tab-team" class="tabpane" hidden>
-    <div class="card panel" id="tm-none">
-      <div class="ptitle">Team · Claude Team plan aggregator</div>
-      <div class="csub" style="margin-bottom:14px">See every member's 5-hour / weekly load and extra-usage spend in one place,
-        with a monthly € ledger captured at <b>23:59 on the last day of the month</b>. Members share <b>usage numbers only</b> —
-        never sessions, projects, or conversation content. Uses the relay from Settings → Remote. Details: <code>docs/TEAM.md</code>.</div>
-      <div class="setrow"><span class="setlbl">Admin</span>
-        <button class="sbtn" id="tm-create">Create team</button>
-        <span class="csub">creates the team on your relay and enrolls you as its first member</span></div>
-      <div class="setrow" style="margin-top:10px"><span class="setlbl">Member</span>
-        <input type="text" id="tm-code" class="tminput" placeholder="cutteam1:… (paste the join code your admin sent you)" spellcheck="false">
-        <button class="sbtn" id="tm-join">Join</button></div>
+    <div class="card panel" id="tm-login">
+      <div class="ptitle">Team · Claude account pool</div>
+      <div class="csub" style="margin-bottom:14px">Sign in with your work email to join your team's shared account pool — see every pooled
+        Claude account's 5-hour / weekly load and monthly extra-usage spend in one place. Only <b>usage numbers</b> are shared,
+        never sessions, projects, or conversation content. Your team is your email <b>domain</b>.</div>
+      <div class="setrow"><span class="setlbl">Email</span>
+        <input type="email" id="tm-email" class="tminput" placeholder="you@yourcompany.com" spellcheck="false" autocomplete="email">
+        <button class="sbtn" id="tm-sendcode">Send code</button></div>
+      <div id="tm-codewrap" hidden>
+        <div class="setrow" style="margin-top:10px"><span class="setlbl">Code</span>
+          <input type="text" id="tm-otp" class="tminput" placeholder="digit code from your email" spellcheck="false" inputmode="numeric" autocomplete="one-time-code"></div>
+        <div class="setrow" style="margin-top:10px"><span class="setlbl">Username</span>
+          <input type="text" id="tm-username" class="tminput" placeholder="how teammates see you" spellcheck="false">
+          <button class="sbtn" id="tm-signin">Sign in</button></div>
+      </div>
       <div class="csub" id="tm-err" style="margin-top:10px"></div>
     </div>
 
     <div class="card panel" id="tm-me" hidden>
-      <div class="ptitle"><span>My membership</span><span class="legend" id="tm-mstate"></span></div>
+      <div class="ptitle"><span>Signed in</span><span class="legend" id="tm-mstate"></span></div>
       <div class="csub" id="tm-minfo"></div>
-      <div class="setrow" style="margin-top:12px"><span class="setlbl">23:59 ledger</span>
-        <label class="chk"><input type="checkbox" id="tm-share"> let the relay read my usage at day's end — shares my <b>short-lived</b>
-          login token (hours; never the refresh token) so the ledger stays exact while this PC is off</label></div>
-      <div class="setacts" style="margin-top:12px"><button class="sbtn" id="tm-leave">Leave team</button></div>
+      <div class="setacts" style="margin-top:12px"><button class="sbtn" id="tm-logout">Sign out</button></div>
     </div>
 
     <div id="tm-adminview" hidden>
-      <div class="card panel" style="margin-bottom:12px">
+      <div class="card panel" id="tm-connector" hidden style="margin-bottom:12px">
         <div class="ptitle"><span>claude.ai connector</span></div>
-        <div class="setrow"><span class="setlbl">Admin token</span>
-          <button class="sbtn" id="tm-copytoken">Copy admin token</button>
-          <span class="csub" id="tm-copytoken-msg">paste it at the connector's consent screen in claude.ai</span></div>
+        <div class="setrow"><span class="setlbl">Connector token</span>
+          <button class="sbtn" id="tm-minttoken">Mint connector token</button>
+          <span class="csub" id="tm-copytoken-msg">admin only — mints a fresh token to paste at the claude.ai connector consent screen</span></div>
       </div>
       <div class="card panel">
-        <div class="ptitle"><span>Members · live</span>
+        <div class="ptitle"><span>Accounts · live</span>
           <span class="srt"><span class="legend" id="tm-asof"></span><button class="sbtn" id="tm-reload">Refresh</button></span></div>
         <div class="tmkpis">
           <div class="tmkpi"><span class="lbl csub">org spend this month</span><b id="tm-kpi-spend">—</b><div class="csub" id="tm-kpi-spend-sub"></div></div>
           <div class="tmkpi" id="tm-kpi-near-card"><span class="lbl csub">near limits now</span><b id="tm-kpi-near">—</b><div class="csub" id="tm-kpi-near-sub"></div></div>
         </div>
         <div id="tm-members"><div class="csub">loading…</div></div>
-        <div class="setrow" style="margin-top:14px"><span class="setlbl">Add member</span>
-          <input type="text" id="tm-newname" class="tminput" placeholder="member name" spellcheck="false">
-          <button class="sbtn" id="tm-add">Add</button></div>
-        <div id="tm-codebox" hidden>
-          <div class="csub" style="margin-top:10px">Send this join code privately — it contains the member's token. Paste it in their
-            tracker under Team → Join. Re-adding the same name mints a fresh code and voids this one.</div>
-          <div class="tmcode" id="tm-codeval"></div>
-        </div>
       </div>
       <div class="card panel">
         <div class="ptitle"><span>Monthly ledger · extra usage €</span>
@@ -3247,20 +3240,19 @@ $("rm-transcript").onchange=function(){ postCfg({remote_transcript:this.checked}
 $("rm-accept").onchange=function(){ postCfg({remote_accept_prompts:this.checked}); };
 
 /* ---- team tab ---- */
-let TMMONTH=null, TMLED=null, TMOV=null;
+let TMMONTH=null, TMLED=null, TMOV=null, WHOAMI=null;
 function tmMoney(v,cur){ return v==null?"—":((cur?cur+" ":"")+Number(v).toFixed(2)); }
 function tmMonthNow(){ const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0"); }
 function tmShiftMonth(m,dir){ let y=+m.slice(0,4),mo=+m.slice(5,7)+dir; if(mo<1){mo=12;y--;} if(mo>12){mo=1;y++;} return y+"-"+String(mo).padStart(2,"0"); }
-function renderTeamState(d){
-  const t=(d||{}).team||{};
-  $("tm-none").hidden=!!t.in_team;
-  $("tm-me").hidden=!t.in_team;
-  $("tm-adminview").hidden=!(t.in_team&&t.role==="admin");
-  if(!t.in_team)return;
-  $("tm-mstate").textContent=(t.role||"member")+(t.last_ok===true?" · reporting":(t.last_ok===false?" · push failed":""));
-  $("tm-minfo").innerHTML="Reporting as <b>"+esc(t.name||"me")+"</b> every "+Math.round((t.report_seconds||900)/60)+
-    " min · team clock "+esc(t.tz||"");
-  const sh=$("tm-share"); if(document.activeElement!==sh) sh.checked=!!t.share_token;
+function renderTeamState(){
+  const w=WHOAMI||{};
+  $("tm-login").hidden=!!w.signed_in;
+  $("tm-me").hidden=!w.signed_in;
+  $("tm-adminview").hidden=!w.signed_in;
+  $("tm-connector").hidden=!w.is_admin;
+  if(!w.signed_in)return;
+  $("tm-mstate").textContent=w.is_admin?"admin":"member";
+  $("tm-minfo").innerHTML="Signed in as <b>"+esc(w.email||"")+"</b> · team <b>"+esc(w.team||"")+"</b>";
 }
 function tmTok(n){ if(n==null)return "—"; if(n>=1e9)return (n/1e9).toFixed(1)+"B"; if(n>=1e6)return (n/1e6).toFixed(1)+"M"; if(n>=1e3)return (n/1e3).toFixed(1)+"k"; return String(n); }
 function tmWin(label,p,reset){
@@ -3369,45 +3361,41 @@ async function tmPost(body){
 // Pool accounts are read-only cards (they auto-discover as teammates log in); there is no
 // per-card remove. Reporter enrolment stays in "add member" (join codes); the relay's
 // /member DELETE endpoint remains for revoking a reporter out-of-band.
-function renderTeamPage(){
-  renderTeamState(LASTD||{});
-  const t=((LASTD||{}).team)||{};
-  if(t.in_team&&t.role==="admin"){ loadTeamOverview(); loadTeamLedger(); }
+async function renderTeamPage(){
+  try{ WHOAMI=await (await fetch("/api/team/whoami",{cache:"no-store"})).json(); }
+  catch(e){ WHOAMI={signed_in:false}; }
+  renderTeamState();
+  if(WHOAMI.signed_in){ loadTeamOverview(); loadTeamLedger(); }
 }
-$("tm-create").onclick=async function(){
-  this.disabled=true; const r=await tmPost({action:"create"}); this.disabled=false;
-  $("tm-err").textContent=r.ok?"":("✗ "+(r.error||"failed"));
-  if(r.ok){ setTimeout(refresh,400); setTimeout(renderTeamPage,900); }
+$("tm-sendcode").onclick=async function(){
+  const email=$("tm-email").value.trim(); if(!email){ $("tm-email").focus(); return; }
+  this.disabled=true; const r=await tmPost({action:"login-start",email:email}); this.disabled=false;
+  if(r.ok){ $("tm-codewrap").hidden=false; $("tm-err").textContent="code sent to "+email; $("tm-otp").focus(); }
+  else $("tm-err").textContent="x "+(r.error||"could not send code");
 };
-$("tm-join").onclick=async function(){
-  const code=$("tm-code").value.trim(); if(!code){ $("tm-code").focus(); return; }
-  this.disabled=true; const r=await tmPost({action:"join",code:code}); this.disabled=false;
-  $("tm-err").textContent=r.ok?"":("✗ "+(r.error||"failed"));
-  if(r.ok){ $("tm-code").value=""; setTimeout(refresh,400); }
+$("tm-signin").onclick=async function(){
+  const email=$("tm-email").value.trim(), code=$("tm-otp").value.trim(), username=$("tm-username").value.trim();
+  if(!code){ $("tm-otp").focus(); return; }
+  this.disabled=true; const r=await tmPost({action:"login-verify",email:email,code:code,username:username}); this.disabled=false;
+  if(r.ok){ $("tm-err").textContent=""; $("tm-otp").value=""; renderTeamPage(); setTimeout(refresh,400); }
+  else $("tm-err").textContent="x "+(r.error||"invalid code");
 };
-$("tm-leave").onclick=async function(){
-  if(!confirm("Leave the team? An admin can re-invite you with a fresh code."))return;
-  await tmPost({action:"leave"}); setTimeout(refresh,400);
-};
-$("tm-add").onclick=async function(){
-  const name=$("tm-newname").value.trim(); if(!name){ $("tm-newname").focus(); return; }
-  this.disabled=true; const r=await tmPost({action:"member-add",name:name}); this.disabled=false;
-  if(r.ok&&r.code){ $("tm-codebox").hidden=false; $("tm-codeval").textContent=r.code; $("tm-newname").value=""; loadTeamOverview(); }
-  else alert(r.error||"failed");
+$("tm-logout").onclick=async function(){
+  if(!confirm("Sign out of the account pool on this device?"))return;
+  await tmPost({action:"logout"}); renderTeamPage(); setTimeout(refresh,400);
 };
 $("tm-reload").onclick=loadTeamOverview;
-$("tm-copytoken").onclick=async function(){
+$("tm-minttoken").onclick=async function(){
   const msg=$("tm-copytoken-msg");
-  const r=await tmPost({action:"admin-token"});
-  if(!r.ok||!r.token){ msg.textContent="✗ "+(r.error||"couldn't get token"); return; }
-  try{ await navigator.clipboard.writeText(r.token); msg.textContent="copied ✓ — paste it at the claude.ai consent screen"; }
+  const r=await tmPost({action:"connector-token"});
+  if(!r.ok||!r.token){ msg.textContent="x "+(r.error||"mint failed"); return; }
+  try{ await navigator.clipboard.writeText(r.token); msg.textContent="copied - paste it at the claude.ai consent screen (shown once)"; }
   catch(e){ msg.style.userSelect="all"; msg.textContent=r.token; }
 };
 $("tm-prevm").onclick=function(){ TMMONTH=tmShiftMonth(TMMONTH||tmMonthNow(),-1); loadTeamLedger(); };
 $("tm-nextm").onclick=function(){ TMMONTH=tmShiftMonth(TMMONTH||tmMonthNow(),1); loadTeamLedger(); };
 $("tm-csv").onclick=tmCsv;
-$("tm-share").onchange=function(){ postCfg({team_share_token:this.checked}); };
-setInterval(function(){ if(!$("tab-team").hidden&&(((LASTD||{}).team)||{}).role==="admin")loadTeamOverview(); },10000);
+setInterval(function(){ if(!$("tab-team").hidden&&WHOAMI&&WHOAMI.signed_in)loadTeamOverview(); },10000);
 </script>
 </body>
 </html>"""
@@ -3650,6 +3638,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send(200, "image/png", png)
             else:
                 self._send(404, "text/plain", b"pairing unavailable")
+        elif path == "/api/team/whoami":
+            self._send(200, "application/json", json.dumps({
+                "signed_in": supabase_pool.signed_in(), "email": supabase_pool.email(),
+                "team": supabase_pool.team(), "is_admin": supabase_pool.is_admin()}).encode("utf-8"))
         elif path == "/api/team/overview":
             if not supabase_pool.signed_in():
                 self._send(200, "application/json", b'{"error":"not_signed_in"}')
