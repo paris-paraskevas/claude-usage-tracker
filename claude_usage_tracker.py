@@ -39,6 +39,8 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import supabase_pool  # Supabase account-pool client (stdlib + keyring). See docs/SUPABASE-MIGRATION.md.
+
 # ---------------------------------------------------------------------------
 # Paths & constants
 # ---------------------------------------------------------------------------
@@ -2070,22 +2072,20 @@ def team_ledger_computed(led: dict, prev_led=None) -> dict:
 
 
 class TeamSync:
-    """Owns the opt-in team-mode side effects for the poll loop: the throttled report
-    push and the access-token escrow (pushed only when the token actually rotates).
-    Mirrors RemoteSync's shape so the loop treats them alike."""
+    """Opt-in account-pool push for the poll loop: a throttled ~10s upsert of the current
+    Claude account's usage row to Supabase, as the signed-in user (RLS-scoped). Enabled ==
+    a valid Supabase session exists. Token escrow is gone (the Supabase model stores no
+    Claude tokens); month-end finals are captured by pg_cron. See docs/SUPABASE-MIGRATION.md."""
 
     def __init__(self):
         self._last_report = 0.0
-        self._last_tok_hash = None      # last escrowed token, to push only on rotation
-        self._escrow_unsupported = False  # relay said 503 (no TEAM_SEAL_KEY) — log once, stop trying
-        self._acct_email = None         # currently-logged-in account; a change = login switch
+        self._acct_email = None         # currently-pooled Claude account; a change = login switch
         self._acct_org = None           # its org uuid (cached; re-fetched only on switch)
         self.last_ok: bool | None = None
 
     @staticmethod
     def enabled(cfg: dict) -> bool:
-        ident = load_team_identity()
-        return bool(ident and ident.get("member_id") and ident.get("member_token"))
+        return supabase_pool.configured() and supabase_pool.has_session()
 
     def due(self, now: float, interval: float) -> bool:
         if now - self._last_report >= interval:
@@ -2098,64 +2098,31 @@ class TeamSync:
 
     def sync(self, snap: dict, cfg: dict, alltime_cache=None) -> None:
         try:
-            ident = load_team_identity()
-            if not ident or not ident.get("member_id"):
+            if not supabase_pool.signed_in():
                 return
-            ident = ensure_team_device(ident)
             acct = read_account() or {}
             email = (acct.get("email") or "").strip().lower()
             if not email:
-                return  # no Claude account logged in — nothing to pool
+                return  # no Claude account logged in -- nothing to pool
             if email != self._acct_email:
-                # Login switched to a different pooled account: refresh its org uuid (for the
-                # relay's org gate), push it promptly, and re-escrow the new account's token.
+                # Login switched to a different pooled account: refresh its org uuid, push promptly.
                 self._acct_email = email
                 self._acct_org = fetch_profile_org()
                 self.reset_throttle()
-                self._last_tok_hash = None
+            try:
+                host = socket.gethostname()[:32] or "device"
+            except Exception:
+                host = "device"
             month = _now_local().strftime("%Y-%m")
-            dev = {"did": ident.get("did"), "device": ident.get("device"),
+            dev = {"did": supabase_pool.device_id(), "device": host,
                    "tok_month": device_month_tokens(alltime_cache, month)}
             account = {"acct": email, "name": acct.get("name"), "org": self._acct_org}
-            base = f"/v1/team/{ident['team_id']}/member/{ident['member_id']}"
             row = build_team_report(snap, dev, account)
-            status = _team_call("PUT", ident, ident["member_token"], base + "/report", row)
-            self.last_ok = status == 204
-            if status in (403, 404):
-                log(f"team: report rejected (HTTP {status}) — removed from the team? (Settings → Team)")
-                return
-            self._escrow(ident, base, cfg, email)
+            self.last_ok = supabase_pool.push(row, dev, account,
+                                              _now_local().strftime("%Y-%m-%d"))
         except Exception:
             self.last_ok = False
             log("team: sync error:\n" + traceback.format_exc())
-
-    def _escrow(self, ident: dict, base: str, cfg: dict, acct: str) -> None:
-        """Keep the relay's sealed copy of the CURRENT account's access token fresh
-        (rotation-driven, ~2 writes/day). Escrow is per pooled account so the cron can
-        refresh each one when nobody's logged in. Never touches the refresh token."""
-        if not cfg.get("team_share_token"):
-            if self._last_tok_hash:      # user turned escrow off: withdraw this account's token
-                from urllib.parse import quote
-                _team_call("DELETE", ident, ident["member_token"],
-                           base + "/token?acct=" + quote(acct))
-                self._last_tok_hash = None
-            return
-        if self._escrow_unsupported:
-            return
-        oauth = read_oauth()
-        tok, exp = oauth.get("accessToken"), oauth.get("expiresAt")
-        if not tok or not isinstance(exp, (int, float)) or exp / 1000.0 <= time.time() + 60:
-            return
-        h = _sha256_hex(tok)
-        if h == self._last_tok_hash:
-            return
-        status = _team_call("PUT", ident, ident["member_token"], base + "/token",
-                            {"access_token": tok, "expires_at": int(exp), "acct": acct})
-        if status == 204:
-            self._last_tok_hash = h
-        elif status == 503:
-            self._escrow_unsupported = True
-            log("team: relay has no TEAM_SEAL_KEY — escrow off, ledger uses last push of the day")
 
 
 class RemoteSync:

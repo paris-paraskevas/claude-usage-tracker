@@ -187,6 +187,12 @@ def signed_in() -> bool:
     return access_token() is not None
 
 
+def has_session() -> bool:
+    """Local-only: a stored session exists (may be expired). Cheap, no network -- for the
+    frequent 'team enabled?' poll check. sync() then calls access_token(), which refreshes/clears."""
+    return _load_session() is not None
+
+
 def claims() -> dict | None:
     tok = access_token()
     return _decode_jwt(tok) if tok else None
