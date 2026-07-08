@@ -289,10 +289,6 @@ def test_remote_sync_throttle_and_inflight():
     assert rs.due(170.0, 60) is True       # +70s from the armed window → due again
     rs.reset_throttle()
     assert rs.due(171.0, 60) is True       # manual "sync now" forces the next window
-    # in-flight guard: while the lock is held, handle_command returns at once (no work, no raise)
-    assert rs._cmd_lock.acquire(blocking=False) is True
-    rs.handle_command({}, {}, None)
-    rs._cmd_lock.release()
     assert m.RemoteSync.enabled({}) is False   # not enabled without config/pynacl
 
 

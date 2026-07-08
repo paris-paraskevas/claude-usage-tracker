@@ -134,7 +134,6 @@ DEFAULT_CONFIG = {
                                                 # (the loop tick). Raise it to spare phone battery/network.
     "notify_session_waiting": False,            # opt-in: toast/push when a Claude Code session finishes a turn awaiting you
     "remote_transcript": False,                 # opt-in: mirror the active conversation's text to your phone (E2EE)
-    "remote_accept_prompts": False,             # opt-in (ARMED): run prompts sent from the phone, restricted (plan + read-only tools)
     "team_report_seconds": 10,                  # how often a team member pushes its usage row to D1 (docs/TEAM.md);
                                                 # bounded below by ui_refresh_seconds (the loop tick)
     "team_share_token": True,                   # escrow the short-lived OAuth access token so the relay's
@@ -148,7 +147,7 @@ CONFIG_ALLOW = {
     "widget_width", "widget_height", "bar_width", "bar_height",
     "open_as_window", "predictive_alerts", "update_check", "danger_alerts",
     "status_check", "status_components", "remote_enabled", "remote_relay_url",
-    "notify_session_waiting", "remote_transcript", "remote_accept_prompts",
+    "notify_session_waiting", "remote_transcript",
     "team_report_seconds", "team_share_token", "team_tz",
 }
 
@@ -1961,13 +1960,11 @@ class TeamSync:
 
 class RemoteSync:
     """Owns the opt-in phone-relay side effects and their shared state, so the poll loop
-    doesn't have to: throttled snapshot sync, the armed prompt runner (with an in-flight guard
-    so a slow `claude -p` can't overlap the next tick), and push. Pulled out of TrayApp so the
-    throttle/in-flight decisions are unit-testable in isolation."""
+    doesn't have to: throttled snapshot sync (plus the optional E2EE conversation mirror) and
+    push. Pulled out of TrayApp so the throttle decisions are unit-testable in isolation."""
 
     def __init__(self):
         self._last_sync = 0.0
-        self._cmd_lock = threading.Lock()
         self.last_ok: bool | None = None        # surfaced in the snapshot's remote.last_sync_ok
 
     @staticmethod
@@ -1996,42 +1993,6 @@ class RemoteSync:
         except Exception:
             self.last_ok = False
             log("remote: sync error:\n" + traceback.format_exc())
-
-    def handle_command(self, cfg: dict, sessions_cache: dict, active_cwd: str | None) -> None:
-        """ARMED-only: pull one phone-sent prompt, run it restricted (read-only), push the reply
-        back. The non-blocking lock means re-spawning every poll tick can't start overlapping runs."""
-        if not self._cmd_lock.acquire(blocking=False):
-            return
-        try:
-            cmd = remote_get_command(cfg)
-            if not isinstance(cmd, dict) or cmd.get("type") != "prompt":
-                return
-            remote_clear_command(cfg)            # consume first so it can't re-run
-            text = (cmd.get("text") or "").strip()
-            if not text:
-                return
-            req_cwd = _allowed_remote_cwd(cmd.get("cwd"), sessions_cache, active_cwd)
-            # Resume the session the phone targeted (or the most-recent one) so the reply has that
-            # conversation's full context and is appended back into its own transcript — i.e. it
-            # continues your real session, not a separate bot thread.
-            sid = cmd.get("session_id")
-            run_cwd = req_cwd
-            if not sid:
-                sid, run_cwd = _latest_session_id(req_cwd)
-            if sid:                                         # never resume a session a live terminal
-                sf = next(PROJECTS_DIR.glob(f"*/{sid}.jsonl"), None)   # is actively writing — that
-                if sf and (time.time() - sf.stat().st_mtime) < 20:    # would risk a torn .jsonl
-                    log(f"target session {sid} looks active; running fresh to avoid a concurrent write")
-                    sid = None
-            log(f"remote prompt from phone -> session {sid or 'new'}: {text[:80]!r}")
-            notify("Phone prompt", text[:90])
-            reply, _ = run_remote_prompt(text, run_cwd or req_cwd, resume_id=sid)
-            remote_push(cfg, "Claude replied", reply[:400], "remote-reply")
-            self.reset_throttle()                           # re-mirror the updated session promptly
-        except Exception:
-            log("remote command failed:\n" + traceback.format_exc())
-        finally:
-            self._cmd_lock.release()
 
     def push(self, cfg: dict, title: str, msg: str) -> None:
         if not self.enabled(cfg):
@@ -2593,8 +2554,6 @@ DASHBOARD_HTML = r"""<!doctype html>
         </div>
         <div class="setrow" style="margin-top:12px"><span class="setlbl">Conversation</span>
           <label class="chk"><input type="checkbox" id="rm-transcript"> mirror the active conversation to your phone — sends message <b>text</b> (E2EE)</label></div>
-        <div class="setrow" style="margin-top:10px"><span class="setlbl">Remote prompts</span>
-          <label class="chk"><input type="checkbox" id="rm-accept"> <b>arm:</b> run prompts sent from your phone — restricted to planning + read-only tools (no edits, no shell), in a fresh session</label></div>
       </div>
       <div class="csub" style="margin-top:8px">Android only (no iOS yet). The relay only stores ciphertext it can't read. See <code>docs/REMOTE.md</code>.</div>
     </div>
@@ -2899,7 +2858,6 @@ function renderSettings(){
   renderRemote();
   $("set-sesswait").checked=!!ui.notify_session_waiting;
   $("rm-transcript").checked=!!ui.remote_transcript;
-  $("rm-accept").checked=!!ui.remote_accept_prompts;
 }
 const COMP_RANK={operational:0,under_maintenance:1,degraded_performance:2,partial_outage:3,major_outage:4};
 const IND_SEV={none:0,minor:2,major:4,critical:4};
@@ -3055,7 +3013,6 @@ $("rm-rotate").onclick=function(){ if(confirm("Rotate the key? Your phone must r
 $("rm-unpair").onclick=function(){ if(confirm("Unpair and disable remote sync?")){ postRemote("unpair"); setTimeout(refresh,500); } };
 $("set-sesswait").onchange=function(){ postCfg({notify_session_waiting:this.checked}); };
 $("rm-transcript").onchange=function(){ postCfg({remote_transcript:this.checked}); };
-$("rm-accept").onchange=function(){ postCfg({remote_accept_prompts:this.checked}); };
 
 /* ---- team tab ---- */
 let TMMONTH=null, TMLED=null, TMOV=null, WHOAMI=null;
@@ -4525,7 +4482,7 @@ class TrayApp:
                 snap["ui"] = {k: self.cfg.get(k) for k in
                               ("bar_fields",
                                "show_widget_on_start", "show_bar_on_start", "status_components",
-                               "notify_session_waiting", "remote_transcript", "remote_accept_prompts")}
+                               "notify_session_waiting", "remote_transcript")}
                 snap["config_epoch"] = self._config_epoch
                 snap["overlays_alive"] = {"widget": self._widget_alive(), "bar": self._bar_alive()}
                 snap["remote"] = {"enabled": bool(self.cfg.get("remote_enabled")),
@@ -4559,10 +4516,6 @@ class TrayApp:
                     if self._team.due(now, tiv):
                         threading.Thread(target=self._team.sync,
                                          args=(snap, self.cfg, self._alltime_cache), daemon=True).start()
-                    # ARMED: also pull + run any phone-sent prompt (restricted), off-thread.
-                    if self.cfg.get("remote_accept_prompts"):
-                        threading.Thread(target=self._remote.handle_command,
-                                         args=(self.cfg, self._sessions_cache, self._cwd), daemon=True).start()
                 # Admin + phone paired: refresh the compact team overview embedded for the phone.
                 # Off-thread + throttled so the relay round-trips never block the poll loop.
                 if (RemoteSync.enabled(self.cfg) and is_team_admin
