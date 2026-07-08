@@ -409,6 +409,77 @@ async function teamLedgerData(env, tid, month) {
   return { team: tid, month, accounts: names, days, finals };
 }
 
+// --- Supabase account-pool reads (service_role). The claude.ai connector reads the pool from
+// Supabase; D1 stays only for phone sync + FCM + the OAuth tables. SUPABASE_SECRET is a
+// wrangler secret (never in wrangler.toml/[vars]); SUPABASE_URL is a [vars] entry.
+async function sbRpc(env, fn, body) {
+  const res = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+    method: "POST",
+    headers: { apikey: env.SUPABASE_SECRET, authorization: `Bearer ${env.SUPABASE_SECRET}`,
+               "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`supabase rpc ${fn} -> ${res.status}`);
+  return res.json();
+}
+
+// A Supabase usage/finals row -> the client shape the merge fns parse. `device` is the stable
+// device id (the old `did`); display_name -> name; escrow is gone in the pool model.
+function rowFromSb(r) {
+  if (!r) return null;
+  const ee = r.extra_enabled;
+  return {
+    name: r.display_name, fh_pct: r.fh_pct, sd_pct: r.sd_pct,
+    fh_resets_at: r.fh_resets_at, sd_resets_at: r.sd_resets_at,
+    extra: (ee === null || ee === undefined) ? null
+      : { enabled: !!ee, used: r.extra_used, limit: r.extra_limit, currency: r.extra_currency, pct: r.extra_pct },
+    did: r.device, device: r.device, by_name: r.by_name, tok_month: r.tok_month, ts: r.ts, src: r.src,
+  };
+}
+
+async function sbTeamOverview(env, team, tz) {
+  const now = new Date();
+  const today = tzParts(tz, now).date;
+  const yesterday = tzParts(tz, new Date(now.getTime() - 86400_000)).date;
+  const rows = await sbRpc(env, "get_team_usage", { p_team: team, p_dates: [today, yesterday] });
+  const names = {};
+  const byDate = { [today]: {}, [yesterday]: {} };
+  for (const r of rows || []) {
+    names[r.acct] = r.display_name || r.acct;
+    const d = (byDate[r.date] = byDate[r.date] || {});
+    (d[r.acct] = d[r.acct] || {})[r.device] = rowFromSb(r);
+  }
+  const accounts = Object.keys(names).map((acct) => {
+    const tdev = (byDate[today] && byDate[today][acct]) || {};
+    const ydev = (byDate[yesterday] && byDate[yesterday][acct]) || {};
+    return {
+      acct, name: names[acct],
+      account: pickAccountRow(tdev) || pickAccountRow(ydev),
+      account_is_today: !!pickAccountRow(tdev),
+      last_used: lastUsed(tdev) || lastUsed(ydev),
+      devices: Object.keys(tdev).map((d) => ({ did: d, ...tdev[d] })),
+      escrow: { present: false },
+    };
+  });
+  return { team, tz, today, accounts };
+}
+
+async function sbTeamLedger(env, team, month) {
+  const rows = await sbRpc(env, "get_team_month", { p_team: team, p_month: month });
+  const names = {}, days = {}, finals = {};
+  for (const row of rows || []) {
+    const r = row.r || {};
+    names[r.acct] = r.display_name || r.acct;
+    if (row.kind === "final") {
+      finals[r.acct] = rowFromSb(r);
+    } else {
+      const d = (days[r.date] = days[r.date] || {});
+      (d[r.acct] = d[r.acct] || {})[r.device] = rowFromSb(r);
+    }
+  }
+  return { team, month, accounts: names, days, finals };
+}
+
 // ---- Computed team metrics — mirrors the Python merge in claude_usage_tracker.py so the
 // remote MCP tools return the same enriched shape (per-member month €spend + tokens + KPIs)
 // the desktop computes locally, instead of raw D1. Keep byte-for-byte semantics with the
@@ -617,13 +688,11 @@ const MCP_TOOLS = [
 async function mcpResolveTeam(request, env) {
   const bearer = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "").trim();
   if (!bearer) return null;
-  const hash = await sha256hex(bearer);
-  const tok = await env.DB.prepare("SELECT tid, exp FROM oauth_tokens WHERE token_hash=?").bind(hash).first();
-  if (tok && tok.exp > Date.now()) {
-    const t = await env.DB.prepare("SELECT tid, tz FROM teams WHERE tid=?").bind(tok.tid).first();
-    if (t) return t;
-  }
-  return (await env.DB.prepare("SELECT tid, tz FROM teams WHERE admin_hash=?").bind(hash).first()) || null;
+  // oauth_tokens.tid holds the team's email DOMAIN (bound at consent from the connector token).
+  const tok = await env.DB.prepare("SELECT tid, exp FROM oauth_tokens WHERE token_hash=?")
+    .bind(await sha256hex(bearer)).first();
+  if (tok && tok.exp > Date.now()) return { team: tok.tid, tz: DEFAULT_TEAM_TZ };
+  return null;
 }
 
 async function handleMcp(request, env, url) {
@@ -665,10 +734,10 @@ async function handleMcp(request, env, url) {
       if (name === "get_team_overview") {
         // Enrich to match the desktop: fetch this + previous month's ledger and merge in
         // per-account month €spend / tokens + KPIs, instead of raw today/yesterday.
-        const ov = await teamOverviewData(env, team.tid, team.tz || DEFAULT_TEAM_TZ);
+        const ov = await sbTeamOverview(env, team.team, team.tz || DEFAULT_TEAM_TZ);
         const month = (ov.today || "").slice(0, 7);
         const merged = month
-          ? overviewMerge(ov, await teamLedgerData(env, team.tid, month), await teamLedgerData(env, team.tid, prevMonth(month)))
+          ? overviewMerge(ov, await sbTeamLedger(env, team.team, month), await sbTeamLedger(env, team.team, prevMonth(month)))
           : ov;
         // structuredContent + the ui:// link → MCP-Apps hosts render the pool widget; the
         // text block is the graceful fallback for hosts without UI support.
@@ -680,8 +749,8 @@ async function handleMcp(request, env, url) {
       }
       if (name === "get_team_ledger") {
         const month = /^\d{4}-\d{2}$/.test(args.month || "") ? args.month : new Date().toISOString().slice(0, 7);
-        const led = await teamLedgerData(env, team.tid, month);
-        const prev = await teamLedgerData(env, team.tid, prevMonth(month));
+        const led = await sbTeamLedger(env, team.team, month);
+        const prev = await sbTeamLedger(env, team.team, prevMonth(month));
         led.spend = ledgerComputed(led, prev);            // per-account calendar-month € spend
         led.tokens = {};                                  // per-account month tokens
         for (const a of Object.keys(led.accounts || {})) led.tokens[a] = memberMonthTokens(led, a);
@@ -1037,26 +1106,28 @@ async function handleOAuth(request, env, url) {
 <title>Connect Claude to your team tracker</title>
 <body style="font:15px system-ui;max-width:460px;margin:8vh auto;padding:0 20px;background:#100e0c;color:#f2ede5">
 <h2 style="color:#d97757">Connect your team tracker</h2>
-<p style="color:#a99f93">Paste your <b>team admin token</b> to let Claude read this team's analytics. It's matched to your team and never shown again.</p>
+<p style="color:#a99f93">Paste your team's <b>connector token</b> (Team tab → Mint connector token) to let Claude read your team's account pool. It's matched to your email domain and never shown again.</p>
 <form method="POST" action="/oauth/authorize">
 ${hid("client_id", clientId)}${hid("redirect_uri", redirectUri)}${hid("code_challenge", challenge)}${hid("code_challenge_method", method)}${hid("state", state)}${hid("response_type", "code")}
-<input name="admin_token" type="password" placeholder="team admin token" autocomplete="off" required
+<input name="connector_token" type="password" placeholder="connector token" autocomplete="off" required
   style="width:100%;box-sizing:border-box;padding:11px;border-radius:8px;border:1px solid #332e28;background:#1e1a16;color:#f2ede5;font:13px monospace">
 <button type="submit" style="margin-top:12px;padding:11px 18px;border:0;border-radius:8px;background:#d97757;color:#1c0f08;font-weight:600;cursor:pointer">Authorize</button>
 </form></body>`);
     }
 
-    // POST — validate the admin token → tid, mint a single-use code.
-    const adminToken = (q.get("admin_token") || "").trim();
-    if (!adminToken) return html("<h3>Missing admin token.</h3>", 400);
-    const team = await env.DB.prepare("SELECT tid FROM teams WHERE admin_hash=?").bind(await sha256hex(adminToken)).first();
-    if (!team) {
-      return html(`<h3 style="color:#d4694f">That admin token doesn't match a team.</h3><p><a href="javascript:history.back()">Try again</a></p>`, 403);
+    // POST — validate the connector token via Supabase -> team email domain, mint a single-use code.
+    const connectorToken = (q.get("connector_token") || "").trim();
+    if (!connectorToken) return html("<h3>Missing connector token.</h3>", 400);
+    let domain = null;
+    try { domain = await sbRpc(env, "resolve_connector_token", { p_hash: await sha256hex(connectorToken) }); }
+    catch (e) { domain = null; }
+    if (!domain) {
+      return html(`<h3 style="color:#d4694f">That connector token doesn't match a team (or has expired).</h3><p><a href="javascript:history.back()">Try again</a></p>`, 403);
     }
     const code = randB64url(32);
     await env.DB.prepare(
       "INSERT INTO oauth_codes(code_hash,client_id,redirect_uri,code_challenge,tid,exp) VALUES(?1,?2,?3,?4,?5,?6)"
-    ).bind(await sha256hex(code), clientId, redirectUri, challenge, team.tid, Date.now() + OAUTH_CODE_TTL_MS).run();
+    ).bind(await sha256hex(code), clientId, redirectUri, challenge, domain, Date.now() + OAUTH_CODE_TTL_MS).run();
     const sep = redirectUri.includes("?") ? "&" : "?";
     const loc = `${redirectUri}${sep}code=${encodeURIComponent(code)}${state ? "&state=" + encodeURIComponent(state) : ""}`;
     return new Response(null, { status: 302, headers: { location: loc } });

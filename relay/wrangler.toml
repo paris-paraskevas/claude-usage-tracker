@@ -23,6 +23,12 @@ binding = "DB"
 database_name = "claude-usage-team"
 database_id = "ee600614-6646-4b2d-8637-9ecad2c087e3"
 
+# Supabase account-pool connector (docs/RELEASE-0.3.md): the claude.ai connector reads the pool
+# from Supabase. SUPABASE_URL is public; SUPABASE_SECRET is the sb_secret_ key, set out of band:
+#   cd relay && npx wrangler secret put SUPABASE_SECRET
+[vars]
+SUPABASE_URL = "https://sxciunvkygtehhztfjjo.supabase.co"
+
 # Push secrets (do NOT put these here — set them out of band):
 #   npx wrangler secret put FCM_PROJECT_ID
 #   npx wrangler secret put FCM_CLIENT_EMAIL
