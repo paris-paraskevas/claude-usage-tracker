@@ -248,17 +248,6 @@ def test_read_transcripts_lists_recent_conversations(tmp_path, monkeypatch):
     assert ts[0]["messages"][0]["text"] == "hello B"
 
 
-def test_allowed_remote_cwd_blocks_arbitrary_paths():
-    """A phone-sent prompt may only run in a project we're already tracking (or the active
-    session); an arbitrary path is rejected and falls back to the active session."""
-    cache = {r"p\a.jsonl": {"cwd": r"C:\Dev\projA"}, r"p\b.jsonl": {"cwd": r"C:\Dev\projB"}}
-    active = r"C:\Dev\projA"
-    assert m._allowed_remote_cwd(r"C:\Dev\projB", cache, active) == r"C:\Dev\projB"  # tracked → ok
-    assert m._allowed_remote_cwd(r"C:\Users\me\.ssh", cache, active) == active        # arbitrary → active
-    assert m._allowed_remote_cwd(None, cache, active) == active                       # none → active
-    assert m._allowed_remote_cwd(r"C:\x", {}, None) is None                           # nothing known → None
-
-
 def test_project_name():
     """The shared basename helper now feeds 6 call sites — lock its edge cases."""
     assert m.project_name(r"C:\Dev\foo", "fb") == "foo"          # Windows path
@@ -289,87 +278,7 @@ def test_remote_sync_throttle_and_inflight():
     assert rs.due(170.0, 60) is True       # +70s from the armed window → due again
     rs.reset_throttle()
     assert rs.due(171.0, 60) is True       # manual "sync now" forces the next window
-    # in-flight guard: while the lock is held, handle_command returns at once (no work, no raise)
-    assert rs._cmd_lock.acquire(blocking=False) is True
-    rs.handle_command({}, {}, None)
-    rs._cmd_lock.release()
     assert m.RemoteSync.enabled({}) is False   # not enabled without config/pynacl
-
-
-def test_run_remote_prompt_nonhanging_readonly(monkeypatch):
-    """Bug 2 ("prompt took too long"): headless plan mode hangs waiting for plan approval.
-    The command must use dontAsk (auto-deny, never prompt) + --bare, keep the read-only
-    allowlist, and never block on stdin."""
-    import subprocess
-    monkeypatch.setattr(m, "_claude_cli", lambda: "claude")
-    captured = {}
-
-    class FakeProc:
-        stdout = '{"type":"result","result":"hi from claude"}'
-        stderr = ""
-        returncode = 0
-
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        captured["kwargs"] = kwargs
-        return FakeProc()
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    reply, _sid = m.run_remote_prompt("what does foo() do?", cwd=None)
-    assert reply == "hi from claude"
-
-    cmd = captured["cmd"]
-    assert "plan" not in cmd                                    # the hang cause — gone
-    assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
-    assert "--bare" in cmd and "-p" in cmd
-    assert m.REMOTE_PROMPT_TOOLS in cmd                         # still read-only
-    assert captured["kwargs"].get("stdin") == subprocess.DEVNULL
-
-
-def test_run_remote_prompt_resume(monkeypatch):
-    """A phone prompt continues a SPECIFIC session: --resume <id> is passed, and the session_id
-    from the JSON result is returned so the conversation can keep going."""
-    import subprocess
-    monkeypatch.setattr(m, "_claude_cli", lambda: "claude")
-    captured = {}
-
-    class FakeProc:
-        stdout = '{"type":"result","result":"ok","session_id":"sess-123"}'
-        stderr = ""
-        returncode = 0
-
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (captured.update(cmd=cmd) or FakeProc()))
-    reply, sid = m.run_remote_prompt("continue", cwd=r"C:\Dev\foo", resume_id="sess-123")
-    assert reply == "ok" and sid == "sess-123"
-    cmd = captured["cmd"]
-    assert cmd[cmd.index("--resume") + 1] == "sess-123"         # resumed that exact session
-
-
-def test_run_remote_prompt_opts_out_of_cred_scrub(monkeypatch):
-    """The headless `claude -p` must opt out of Claude Code's subprocess credential-hardening
-    (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB) or the run comes back "Not logged in · Please run /login".
-    The run already locks tools to read-only, so disabling the scrub + dropping the nested-session
-    markers a parent injects is the documented opt-out."""
-    import subprocess
-    monkeypatch.setattr(m, "_claude_cli", lambda: "claude")
-    monkeypatch.setenv("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1")   # as a global setting would
-    monkeypatch.setenv("CLAUDE_CODE_CHILD_SESSION", "1")          # nested markers a parent injects
-    monkeypatch.setenv("CLAUDECODE", "1")
-    monkeypatch.setenv("PATH", "/keep/me")                        # unrelated vars must survive
-    captured = {}
-
-    class FakeProc:
-        stdout = '{"type":"result","result":"ok"}'
-        stderr = ""
-        returncode = 0
-
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (captured.update(kw) or FakeProc()))
-    m.run_remote_prompt("hi", cwd=None)
-    env = captured["env"]
-    assert env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "0"         # scrub disabled -> creds usable
-    assert "CLAUDE_CODE_CHILD_SESSION" not in env                 # nested markers stripped
-    assert "CLAUDECODE" not in env
-    assert env.get("PATH") == "/keep/me"                          # unrelated env preserved
 
 
 def test_read_transcripts_exposes_session_id(tmp_path, monkeypatch):
@@ -382,5 +291,3 @@ def test_read_transcripts_exposes_session_id(tmp_path, monkeypatch):
                     "message": {"role": "user", "content": "hi"}}), encoding="utf-8")
     ts = m.read_transcripts(limit=1)
     assert ts and ts[0]["session_id"] == "abc123"
-    sid, cwd = m._latest_session_id(r"C:\Dev\foo")
-    assert sid == "abc123" and cwd == r"C:\Dev\foo"

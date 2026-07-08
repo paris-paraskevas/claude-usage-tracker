@@ -39,6 +39,8 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import supabase_pool  # Supabase account-pool client (stdlib + keyring). See docs/SUPABASE-MIGRATION.md.
+
 # ---------------------------------------------------------------------------
 # Paths & constants
 # ---------------------------------------------------------------------------
@@ -132,7 +134,6 @@ DEFAULT_CONFIG = {
                                                 # (the loop tick). Raise it to spare phone battery/network.
     "notify_session_waiting": False,            # opt-in: toast/push when a Claude Code session finishes a turn awaiting you
     "remote_transcript": False,                 # opt-in: mirror the active conversation's text to your phone (E2EE)
-    "remote_accept_prompts": False,             # opt-in (ARMED): run prompts sent from the phone, restricted (plan + read-only tools)
     "team_report_seconds": 10,                  # how often a team member pushes its usage row to D1 (docs/TEAM.md);
                                                 # bounded below by ui_refresh_seconds (the loop tick)
     "team_share_token": True,                   # escrow the short-lived OAuth access token so the relay's
@@ -146,7 +147,7 @@ CONFIG_ALLOW = {
     "widget_width", "widget_height", "bar_width", "bar_height",
     "open_as_window", "predictive_alerts", "update_check", "danger_alerts",
     "status_check", "status_components", "remote_enabled", "remote_relay_url",
-    "notify_session_waiting", "remote_transcript", "remote_accept_prompts",
+    "notify_session_waiting", "remote_transcript",
     "team_report_seconds", "team_share_token", "team_tz",
 }
 
@@ -1261,21 +1262,6 @@ def read_transcripts(limit: int = 6, max_msgs: int = 30, max_chars: int = 2500) 
     return out
 
 
-def _latest_session_id(cwd: str | None = None) -> tuple[str | None, str | None]:
-    """(session_id, cwd) of the most-recently-active Claude Code session — optionally only those
-    whose recorded cwd matches `cwd`. Used to resume the session a phone prompt should continue
-    when the phone didn't name one. session_id is the .jsonl filename stem."""
-    try:
-        files = sorted(PROJECTS_DIR.glob("*/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    except Exception:
-        return None, None
-    for f in files:
-        t = _read_one_transcript(f, max_msgs=1, max_chars=1)
-        if t and (cwd is None or t.get("cwd") == cwd):
-            return f.stem, t.get("cwd")
-    return None, None
-
-
 def build_snapshot(r: FetchResult, hist: dict, cfg: dict) -> dict:
     now_s = time.time()
     oauth = read_oauth()
@@ -1572,124 +1558,6 @@ def remote_decrypt(blob: dict):
         return None
 
 
-def remote_get_command(cfg: dict):
-    """Fetch + decrypt a pending command the phone enqueued on the relay (or None)."""
-    url = (cfg.get("remote_relay_url") or "").rstrip("/")
-    ident = load_remote_identity(create=False)
-    if not url or not ident:
-        return None
-    req = urllib.request.Request(url + f"/v1/acct/{ident['account_id']}/command", method="GET")
-    req.add_header("Authorization", "Bearer " + ident["read_token"])
-    req.add_header("User-Agent", f"claude-usage-tracker/{__version__}")
-    try:
-        with urllib.request.urlopen(req, timeout=8) as r:
-            if r.status == 204:
-                return None
-            blob = json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        if exc.code == 403:    # don't fail silently: the relay rejected our token
-            log("remote: command fetch got 403 — relay rejected our token (re-pair?)")
-        return None
-    except Exception:
-        return None
-    return remote_decrypt(blob)
-
-
-def remote_clear_command(cfg: dict) -> None:
-    ident = load_remote_identity(create=False)
-    if ident:
-        _relay_call("DELETE", cfg, f"/v1/acct/{ident['account_id']}/command")
-
-
-# Restricted tools for remotely-triggered prompts: read + research only, never edit/run.
-REMOTE_PROMPT_TOOLS = "Read,Glob,Grep,WebSearch,WebFetch"
-
-
-def _allowed_remote_cwd(requested: str | None, sessions_cache: dict | None,
-                        active: str | None) -> str | None:
-    """The directory a phone-sent prompt may run in. Honor the phone's requested `cwd` only if
-    it's a project we're already tracking (or the active session); otherwise fall back to the
-    active session. Stops a crafted command from pointing the read-only runner at an arbitrary
-    path (e.g. ~/.ssh) and exfiltrating it via the reply."""
-    allowed = {e.get("cwd") for e in (sessions_cache or {}).values() if e.get("cwd")}
-    if active:
-        allowed.add(active)
-    if requested and requested in allowed:
-        return requested
-    return active or None
-
-
-# Markers a parent Claude Code injects into a child's environment. A phone prompt is run on the
-# user's behalf with their own login, so we strip these (and disable the scrub below) to present
-# the spawned `claude` as a clean top-level invocation rather than a nested/sandboxed child.
-_NESTED_CC_MARKERS = ("CLAUDE_CODE_CHILD_SESSION", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
-                      "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_SSE_PORT",
-                      "AI_AGENT")
-
-
-def _remote_prompt_env() -> dict:
-    """Environment for the headless remote-prompt subprocess. Claude Code's subprocess
-    credential-hardening (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, which a user may set globally in
-    ~/.claude/settings.json) makes a spawned `claude -p` refuse the logged-in OAuth creds, so the
-    run comes back "Not logged in · Please run /login". This run is already locked to read-only
-    tools (allowed/disallowedTools below), which is exactly the case Claude Code lets you opt out
-    of, so disable the scrub and drop the nested-session markers a parent would have injected."""
-    env = dict(os.environ)
-    env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "0"
-    for k in _NESTED_CC_MARKERS:
-        env.pop(k, None)
-    return env
-
-
-def run_remote_prompt(prompt: str, cwd: str | None = None, timeout: int = 180,
-                      resume_id: str | None = None) -> tuple[str, str | None]:
-    """Run a phone-sent prompt through Claude Code headless, locked to read-only research tools
-    (no edits, no shell). Returns (reply_text, session_id). Pass the previous reply's session_id
-    as `resume_id` to continue the SAME conversation — so the phone thread is a real discussion
-    with memory, not isolated one-offs; a stale/failed resume falls back to a fresh session.
-
-    Permission mode is `dontAsk`, NOT `plan`: in headless `-p` mode plan mode ends by asking the
-    user to approve the plan, and with no TTY it just hangs until the timeout (the old "prompt
-    took too long"). `--bare` skips hooks/plugins/CLAUDE.md so a remote prompt can't trigger the
-    tracker's own Stop hook."""
-    cli = _claude_cli()
-    if not cli:
-        return "Claude Code CLI not found on this machine.", None
-    prompt = (prompt or "").strip()
-    if not prompt:
-        return "", resume_id
-    import subprocess
-
-    def _run(rid):
-        cmd = [cli, "-p", prompt, "--output-format", "json", "--bare",
-               "--permission-mode", "dontAsk",
-               "--allowedTools", REMOTE_PROMPT_TOOLS,
-               "--disallowedTools", "Edit,Write,Bash,NotebookEdit"]
-        if rid:
-            cmd += ["--resume", rid]
-        return subprocess.run(cmd, cwd=cwd or None, capture_output=True, text=True,
-                              stdin=subprocess.DEVNULL,   # never block on stdin in -p mode
-                              env=_remote_prompt_env(),   # opt out of the headless cred scrub
-                              timeout=timeout, encoding="utf-8", errors="replace")
-
-    try:
-        proc = _run(resume_id)
-        if resume_id and proc.returncode != 0:   # stale/unknown session -> retry in a fresh one
-            log("remote prompt: --resume failed, starting a fresh session")
-            proc = _run(None)
-    except subprocess.TimeoutExpired:
-        return "Timed out — the prompt took too long.", resume_id
-    except Exception as exc:
-        return f"Couldn't run Claude: {exc}", resume_id
-    out = (proc.stdout or "").strip()
-    try:
-        data = json.loads(out)
-        reply = str(data.get("result") or data.get("text") or out)[:6000]
-        return reply, (data.get("session_id") or resume_id)
-    except Exception:
-        return (out or (proc.stderr or "").strip() or "No output.")[:6000], resume_id
-
-
 # ---------------------------------------------------------------------------
 # Team mode (optional, opt-in) — see docs/TEAM.md
 #
@@ -1707,128 +1575,6 @@ def _sha256_hex(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
-def load_team_identity():
-    """{role, url, team_id, admin_token?, member_id?, member_token?, name?} or None.
-    Read fresh each time (cheap, rare) so server-thread joins need no cache dance."""
-    data = load_json(TEAM_PATH, None)
-    if isinstance(data, dict) and data.get("team_id") and data.get("url"):
-        return data
-    return None
-
-
-def team_leave() -> None:
-    """Forget the local identity. A member's escrowed token is deleted best-effort
-    (it would expire on its own TTL within hours anyway)."""
-    ident = load_team_identity()
-    if ident and ident.get("member_id") and ident.get("member_token"):
-        _team_call("DELETE", ident, ident["member_token"],
-                   f"/v1/team/{ident['team_id']}/member/{ident['member_id']}/token")
-    try:
-        TEAM_PATH.unlink(missing_ok=True)
-    except Exception:
-        pass
-
-
-def _team_call(method: str, ident: dict, bearer: str, path: str, body=None, timeout: int = 8):
-    """Authenticated relay request for team routes. Returns HTTP status or None."""
-    url = (ident.get("url") or "").rstrip("/")
-    if not url or not bearer:
-        return None
-    data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(url + path, data=data, method=method)
-    req.add_header("Authorization", "Bearer " + bearer)
-    req.add_header("User-Agent", f"claude-usage-tracker/{__version__}")
-    if data is not None:
-        req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status
-    except urllib.error.HTTPError as e:
-        return e.code
-    except Exception as exc:
-        log(f"team: {method} {path} failed: {exc}")
-        return None
-
-
-def _team_get_json(ident: dict, bearer: str, path: str, timeout: int = 10):
-    """GET a team route. Returns (status, parsed_json_or_None)."""
-    url = (ident.get("url") or "").rstrip("/")
-    req = urllib.request.Request(url + path, method="GET")
-    req.add_header("Authorization", "Bearer " + bearer)
-    req.add_header("User-Agent", f"claude-usage-tracker/{__version__}")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, json.loads(r.read().decode("utf-8", errors="replace"))
-    except urllib.error.HTTPError as e:
-        return e.code, None
-    except Exception as exc:
-        log(f"team: GET {path} failed: {exc}")
-        return None, None
-
-
-def team_create(cfg: dict, name: str = ""):
-    """Admin: mint a team on the relay (TOFU pins our admin bearer), then enroll
-    ourselves as the first member so our own usage shows up too. Returns the
-    identity dict or an error string."""
-    import os as _os
-    if load_team_identity():
-        return "already in a team — leave it first"
-    url = (cfg.get("remote_relay_url") or "").rstrip("/")
-    if not url:
-        return "set a relay URL first (Settings → Remote)"
-    org = fetch_profile_org()
-    ident = {"v": 1, "role": "admin", "url": url, "org": org,
-             "team_id": _b64u(_os.urandom(16)), "admin_token": _b64u(_os.urandom(32))}
-    status = _team_call("POST", ident, ident["admin_token"], f"/v1/team/{ident['team_id']}/init",
-                        {"tz": cfg.get("team_tz") or "Europe/Athens", "org": org})
-    if status != 200:
-        return f"relay rejected team init (HTTP {status})" if status else "relay unreachable"
-    acct = read_account() or {}
-    my_name = name or acct.get("name") or acct.get("email") or "Admin"
-    code = team_add_member(ident, my_name)
-    if isinstance(code, str) and code.startswith("cutteam1:"):
-        me = team_parse_join(code)
-        ident.update({"member_id": me["m"], "member_token": me["k"], "name": me["n"]})
-    save_json(TEAM_PATH, ident)
-    return ident
-
-
-def team_add_member(ident: dict, name: str):
-    """Admin: pre-register a member (relay stores only the token HASH) and return the
-    one-time join code carrying the plaintext token. Lost codes: just re-add the member —
-    the hash is overwritten and the old code stops working."""
-    import os as _os
-    if not ident or ident.get("role") != "admin":
-        return "not a team admin"
-    mid, mtok = _b64u(_os.urandom(16)), _b64u(_os.urandom(32))
-    status = _team_call("PUT", ident, ident["admin_token"],
-                        f"/v1/team/{ident['team_id']}/member/{mid}",
-                        {"token_hash": _sha256_hex(mtok), "name": name})
-    if status != 204:
-        return f"relay rejected member add (HTTP {status})" if status else "relay unreachable"
-    payload = {"u": ident["url"], "t": ident["team_id"], "m": mid, "k": mtok,
-               "n": name, "o": ident.get("org")}
-    import base64
-    return "cutteam1:" + base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
-
-
-def team_parse_join(code: str):
-    """Decode a cutteam1: join code → {u,t,m,k,n} or None."""
-    import base64
-    try:
-        raw = code.strip()
-        if not raw.startswith("cutteam1:"):
-            return None
-        b = raw[len("cutteam1:"):]
-        b += "=" * (-len(b) % 4)
-        p = json.loads(base64.urlsafe_b64decode(b.encode()).decode("utf-8"))
-        if all(isinstance(p.get(k), str) and p.get(k) for k in ("u", "t", "m", "k")):
-            return p
-    except Exception:
-        pass
-    return None
-
-
 def device_month_tokens(cache, month: str) -> int:
     """This machine's Claude Code tokens for a calendar month, from the all-time
     cache's per-day buckets. Same headline metric as the All-time tab (in+out+cw;
@@ -1843,47 +1589,6 @@ def device_month_tokens(cache, month: str) -> int:
             except Exception:
                 pass
     return total
-
-
-def ensure_team_device(ident):
-    """Guarantee the identity carries a per-install device id + display name.
-    Minted once and persisted; a member's second machine (same join code) gets
-    its own did, so its rows never clobber the first machine's."""
-    if not ident:
-        return ident
-    if ident.get("did") and ident.get("device"):
-        return ident
-    import os as _os
-    ident = dict(ident)
-    ident.setdefault("did", _b64u(_os.urandom(8)))
-    if not ident.get("device"):
-        try:
-            ident["device"] = socket.gethostname()[:32] or "device"
-        except Exception:
-            ident["device"] = "device"
-    save_json(TEAM_PATH, ident)
-    return ident
-
-
-def team_join(code: str):
-    """Member: adopt a join code from the admin. Returns identity dict or error string."""
-    if load_team_identity():
-        return "already in a team — leave it first"
-    p = team_parse_join(code)
-    if not p:
-        return "that doesn't look like a team join code"
-    want = p.get("o")
-    if want:
-        mine = fetch_profile_org()
-        if mine and mine != want:
-            return "this join code is for a different Claude org"
-        if not mine:
-            log("team: could not verify org (offline?) — joining anyway")
-    ident = {"v": 1, "role": "member", "url": p["u"], "team_id": p["t"],
-             "member_id": p["m"], "member_token": p["k"], "name": p.get("n", ""),
-             "org": want}
-    save_json(TEAM_PATH, ident)
-    return ident
 
 
 def build_team_report(snap: dict, dev=None, account=None) -> dict:
@@ -2006,24 +1711,21 @@ def team_overview_merge(ov: dict, led, prev_led=None) -> dict:
     return out
 
 
-def team_admin_overview_merged(ident):
-    """Admin: fetch the relay overview + this/previous-month ledger and merge them
-    (spend/tokens/KPIs). Returns the merged dict or None. Shared by the dashboard proxy
-    and the phone-snapshot embed so both compute team numbers the same way."""
-    if not ident or ident.get("role") != "admin":
+def supabase_team_overview():
+    """Build the merged pool overview from Supabase (read_overview + this/prev-month ledger),
+    reusing the existing merge fns. RLS scopes every read to the caller's team, so any signed-in
+    member sees their team's pool (no admin gate). Returns the merged dict or None."""
+    if not supabase_pool.signed_in():
         return None
-    st, data = _team_get_json(ident, ident["admin_token"], f"/v1/team/{ident['team_id']}/overview")
-    if st != 200 or not data:
-        return None
-    month = (data.get("today") or "")[:7]
-    lpath = f"/v1/team/{ident['team_id']}/ledger?month="
-    led = None
-    if month:
-        _, led = _team_get_json(ident, ident["admin_token"], lpath + month)
-    prev = None
-    if led and month:
-        _, prev = _team_get_json(ident, ident["admin_token"], lpath + _prev_month(month))
-    return team_overview_merge(data, led, prev) if led else data
+    tz = load_config().get("team_tz", "Europe/Athens")
+    today = _now_local()
+    tstr = today.strftime("%Y-%m-%d")
+    ystr = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+    ov = supabase_pool.read_overview(tz, tstr, ystr)
+    month = tstr[:7]
+    led = supabase_pool.read_ledger(month)
+    prev = supabase_pool.read_ledger(_prev_month(month))
+    return team_overview_merge(ov, led, prev)
 
 
 def team_overview_compact(merged):
@@ -2070,22 +1772,20 @@ def team_ledger_computed(led: dict, prev_led=None) -> dict:
 
 
 class TeamSync:
-    """Owns the opt-in team-mode side effects for the poll loop: the throttled report
-    push and the access-token escrow (pushed only when the token actually rotates).
-    Mirrors RemoteSync's shape so the loop treats them alike."""
+    """Opt-in account-pool push for the poll loop: a throttled ~10s upsert of the current
+    Claude account's usage row to Supabase, as the signed-in user (RLS-scoped). Enabled ==
+    a valid Supabase session exists. Token escrow is gone (the Supabase model stores no
+    Claude tokens); month-end finals are captured by pg_cron. See docs/SUPABASE-MIGRATION.md."""
 
     def __init__(self):
         self._last_report = 0.0
-        self._last_tok_hash = None      # last escrowed token, to push only on rotation
-        self._escrow_unsupported = False  # relay said 503 (no TEAM_SEAL_KEY) — log once, stop trying
-        self._acct_email = None         # currently-logged-in account; a change = login switch
+        self._acct_email = None         # currently-pooled Claude account; a change = login switch
         self._acct_org = None           # its org uuid (cached; re-fetched only on switch)
         self.last_ok: bool | None = None
 
     @staticmethod
     def enabled(cfg: dict) -> bool:
-        ident = load_team_identity()
-        return bool(ident and ident.get("member_id") and ident.get("member_token"))
+        return supabase_pool.configured() and supabase_pool.has_session()
 
     def due(self, now: float, interval: float) -> bool:
         if now - self._last_report >= interval:
@@ -2098,75 +1798,40 @@ class TeamSync:
 
     def sync(self, snap: dict, cfg: dict, alltime_cache=None) -> None:
         try:
-            ident = load_team_identity()
-            if not ident or not ident.get("member_id"):
+            if not supabase_pool.signed_in():
                 return
-            ident = ensure_team_device(ident)
             acct = read_account() or {}
             email = (acct.get("email") or "").strip().lower()
             if not email:
-                return  # no Claude account logged in — nothing to pool
+                return  # no Claude account logged in -- nothing to pool
             if email != self._acct_email:
-                # Login switched to a different pooled account: refresh its org uuid (for the
-                # relay's org gate), push it promptly, and re-escrow the new account's token.
+                # Login switched to a different pooled account: refresh its org uuid, push promptly.
                 self._acct_email = email
                 self._acct_org = fetch_profile_org()
                 self.reset_throttle()
-                self._last_tok_hash = None
+            try:
+                host = socket.gethostname()[:32] or "device"
+            except Exception:
+                host = "device"
             month = _now_local().strftime("%Y-%m")
-            dev = {"did": ident.get("did"), "device": ident.get("device"),
+            dev = {"did": supabase_pool.device_id(), "device": host,
                    "tok_month": device_month_tokens(alltime_cache, month)}
             account = {"acct": email, "name": acct.get("name"), "org": self._acct_org}
-            base = f"/v1/team/{ident['team_id']}/member/{ident['member_id']}"
             row = build_team_report(snap, dev, account)
-            status = _team_call("PUT", ident, ident["member_token"], base + "/report", row)
-            self.last_ok = status == 204
-            if status in (403, 404):
-                log(f"team: report rejected (HTTP {status}) — removed from the team? (Settings → Team)")
-                return
-            self._escrow(ident, base, cfg, email)
+            self.last_ok = supabase_pool.push(row, dev, account,
+                                              _now_local().strftime("%Y-%m-%d"))
         except Exception:
             self.last_ok = False
             log("team: sync error:\n" + traceback.format_exc())
 
-    def _escrow(self, ident: dict, base: str, cfg: dict, acct: str) -> None:
-        """Keep the relay's sealed copy of the CURRENT account's access token fresh
-        (rotation-driven, ~2 writes/day). Escrow is per pooled account so the cron can
-        refresh each one when nobody's logged in. Never touches the refresh token."""
-        if not cfg.get("team_share_token"):
-            if self._last_tok_hash:      # user turned escrow off: withdraw this account's token
-                from urllib.parse import quote
-                _team_call("DELETE", ident, ident["member_token"],
-                           base + "/token?acct=" + quote(acct))
-                self._last_tok_hash = None
-            return
-        if self._escrow_unsupported:
-            return
-        oauth = read_oauth()
-        tok, exp = oauth.get("accessToken"), oauth.get("expiresAt")
-        if not tok or not isinstance(exp, (int, float)) or exp / 1000.0 <= time.time() + 60:
-            return
-        h = _sha256_hex(tok)
-        if h == self._last_tok_hash:
-            return
-        status = _team_call("PUT", ident, ident["member_token"], base + "/token",
-                            {"access_token": tok, "expires_at": int(exp), "acct": acct})
-        if status == 204:
-            self._last_tok_hash = h
-        elif status == 503:
-            self._escrow_unsupported = True
-            log("team: relay has no TEAM_SEAL_KEY — escrow off, ledger uses last push of the day")
-
 
 class RemoteSync:
     """Owns the opt-in phone-relay side effects and their shared state, so the poll loop
-    doesn't have to: throttled snapshot sync, the armed prompt runner (with an in-flight guard
-    so a slow `claude -p` can't overlap the next tick), and push. Pulled out of TrayApp so the
-    throttle/in-flight decisions are unit-testable in isolation."""
+    doesn't have to: throttled snapshot sync (plus the optional E2EE conversation mirror) and
+    push. Pulled out of TrayApp so the throttle decisions are unit-testable in isolation."""
 
     def __init__(self):
         self._last_sync = 0.0
-        self._cmd_lock = threading.Lock()
         self.last_ok: bool | None = None        # surfaced in the snapshot's remote.last_sync_ok
 
     @staticmethod
@@ -2195,42 +1860,6 @@ class RemoteSync:
         except Exception:
             self.last_ok = False
             log("remote: sync error:\n" + traceback.format_exc())
-
-    def handle_command(self, cfg: dict, sessions_cache: dict, active_cwd: str | None) -> None:
-        """ARMED-only: pull one phone-sent prompt, run it restricted (read-only), push the reply
-        back. The non-blocking lock means re-spawning every poll tick can't start overlapping runs."""
-        if not self._cmd_lock.acquire(blocking=False):
-            return
-        try:
-            cmd = remote_get_command(cfg)
-            if not isinstance(cmd, dict) or cmd.get("type") != "prompt":
-                return
-            remote_clear_command(cfg)            # consume first so it can't re-run
-            text = (cmd.get("text") or "").strip()
-            if not text:
-                return
-            req_cwd = _allowed_remote_cwd(cmd.get("cwd"), sessions_cache, active_cwd)
-            # Resume the session the phone targeted (or the most-recent one) so the reply has that
-            # conversation's full context and is appended back into its own transcript — i.e. it
-            # continues your real session, not a separate bot thread.
-            sid = cmd.get("session_id")
-            run_cwd = req_cwd
-            if not sid:
-                sid, run_cwd = _latest_session_id(req_cwd)
-            if sid:                                         # never resume a session a live terminal
-                sf = next(PROJECTS_DIR.glob(f"*/{sid}.jsonl"), None)   # is actively writing — that
-                if sf and (time.time() - sf.stat().st_mtime) < 20:    # would risk a torn .jsonl
-                    log(f"target session {sid} looks active; running fresh to avoid a concurrent write")
-                    sid = None
-            log(f"remote prompt from phone -> session {sid or 'new'}: {text[:80]!r}")
-            notify("Phone prompt", text[:90])
-            reply, _ = run_remote_prompt(text, run_cwd or req_cwd, resume_id=sid)
-            remote_push(cfg, "Claude replied", reply[:400], "remote-reply")
-            self.reset_throttle()                           # re-mirror the updated session promptly
-        except Exception:
-            log("remote command failed:\n" + traceback.format_exc())
-        finally:
-            self._cmd_lock.release()
 
     def push(self, cfg: dict, title: str, msg: str) -> None:
         if not self.enabled(cfg):
@@ -2692,52 +2321,46 @@ DASHBOARD_HTML = r"""<!doctype html>
   </div>
 
   <div id="tab-team" class="tabpane" hidden>
-    <div class="card panel" id="tm-none">
-      <div class="ptitle">Team · Claude Team plan aggregator</div>
-      <div class="csub" style="margin-bottom:14px">See every member's 5-hour / weekly load and extra-usage spend in one place,
-        with a monthly € ledger captured at <b>23:59 on the last day of the month</b>. Members share <b>usage numbers only</b> —
-        never sessions, projects, or conversation content. Uses the relay from Settings → Remote. Details: <code>docs/TEAM.md</code>.</div>
-      <div class="setrow"><span class="setlbl">Admin</span>
-        <button class="sbtn" id="tm-create">Create team</button>
-        <span class="csub">creates the team on your relay and enrolls you as its first member</span></div>
-      <div class="setrow" style="margin-top:10px"><span class="setlbl">Member</span>
-        <input type="text" id="tm-code" class="tminput" placeholder="cutteam1:… (paste the join code your admin sent you)" spellcheck="false">
-        <button class="sbtn" id="tm-join">Join</button></div>
+    <div class="card panel" id="tm-login">
+      <div class="ptitle">Team · Claude account pool</div>
+      <div class="csub" style="margin-bottom:14px">Sign in with your work email to join your team's shared account pool — see every pooled
+        Claude account's 5-hour / weekly load and monthly extra-usage spend in one place. Only <b>usage numbers</b> are shared,
+        never sessions, projects, or conversation content. Your team is your email <b>domain</b>.</div>
+      <label class="chk" style="display:block;margin-bottom:12px"><input type="checkbox" id="tm-consent"> I understand my Claude account email, extra-usage € and token counts are stored in a central EU database (not end-to-end encrypted) and are visible to teammates on my email domain.</label>
+      <div class="setrow"><span class="setlbl">Email</span>
+        <input type="email" id="tm-email" class="tminput" placeholder="you@yourcompany.com" spellcheck="false" autocomplete="email">
+        <button class="sbtn" id="tm-sendcode">Send code</button></div>
+      <div id="tm-codewrap" hidden>
+        <div class="setrow" style="margin-top:10px"><span class="setlbl">Code</span>
+          <input type="text" id="tm-otp" class="tminput" placeholder="digit code from your email" spellcheck="false" inputmode="numeric" autocomplete="one-time-code"></div>
+        <div class="setrow" style="margin-top:10px"><span class="setlbl">Username</span>
+          <input type="text" id="tm-username" class="tminput" placeholder="how teammates see you" spellcheck="false">
+          <button class="sbtn" id="tm-signin">Sign in</button></div>
+      </div>
       <div class="csub" id="tm-err" style="margin-top:10px"></div>
     </div>
 
     <div class="card panel" id="tm-me" hidden>
-      <div class="ptitle"><span>My membership</span><span class="legend" id="tm-mstate"></span></div>
+      <div class="ptitle"><span>Signed in</span><span class="legend" id="tm-mstate"></span></div>
       <div class="csub" id="tm-minfo"></div>
-      <div class="setrow" style="margin-top:12px"><span class="setlbl">23:59 ledger</span>
-        <label class="chk"><input type="checkbox" id="tm-share"> let the relay read my usage at day's end — shares my <b>short-lived</b>
-          login token (hours; never the refresh token) so the ledger stays exact while this PC is off</label></div>
-      <div class="setacts" style="margin-top:12px"><button class="sbtn" id="tm-leave">Leave team</button></div>
+      <div class="setacts" style="margin-top:12px"><button class="sbtn" id="tm-logout">Sign out</button></div>
     </div>
 
     <div id="tm-adminview" hidden>
-      <div class="card panel" style="margin-bottom:12px">
+      <div class="card panel" id="tm-connector" hidden style="margin-bottom:12px">
         <div class="ptitle"><span>claude.ai connector</span></div>
-        <div class="setrow"><span class="setlbl">Admin token</span>
-          <button class="sbtn" id="tm-copytoken">Copy admin token</button>
-          <span class="csub" id="tm-copytoken-msg">paste it at the connector's consent screen in claude.ai</span></div>
+        <div class="setrow"><span class="setlbl">Connector token</span>
+          <button class="sbtn" id="tm-minttoken">Mint connector token</button>
+          <span class="csub" id="tm-copytoken-msg">admin only — mints a fresh token to paste at the claude.ai connector consent screen</span></div>
       </div>
       <div class="card panel">
-        <div class="ptitle"><span>Members · live</span>
+        <div class="ptitle"><span>Accounts · live</span>
           <span class="srt"><span class="legend" id="tm-asof"></span><button class="sbtn" id="tm-reload">Refresh</button></span></div>
         <div class="tmkpis">
           <div class="tmkpi"><span class="lbl csub">org spend this month</span><b id="tm-kpi-spend">—</b><div class="csub" id="tm-kpi-spend-sub"></div></div>
           <div class="tmkpi" id="tm-kpi-near-card"><span class="lbl csub">near limits now</span><b id="tm-kpi-near">—</b><div class="csub" id="tm-kpi-near-sub"></div></div>
         </div>
         <div id="tm-members"><div class="csub">loading…</div></div>
-        <div class="setrow" style="margin-top:14px"><span class="setlbl">Add member</span>
-          <input type="text" id="tm-newname" class="tminput" placeholder="member name" spellcheck="false">
-          <button class="sbtn" id="tm-add">Add</button></div>
-        <div id="tm-codebox" hidden>
-          <div class="csub" style="margin-top:10px">Send this join code privately — it contains the member's token. Paste it in their
-            tracker under Team → Join. Re-adding the same name mints a fresh code and voids this one.</div>
-          <div class="tmcode" id="tm-codeval"></div>
-        </div>
       </div>
       <div class="card panel">
         <div class="ptitle"><span>Monthly ledger · extra usage €</span>
@@ -2798,8 +2421,6 @@ DASHBOARD_HTML = r"""<!doctype html>
         </div>
         <div class="setrow" style="margin-top:12px"><span class="setlbl">Conversation</span>
           <label class="chk"><input type="checkbox" id="rm-transcript"> mirror the active conversation to your phone — sends message <b>text</b> (E2EE)</label></div>
-        <div class="setrow" style="margin-top:10px"><span class="setlbl">Remote prompts</span>
-          <label class="chk"><input type="checkbox" id="rm-accept"> <b>arm:</b> run prompts sent from your phone — restricted to planning + read-only tools (no edits, no shell), in a fresh session</label></div>
       </div>
       <div class="csub" style="margin-top:8px">Android only (no iOS yet). The relay only stores ciphertext it can't read. See <code>docs/REMOTE.md</code>.</div>
     </div>
@@ -3104,7 +2725,6 @@ function renderSettings(){
   renderRemote();
   $("set-sesswait").checked=!!ui.notify_session_waiting;
   $("rm-transcript").checked=!!ui.remote_transcript;
-  $("rm-accept").checked=!!ui.remote_accept_prompts;
 }
 const COMP_RANK={operational:0,under_maintenance:1,degraded_performance:2,partial_outage:3,major_outage:4};
 const IND_SEV={none:0,minor:2,major:4,critical:4};
@@ -3260,23 +2880,21 @@ $("rm-rotate").onclick=function(){ if(confirm("Rotate the key? Your phone must r
 $("rm-unpair").onclick=function(){ if(confirm("Unpair and disable remote sync?")){ postRemote("unpair"); setTimeout(refresh,500); } };
 $("set-sesswait").onchange=function(){ postCfg({notify_session_waiting:this.checked}); };
 $("rm-transcript").onchange=function(){ postCfg({remote_transcript:this.checked}); };
-$("rm-accept").onchange=function(){ postCfg({remote_accept_prompts:this.checked}); };
 
 /* ---- team tab ---- */
-let TMMONTH=null, TMLED=null, TMOV=null;
+let TMMONTH=null, TMLED=null, TMOV=null, WHOAMI=null;
 function tmMoney(v,cur){ return v==null?"—":((cur?cur+" ":"")+Number(v).toFixed(2)); }
 function tmMonthNow(){ const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0"); }
 function tmShiftMonth(m,dir){ let y=+m.slice(0,4),mo=+m.slice(5,7)+dir; if(mo<1){mo=12;y--;} if(mo>12){mo=1;y++;} return y+"-"+String(mo).padStart(2,"0"); }
-function renderTeamState(d){
-  const t=(d||{}).team||{};
-  $("tm-none").hidden=!!t.in_team;
-  $("tm-me").hidden=!t.in_team;
-  $("tm-adminview").hidden=!(t.in_team&&t.role==="admin");
-  if(!t.in_team)return;
-  $("tm-mstate").textContent=(t.role||"member")+(t.last_ok===true?" · reporting":(t.last_ok===false?" · push failed":""));
-  $("tm-minfo").innerHTML="Reporting as <b>"+esc(t.name||"me")+"</b> every "+Math.round((t.report_seconds||900)/60)+
-    " min · team clock "+esc(t.tz||"");
-  const sh=$("tm-share"); if(document.activeElement!==sh) sh.checked=!!t.share_token;
+function renderTeamState(){
+  const w=WHOAMI||{};
+  $("tm-login").hidden=!!w.signed_in;
+  $("tm-me").hidden=!w.signed_in;
+  $("tm-adminview").hidden=!w.signed_in;
+  $("tm-connector").hidden=!w.is_admin;
+  if(!w.signed_in)return;
+  $("tm-mstate").textContent=w.is_admin?"admin":"member";
+  $("tm-minfo").innerHTML="Signed in as <b>"+esc(w.email||"")+"</b> · team <b>"+esc(w.team||"")+"</b>";
 }
 function tmTok(n){ if(n==null)return "—"; if(n>=1e9)return (n/1e9).toFixed(1)+"B"; if(n>=1e6)return (n/1e6).toFixed(1)+"M"; if(n>=1e3)return (n/1e3).toFixed(1)+"k"; return String(n); }
 function tmWin(label,p,reset){
@@ -3385,45 +3003,42 @@ async function tmPost(body){
 // Pool accounts are read-only cards (they auto-discover as teammates log in); there is no
 // per-card remove. Reporter enrolment stays in "add member" (join codes); the relay's
 // /member DELETE endpoint remains for revoking a reporter out-of-band.
-function renderTeamPage(){
-  renderTeamState(LASTD||{});
-  const t=((LASTD||{}).team)||{};
-  if(t.in_team&&t.role==="admin"){ loadTeamOverview(); loadTeamLedger(); }
+async function renderTeamPage(){
+  try{ WHOAMI=await (await fetch("/api/team/whoami",{cache:"no-store"})).json(); }
+  catch(e){ WHOAMI={signed_in:false}; }
+  renderTeamState();
+  if(WHOAMI.signed_in){ loadTeamOverview(); loadTeamLedger(); }
 }
-$("tm-create").onclick=async function(){
-  this.disabled=true; const r=await tmPost({action:"create"}); this.disabled=false;
-  $("tm-err").textContent=r.ok?"":("✗ "+(r.error||"failed"));
-  if(r.ok){ setTimeout(refresh,400); setTimeout(renderTeamPage,900); }
+$("tm-sendcode").onclick=async function(){
+  if(!$("tm-consent").checked){ $("tm-err").textContent="please accept the data notice first"; return; }
+  const email=$("tm-email").value.trim(); if(!email){ $("tm-email").focus(); return; }
+  this.disabled=true; const r=await tmPost({action:"login-start",email:email}); this.disabled=false;
+  if(r.ok){ $("tm-codewrap").hidden=false; $("tm-err").textContent="code sent to "+email; $("tm-otp").focus(); }
+  else $("tm-err").textContent="x "+(r.error||"could not send code");
 };
-$("tm-join").onclick=async function(){
-  const code=$("tm-code").value.trim(); if(!code){ $("tm-code").focus(); return; }
-  this.disabled=true; const r=await tmPost({action:"join",code:code}); this.disabled=false;
-  $("tm-err").textContent=r.ok?"":("✗ "+(r.error||"failed"));
-  if(r.ok){ $("tm-code").value=""; setTimeout(refresh,400); }
+$("tm-signin").onclick=async function(){
+  const email=$("tm-email").value.trim(), code=$("tm-otp").value.trim(), username=$("tm-username").value.trim();
+  if(!code){ $("tm-otp").focus(); return; }
+  this.disabled=true; const r=await tmPost({action:"login-verify",email:email,code:code,username:username}); this.disabled=false;
+  if(r.ok){ $("tm-err").textContent=""; $("tm-otp").value=""; renderTeamPage(); setTimeout(refresh,400); }
+  else $("tm-err").textContent="x "+(r.error||"invalid code");
 };
-$("tm-leave").onclick=async function(){
-  if(!confirm("Leave the team? An admin can re-invite you with a fresh code."))return;
-  await tmPost({action:"leave"}); setTimeout(refresh,400);
-};
-$("tm-add").onclick=async function(){
-  const name=$("tm-newname").value.trim(); if(!name){ $("tm-newname").focus(); return; }
-  this.disabled=true; const r=await tmPost({action:"member-add",name:name}); this.disabled=false;
-  if(r.ok&&r.code){ $("tm-codebox").hidden=false; $("tm-codeval").textContent=r.code; $("tm-newname").value=""; loadTeamOverview(); }
-  else alert(r.error||"failed");
+$("tm-logout").onclick=async function(){
+  if(!confirm("Sign out of the account pool on this device?"))return;
+  await tmPost({action:"logout"}); renderTeamPage(); setTimeout(refresh,400);
 };
 $("tm-reload").onclick=loadTeamOverview;
-$("tm-copytoken").onclick=async function(){
+$("tm-minttoken").onclick=async function(){
   const msg=$("tm-copytoken-msg");
-  const r=await tmPost({action:"admin-token"});
-  if(!r.ok||!r.token){ msg.textContent="✗ "+(r.error||"couldn't get token"); return; }
-  try{ await navigator.clipboard.writeText(r.token); msg.textContent="copied ✓ — paste it at the claude.ai consent screen"; }
+  const r=await tmPost({action:"connector-token"});
+  if(!r.ok||!r.token){ msg.textContent="x "+(r.error||"mint failed"); return; }
+  try{ await navigator.clipboard.writeText(r.token); msg.textContent="copied - paste it at the claude.ai consent screen (shown once)"; }
   catch(e){ msg.style.userSelect="all"; msg.textContent=r.token; }
 };
 $("tm-prevm").onclick=function(){ TMMONTH=tmShiftMonth(TMMONTH||tmMonthNow(),-1); loadTeamLedger(); };
 $("tm-nextm").onclick=function(){ TMMONTH=tmShiftMonth(TMMONTH||tmMonthNow(),1); loadTeamLedger(); };
 $("tm-csv").onclick=tmCsv;
-$("tm-share").onchange=function(){ postCfg({team_share_token:this.checked}); };
-setInterval(function(){ if(!$("tab-team").hidden&&(((LASTD||{}).team)||{}).role==="admin")loadTeamOverview(); },10000);
+setInterval(function(){ if(!$("tab-team").hidden&&WHOAMI&&WHOAMI.signed_in)loadTeamOverview(); },10000);
 </script>
 </body>
 </html>"""
@@ -3666,34 +3281,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send(200, "image/png", png)
             else:
                 self._send(404, "text/plain", b"pairing unavailable")
+        elif path == "/api/team/whoami":
+            self._send(200, "application/json", json.dumps({
+                "signed_in": supabase_pool.signed_in(), "email": supabase_pool.email(),
+                "team": supabase_pool.team(), "is_admin": supabase_pool.is_admin()}).encode("utf-8"))
         elif path == "/api/team/overview":
-            ident = load_team_identity()
-            if not ident or ident.get("role") != "admin":
-                self._send(200, "application/json", b'{"error":"not_admin"}')
+            if not supabase_pool.signed_in():
+                self._send(200, "application/json", b'{"error":"not_signed_in"}')
             else:
-                merged = team_admin_overview_merged(ident)
-                out = merged if merged else {"error": "relay unreachable"}
+                merged = supabase_team_overview()
+                out = merged if merged else {"error": "supabase unreachable"}
                 self._send(200, "application/json", json.dumps(out).encode("utf-8"))
         elif path == "/api/team/ledger":
             from urllib.parse import parse_qs, urlsplit
             month = (parse_qs(urlsplit(self.path).query).get("month") or [""])[0]
-            ident = load_team_identity()
-            if not ident or ident.get("role") != "admin":
-                self._send(200, "application/json", b'{"error":"not_admin"}')
+            if not supabase_pool.signed_in():
+                self._send(200, "application/json", b'{"error":"not_signed_in"}')
             elif not (len(month) == 7 and month[:4].isdigit() and month[4] == "-" and month[5:].isdigit()):
                 self._send(200, "application/json", b'{"error":"bad_month"}')
             else:
-                tid_path = f"/v1/team/{ident['team_id']}/ledger?month="
-                st, led = _team_get_json(ident, ident["admin_token"], tid_path + month)
-                if st == 200 and led:
-                    _, prev = _team_get_json(ident, ident["admin_token"], tid_path + _prev_month(month))
-                    led["computed_spend"] = team_ledger_computed(led, prev)
-                    led["month_tokens"] = {acct: member_month_tokens(led, acct)
-                                           for acct in (led.get("accounts") or {})}
-                    out = led
-                else:
-                    out = {"error": f"relay HTTP {st}" if st else "relay unreachable"}
-                self._send(200, "application/json", json.dumps(out).encode("utf-8"))
+                led = supabase_pool.read_ledger(month)
+                led["computed_spend"] = team_ledger_computed(led, supabase_pool.read_ledger(_prev_month(month)))
+                led["month_tokens"] = {acct: member_month_tokens(led, acct)
+                                       for acct in (led.get("accounts") or {})}
+                self._send(200, "application/json", json.dumps(led).encode("utf-8"))
         elif path == "/favicon.ico":
             self._send(204, "image/x-icon", b"")
         else:
@@ -3785,53 +3396,59 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send(404, "text/plain", b"not found")
 
     def _team_action(self) -> dict:
-        """POST /api/team {action, ...} — create/join/leave and member management,
-        proxied to the relay with the locally-stored team identity."""
+        """POST /api/team {action, ...} -- Supabase account-pool session control: login (email
+        OTP), logout, set-username, and the admin connector-token mint. Runs only on this
+        loopback control plane (already origin/host-guarded); the user JWT never enters the DOM."""
         body = self._read_json() or {}
         action = body.get("action", "")
         try:
-            if action == "create":
-                res = team_create(load_config(), (body.get("name") or "").strip())
-            elif action == "join":
-                res = team_join(body.get("code") or "")
-            elif action == "leave":
-                team_leave()
-                res = {}
-            elif action == "member-add":
-                name = (body.get("name") or "").strip()
-                if not name:
-                    return {"ok": False, "error": "member name required"}
-                res = team_add_member(load_team_identity(), name)
-                if isinstance(res, str) and res.startswith("cutteam1:"):
-                    return {"ok": True, "code": res}
-            elif action == "member-remove":
-                ident = load_team_identity()
-                mid = body.get("mid") or ""
-                if not ident or ident.get("role") != "admin" or not mid:
-                    return {"ok": False, "error": "not a team admin"}
-                st = _team_call("DELETE", ident, ident["admin_token"],
-                                f"/v1/team/{ident['team_id']}/member/{mid}")
-                res = {} if st == 204 else f"relay HTTP {st}"
-            elif action == "admin-token":
-                # The token for the claude.ai remote MCP connector consent. Only served over the
-                # loopback control plane (this POST is already origin/host-guarded), never relayed.
-                ident = load_team_identity()
-                if not ident or ident.get("role") != "admin":
-                    return {"ok": False, "error": "not a team admin"}
-                return {"ok": True, "token": ident.get("admin_token", "")}
+            if action == "login-start":
+                email = (body.get("email") or "").strip().lower()
+                if not email:
+                    return {"ok": False, "error": "email required"}
+                ok, resp = supabase_pool.sign_in_start(email)
+                return {"ok": True} if ok else {"ok": False, "error": f"could not send code: {resp}"}
+            elif action == "login-verify":
+                email = (body.get("email") or "").strip().lower()
+                code = (body.get("code") or "").strip()
+                username = (body.get("username") or "").strip()
+                if not (email and code):
+                    return {"ok": False, "error": "email and code required"}
+                ok, _res = supabase_pool.sign_in_verify_code(email, code)
+                if not ok:
+                    return {"ok": False, "error": "invalid or expired code"}
+                if username:
+                    supabase_pool.set_username(username)
+                self._team_changed()
+                return {"ok": True, "team": supabase_pool.team(), "is_admin": supabase_pool.is_admin()}
+            elif action == "set-username":
+                username = (body.get("username") or "").strip()
+                if not username:
+                    return {"ok": False, "error": "username required"}
+                return ({"ok": True} if supabase_pool.set_username(username)
+                        else {"ok": False, "error": "not signed in"})
+            elif action == "logout":
+                supabase_pool.sign_out()
+                self._team_changed()
+                return {"ok": True}
+            elif action == "connector-token":
+                if not supabase_pool.is_admin():
+                    return {"ok": False, "error": "admin only"}
+                tok, err = supabase_pool.mint_connector_token(int(body.get("days") or 30))
+                return {"ok": True, "token": tok} if tok else {"ok": False, "error": err or "mint failed"}
             else:
                 return {"ok": False, "error": "unknown action"}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
-        if isinstance(res, str):
-            return {"ok": False, "error": res}
+
+    def _team_changed(self) -> None:
+        """Nudge the poll loop after a team-session change (login/logout) so it re-reads state."""
         fn = CONTROL.get("team_changed")
-        if fn and action in ("create", "join"):
+        if fn:
             try:
                 fn()
             except Exception:
                 pass
-        return {"ok": True}
 
 
 def start_server(port: int) -> tuple[ThreadingHTTPServer | None, int]:
@@ -4606,11 +4223,11 @@ class TrayApp:
         except Exception as exc:
             log(f"visual update failed: {exc}")
 
-    def _refresh_team_overview(self, ident):
-        """Admin: fetch + compact the team overview for the phone-embedded snapshot.
+    def _refresh_team_overview(self):
+        """Admin: fetch + compact the pool overview for the phone-embedded snapshot.
         Runs off the poll thread; failures leave the last good value in place."""
         try:
-            merged = team_admin_overview_merged(ident)
+            merged = supabase_team_overview()
             if merged:
                 self._team_overview = team_overview_compact(merged)
         except Exception:
@@ -4732,7 +4349,7 @@ class TrayApp:
                 snap["ui"] = {k: self.cfg.get(k) for k in
                               ("bar_fields",
                                "show_widget_on_start", "show_bar_on_start", "status_components",
-                               "notify_session_waiting", "remote_transcript", "remote_accept_prompts")}
+                               "notify_session_waiting", "remote_transcript")}
                 snap["config_epoch"] = self._config_epoch
                 snap["overlays_alive"] = {"widget": self._widget_alive(), "bar": self._bar_alive()}
                 snap["remote"] = {"enabled": bool(self.cfg.get("remote_enabled")),
@@ -4740,17 +4357,17 @@ class TrayApp:
                                   "available": remote_available(),
                                   "paired": load_remote_identity(create=False) is not None,
                                   "last_sync_ok": self._remote.last_ok}
-                tid = load_team_identity()
-                snap["team"] = {"in_team": tid is not None,
-                                "role": (tid or {}).get("role"),
-                                "name": (tid or {}).get("name"),
-                                "team_id": (tid or {}).get("team_id"),
-                                "share_token": bool(self.cfg.get("team_share_token")),
-                                "report_seconds": int(self.cfg.get("team_report_seconds", 900)),
+                team_signed_in = supabase_pool.configured() and supabase_pool.has_session()
+                is_team_admin = supabase_pool.is_admin() if team_signed_in else False
+                snap["team"] = {"in_team": team_signed_in,
+                                "role": ("admin" if is_team_admin else "member") if team_signed_in else None,
+                                "email": supabase_pool.email() if team_signed_in else None,
+                                "team": supabase_pool.team() if team_signed_in else None,
+                                "report_seconds": int(self.cfg.get("team_report_seconds", 10)),
                                 "tz": self.cfg.get("team_tz", "Europe/Athens"),
                                 "last_ok": self._team.last_ok}
-                # Admin only: the compact team overview the phone renders (E2EE via the snapshot).
-                snap["team_overview"] = self._team_overview if (tid or {}).get("role") == "admin" else None
+                # Admin only: the compact pool overview the phone renders (E2EE via the snapshot).
+                snap["team_overview"] = self._team_overview if is_team_admin else None
                 self._verdict = (snap.get("verdict") or {}).get("text", "")
                 with STORE_LOCK:
                     STORE["snapshot"] = snap
@@ -4766,16 +4383,12 @@ class TrayApp:
                     if self._team.due(now, tiv):
                         threading.Thread(target=self._team.sync,
                                          args=(snap, self.cfg, self._alltime_cache), daemon=True).start()
-                    # ARMED: also pull + run any phone-sent prompt (restricted), off-thread.
-                    if self.cfg.get("remote_accept_prompts"):
-                        threading.Thread(target=self._remote.handle_command,
-                                         args=(self.cfg, self._sessions_cache, self._cwd), daemon=True).start()
                 # Admin + phone paired: refresh the compact team overview embedded for the phone.
                 # Off-thread + throttled so the relay round-trips never block the poll loop.
-                if (RemoteSync.enabled(self.cfg) and (tid or {}).get("role") == "admin"
+                if (RemoteSync.enabled(self.cfg) and is_team_admin
                         and now - last_team_ov >= team_ov_iv):
                     last_team_ov = now
-                    threading.Thread(target=self._refresh_team_overview, args=(tid,), daemon=True).start()
+                    threading.Thread(target=self._refresh_team_overview, daemon=True).start()
                 # Fold newly-written session bytes into lifetime totals. Runs after
                 # the live snapshot is published so the first (full-history) backfill
                 # never delays first paint; the result lands in the next snapshot.

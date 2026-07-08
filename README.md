@@ -243,20 +243,18 @@ Setup (Cloudflare Worker + optional Firebase + the app): see
 
 ## Team dashboard (optional) — Claude Team plans
 
-For **Claude Team plan** admins: see every member's 5-hour / weekly load and
-**extra-usage spend (€)** live in a **Team** tab, plus a per-member **monthly
-ledger** — the decisive reading captured by a relay cron at **23:59 on the last
-day of the month**, even with members' machines off (via an opt-in escrow of
-their *short-lived* login token; the refresh token never leaves their machine).
-Month spend is computed robustly across Anthropic's mid-month billing-cycle
+Share a **pool of Claude accounts** across your company: everyone signs in to the
+**Team** tab with their **work email** (a one-time code — no password), and your team
+is your email **domain**. See every pooled account's live 5-hour / weekly load and
+**extra-usage spend (€)** in one place, plus a per-account **monthly ledger** frozen at
+month-end. Month spend is computed robustly across Anthropic's mid-month billing-cycle
 reset, and exports to CSV.
 
-Tokens are attributed **per device** (each machine's local logs), € per member per
-calendar month, and join codes are bound to your Claude org so a leaked code is
-useless outside it. Each member runs this tracker and joins with a one-time code
-from the admin. Members share **usage numbers only** — never sessions, projects, or
-conversation content. Uses the same self-hosted relay as phone sync: see
-**[docs/TEAM.md](docs/TEAM.md)**.
+The pool lives in a central (EU) Supabase database, isolated per domain by row-level
+security; you consent at sign-in that **usage numbers only** are shared with domain
+teammates (5h / weekly %, extra-usage €, token counts) — never sessions, projects, or
+conversation content. The first person per domain is the admin and can mint a token for
+the claude.ai connector. See **[docs/TEAM.md](docs/TEAM.md)**.
 
 ## Code signing
 

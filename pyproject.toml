@@ -28,6 +28,8 @@ dependencies = [
     # frozen installer both reported the feature "unavailable". See docs/REMOTE.md.
     "PyNaCl>=1.5",
     "qrcode>=7.0",
+    # Supabase account-pool: OS-keychain session storage (stdlib client otherwise). See docs/SUPABASE-MIGRATION.md.
+    "keyring>=25",
 ]
 
 # Back-compat alias: `claude-usage-tracker[remote]` still resolves (deps are now core).
@@ -50,4 +52,4 @@ claude-usage-tracker = "claude_usage_tracker:main"
 claude-usage-tracker-gui = "claude_usage_tracker:main"
 
 [tool.setuptools]
-py-modules = ["claude_usage_tracker"]
+py-modules = ["claude_usage_tracker", "supabase_pool"]

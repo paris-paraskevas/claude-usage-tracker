@@ -1,50 +1,10 @@
-"""Team-mode unit tests — pure logic only (join codes, report rows, ledger math).
-No relay network: the one call that would touch it points at a closed local port."""
-import base64
-import json
+"""Team-mode unit tests — pure logic (report rows, ledger math, session control).
+The Supabase account pool replaced the old D1 join-code model; those tests were removed."""
 import sys
 from pathlib import Path
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import claude_usage_tracker as m  # noqa: E402
-
-
-def _code(payload: dict) -> str:
-    return "cutteam1:" + base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
-
-
-# ---- join codes -------------------------------------------------------------
-
-def test_parse_join_roundtrip():
-    p = {"u": "https://relay.example", "t": "T" * 16, "m": "M" * 16, "k": "K" * 32, "n": "Paris"}
-    assert m.team_parse_join(_code(p)) == p
-
-
-def test_parse_join_rejects_garbage():
-    assert m.team_parse_join("") is None
-    assert m.team_parse_join("cutpair1:abc") is None           # phone-pairing code, not a team code
-    assert m.team_parse_join("cutteam1:!!!") is None
-    assert m.team_parse_join(_code({"u": "x"})) is None        # missing fields
-    assert m.team_parse_join(_code({"u": "x", "t": "", "m": "y", "k": "z"})) is None
-
-
-def test_join_and_leave(tmp_path, monkeypatch):
-    monkeypatch.setattr(m, "TEAM_PATH", tmp_path / "team.json")
-    p = {"u": "http://127.0.0.1:9", "t": "team1234", "m": "mem12345", "k": "k" * 32, "n": "P"}
-    ident = m.team_join(_code(p))
-    assert isinstance(ident, dict) and ident["role"] == "member"
-    assert m.load_team_identity()["member_id"] == "mem12345"
-    assert isinstance(m.team_join(_code(p)), str)              # second join refused with a message
-    m.team_leave()                                             # closed port: best-effort DELETE no-ops
-    assert m.load_team_identity() is None
-
-
-def test_join_rejects_bad_code(tmp_path, monkeypatch):
-    monkeypatch.setattr(m, "TEAM_PATH", tmp_path / "team.json")
-    assert isinstance(m.team_join("not-a-code"), str)
-    assert m.load_team_identity() is None
 
 
 # ---- report rows ------------------------------------------------------------
@@ -88,7 +48,7 @@ def test_month_spend_plain():
 
 
 def test_month_spend_cycle_reset_mid_month():
-    # meter: 70 → 74 → (anchor reset) → 2 → 5, entering the month at 68
+    # meter: 70 -> 74 -> (anchor reset) -> 2 -> 5, entering the month at 68
     assert m.team_month_spend([70, 74, 2, 5], baseline=68) == 11.0
 
 
@@ -132,8 +92,8 @@ def test_ledger_computed_device_rows():
     prev = {"days": {"2026-06-30": {"a": {"account": _dev(9.0, 5, "cron")}}},
             "finals": {"b": {"extra": {"used": 0.5}}}}
     out = m.team_ledger_computed(led, prev)
-    # a: baseline 9 → 10(+1) → 12.5 cron wins (+2.5) → 2(reset, +2) = 5.5
-    # b: baseline 0.5 (prev FINAL preferred) → 1(+0.5) → 4(+3) = 3.5
+    # a: baseline 9 -> 10(+1) -> 12.5 cron wins (+2.5) -> 2(reset, +2) = 5.5
+    # b: baseline 0.5 (prev FINAL preferred) -> 1(+0.5) -> 4(+3) = 3.5
     assert out["a"] == 5.5 and out["b"] == 3.5
 
 
@@ -176,7 +136,7 @@ def test_team_overview_merge():
     assert ma["month_spend"] == 70.8 and ma["month_tokens"] == 45
 
 
-# ---- device identity + device tokens -----------------------------------------
+# ---- device tokens ----------------------------------------------------------
 
 def test_device_month_tokens():
     cache = {"days": {
@@ -188,46 +148,6 @@ def test_device_month_tokens():
     assert m.device_month_tokens(cache, "2026-05") == 0
     assert m.device_month_tokens({}, "2026-07") == 0
     assert m.device_month_tokens(None, "2026-07") == 0
-
-
-def test_ensure_team_device(tmp_path, monkeypatch):
-    monkeypatch.setattr(m, "TEAM_PATH", tmp_path / "team.json")
-    m.save_json(m.TEAM_PATH, {"v": 1, "role": "member", "url": "http://x", "team_id": "t" * 8,
-                              "member_id": "m" * 8, "member_token": "k" * 32})
-    ident = m.ensure_team_device(m.load_team_identity())
-    assert ident["did"] and len(ident["did"]) >= 8
-    assert ident["device"]                      # hostname, non-empty
-    again = m.ensure_team_device(m.load_team_identity())
-    assert again["did"] == ident["did"]         # stable across calls (persisted)
-
-
-# ---- org binding --------------------------------------------------------------
-
-def test_join_code_carries_org():
-    p = {"u": "https://r.example", "t": "T" * 16, "m": "M" * 16, "k": "K" * 32,
-         "n": "P", "o": "org-uuid-1"}
-    assert m.team_parse_join(_code(p))["o"] == "org-uuid-1"
-
-
-def test_join_refuses_wrong_org(tmp_path, monkeypatch):
-    monkeypatch.setattr(m, "TEAM_PATH", tmp_path / "team.json")
-    monkeypatch.setattr(m, "fetch_profile_org", lambda: "org-B")
-    p = {"u": "http://127.0.0.1:9", "t": "t" * 8, "m": "m" * 8, "k": "k" * 32,
-         "n": "P", "o": "org-A"}
-    res = m.team_join(_code(p))
-    assert isinstance(res, str) and "org" in res.lower()
-    assert m.load_team_identity() is None
-
-
-def test_join_allows_matching_or_unknown_org(tmp_path, monkeypatch):
-    monkeypatch.setattr(m, "TEAM_PATH", tmp_path / "team.json")
-    monkeypatch.setattr(m, "fetch_profile_org", lambda: "org-A")
-    p = {"u": "http://127.0.0.1:9", "t": "t" * 8, "m": "m" * 8, "k": "k" * 32,
-         "n": "P", "o": "org-A"}
-    assert isinstance(m.team_join(_code(p)), dict)      # match → join
-    m.team_leave()
-    monkeypatch.setattr(m, "fetch_profile_org", lambda: None)   # offline → warn, allow
-    assert isinstance(m.team_join(_code(p)), dict)
 
 
 def test_team_overview_compact():
@@ -248,11 +168,11 @@ def test_team_overview_compact():
     assert c["near"] == [{"name": "A", "window": "5h", "pct": 99.0}]
     assert c["members"][0] == {"name": "A", "fh_pct": 99.0, "sd_pct": 19.0,
                                "month_spend": 70.8, "month_tokens": 45, "currency": "EUR"}
-    assert c["members"][1]["currency"] is None      # no extra block → currency None
+    assert c["members"][1]["currency"] is None      # no extra block -> currency None
     assert m.team_overview_compact(None) is None
 
 
-# ---- sync throttle ----------------------------------------------------------
+# ---- sync throttle + session-based enable -----------------------------------
 
 def test_teamsync_due_throttle():
     ts = m.TeamSync()
@@ -263,6 +183,9 @@ def test_teamsync_due_throttle():
     assert ts.due(1902.0, 900)
 
 
-def test_teamsync_disabled_without_identity(tmp_path, monkeypatch):
-    monkeypatch.setattr(m, "TEAM_PATH", tmp_path / "absent.json")
-    assert m.TeamSync.enabled({}) is False
+def test_teamsync_enabled_tracks_session(monkeypatch):
+    monkeypatch.setattr(m.supabase_pool, "configured", lambda: True)
+    monkeypatch.setattr(m.supabase_pool, "has_session", lambda: False)
+    assert m.TeamSync.enabled({}) is False          # signed out -> disabled
+    monkeypatch.setattr(m.supabase_pool, "has_session", lambda: True)
+    assert m.TeamSync.enabled({}) is True           # signed in -> enabled
