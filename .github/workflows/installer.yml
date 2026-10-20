@@ -55,10 +55,16 @@ jobs:
           }
           if (-not (Test-Path "dist\ClaudeUsageTracker\_internal\ctu\ui\dashboard.html")) { throw "ctu/ui missing from the bundle" }
 
+      # A release uses its tag (v0.4.0 -> 0.4.0); a manual run (test build) uses the package version.
       - name: Resolve version
         id: ver
         shell: bash
-        run: echo "v=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "v=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "v=$(python -c 'import ctu; print(ctu.__version__)')" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build installer (Inno Setup)
         run: |
@@ -89,7 +95,25 @@ jobs:
           wait-for-completion: true
           output-artifact-directory: dist-signed
 
+      # Always keep the installer as a downloadable run artifact, so a manual run gives a test
+      # installer without publishing anything.
+      - name: Pick the installer (signed if available)
+        id: setup
+        shell: bash
+        run: |
+          SETUP=dist/ClaudeUsageTracker-Setup.exe
+          [ -f dist-signed/ClaudeUsageTracker-Setup.exe ] && SETUP=dist-signed/ClaudeUsageTracker-Setup.exe
+          echo "path=$SETUP" >> "$GITHUB_OUTPUT"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClaudeUsageTracker-Setup-${{ steps.ver.outputs.v }}
+          path: ${{ steps.setup.outputs.path }}
+          retention-days: 14
+
       - name: Attach installer to the release (signed if available)
+        if: ${{ github.event_name == 'release' }}
         shell: bash
         run: |
           SETUP=dist/ClaudeUsageTracker-Setup.exe
