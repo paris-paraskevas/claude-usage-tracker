@@ -39,7 +39,7 @@ def fake_webview(monkeypatch):
     def create_window(title, url=None, width=800, height=600, min_size=(200, 100), hidden=False, frameless=False,
                       easy_drag=True, on_top=False, focus=True, background_color="#FFFFFF", resizable=True):
         w = FakeWindow(title, url, width=width, height=height, hidden=hidden, on_top=on_top, focus=focus,
-                       frameless=frameless, background_color=background_color)
+                       frameless=frameless, background_color=background_color, min_size=min_size)
         mod.windows.append(w)
         return w
     mod.create_window = create_window
@@ -56,6 +56,12 @@ def test_shell_windows_lifecycle(make_engine, fake_webview):
     flyout, overlay = fake_webview.windows
     assert flyout.url.endswith("/flyout") and flyout.kw["hidden"] and flyout.kw["on_top"] and flyout.kw["frameless"]
     assert overlay.url.endswith("/overlay") and overlay.kw["focus"] is False and overlay.kw["on_top"]
+    # pywebview's default min_size (200, 100) left a dark box under the 30 px strip
+    assert overlay.kw["min_size"] == windows.OVERLAY_MIN and overlay.kw["min_size"][1] <= 30
+    sh.resize_overlay(383, 30)                                         # before the window is shown: deferred
+    assert ("resize", (383, 30)) not in overlay.calls
+    overlay.events.shown.fire()
+    assert ("resize", (383, 30)) in overlay.calls
     assert "shadow" not in overlay.kw                                  # unsupported kwargs are dropped
     assert fake_webview.started[0]["private_mode"] is False
 

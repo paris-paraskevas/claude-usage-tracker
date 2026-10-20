@@ -214,18 +214,26 @@ function render() {
   scheduleResize();
 }
 
+// Re-send while the window still doesn't match (a request can arrive before the host
+// window exists, or be clamped), up to a few tries per size.
 let lastSize = "";
+let tries = 0;
 const scheduleResize = debounce(() => {
   const el = expanded ? panel : strip;
   const r = el.getBoundingClientRect();
   const w = Math.ceil(r.width), h = Math.ceil(r.height);
   if (!w || !h) return;
   const key = w + "x" + h;
-  if (key === lastSize) return;
+  const fits = Math.abs(window.innerWidth - w) <= 1 && Math.abs(window.innerHeight - h) <= 1;
+  if (key !== lastSize) tries = 0;
+  if ((key === lastSize && fits) || tries >= 5) return;
   lastSize = key;
+  tries += 1;
   post("overlay_resize", { w, h, expanded }).catch(() => {});
+  setTimeout(scheduleResize, 800);
 }, 60);
 new ResizeObserver(scheduleResize).observe(ov);
+window.addEventListener("resize", scheduleResize);
 
 function setExpanded(on, reason = null) {
   clearTimeout(openTimer);
