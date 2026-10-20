@@ -1,11 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Usage Tracker for Claude</string>
-    <string name="widget_desc">Claude 5-hour, weekly and context usage at a glance</string>
-    <!-- Widget picker preview (sample values) -->
+    <string name="widget_desc">Claude 5-hour and weekly limits: how much is left, when it refills, and whether you\'ll hit it first</string>
+    <string name="widget_config_label">Widget account</string>
+    <!-- Widget picker preview (sample values; layout/widget_preview.xml) -->
     <string name="widget_preview_title">Claude</string>
-    <string name="widget_preview_5h">5h</string>
-    <string name="widget_preview_5h_pct">42%</string>
-    <string name="widget_preview_week">Week</string>
-    <string name="widget_preview_week_pct">67%</string>
+    <string name="widget_preview_time">14:48</string>
+    <string name="widget_preview_5h">5-hour</string>
+    <string name="widget_preview_5h_pct">64%</string>
+    <string name="widget_preview_5h_refill">Refills 16:40</string>
+    <string name="widget_preview_week">Weekly</string>
+    <string name="widget_preview_week_pct">41%</string>
+    <string name="widget_preview_week_refill">Refills Thu 09:00</string>
+    <string name="widget_preview_pace">Limit ~16:26</string>
 </resources>

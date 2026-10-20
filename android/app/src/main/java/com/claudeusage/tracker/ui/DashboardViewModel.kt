@@ -13,6 +13,7 @@ import com.claudeusage.tracker.RelayClient
 import com.claudeusage.tracker.Snap
 import com.claudeusage.tracker.push.PushTokens
 import com.claudeusage.tracker.widget.WidgetData
+import com.claudeusage.tracker.widget.onSnapshot
 import com.claudeusage.tracker.widget.redrawWidgets
 import com.claudeusage.tracker.widget.removeAccountEverywhere
 import com.claudeusage.tracker.widget.unpairEverywhere
@@ -91,8 +92,9 @@ class DashboardViewModel(app: Application) : AndroidViewModel(app) {
                     Prefs.setLabel(ctx, reqId, parsed.org)
                     accounts = Prefs.all(ctx)
                 }
-                WidgetData.saveSnap(ctx, reqId, js)   // keep the widget + lock-screen notification current
-                redrawWidgets(ctx)
+                // Keep the widgets (only instances whose content changed are redrawn) and the
+                // lock-screen notification current.
+                onSnapshot(ctx, reqId, js)
             }
         } catch (e: CancellationException) {
             throw e
@@ -114,6 +116,8 @@ class DashboardViewModel(app: Application) : AndroidViewModel(app) {
         error = null
         seedFromCache()                                 // nothing cached for it yet → waiting state
         refresh()
+        // Widgets that follow the app's account switch with it (from the cache, right away).
+        viewModelScope.launch { redrawWidgets(ctx) }
     }
 
     /** A new desktop was paired (QR scan from the dashboard, or a confirmed deep link). */

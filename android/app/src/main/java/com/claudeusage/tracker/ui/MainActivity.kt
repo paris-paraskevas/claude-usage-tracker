@@ -27,6 +27,7 @@ import com.claudeusage.tracker.Notifications
 import com.claudeusage.tracker.Pairing
 import com.claudeusage.tracker.Prefs
 import com.claudeusage.tracker.push.PushTokens
+import com.claudeusage.tracker.widget.EXTRA_ACCOUNT_ID
 import com.claudeusage.tracker.widget.refreshWidgetsNow
 import com.claudeusage.tracker.widget.scheduleWidgetRefresh
 import kotlinx.coroutines.launch
@@ -48,7 +49,10 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         // Only on a fresh launch: after a rotation the same intent would re-stage a pairing the
         // user may already have confirmed or dismissed. New links arrive via onNewIntent.
-        if (savedInstanceState == null) capturePairLink(intent)
+        if (savedInstanceState == null) {
+            capturePairLink(intent)
+            openAccountFrom(intent)
+        }
         // Keep the home-screen widget + (opt-in) lock-screen notification fresh.
         scheduleWidgetRefresh(this)
         refreshWidgetsNow(this)
@@ -99,6 +103,13 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         capturePairLink(intent)
+        openAccountFrom(intent)
+    }
+
+    /** A widget tap carries the account that widget shows: open the dashboard on it. */
+    private fun openAccountFrom(intent: Intent?) {
+        val id = intent?.getStringExtra(EXTRA_ACCOUNT_ID) ?: return
+        if (Prefs.all(this).any { it.pairing.accountId == id }) dashboard.switchTo(id)
     }
 
     /** Stage a cutpair1: deep link for confirmation — never auto-pair. An untrusted link could

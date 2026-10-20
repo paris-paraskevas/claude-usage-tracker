@@ -48,6 +48,21 @@
             </intent-filter>
         </service>
 
+        <!-- Per-widget account picker (android:configure in xml/usage_widget_info.xml). Exported
+             because the launcher starts it; it only acts on this app's own widget ids. Its own
+             empty task affinity so finishing returns to the home screen, not the dashboard. -->
+        <activity
+            android:name=".widget.WidgetConfigActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:label="@string/widget_config_label"
+            android:taskAffinity=""
+            android:theme="@style/Theme.ClaudeUsage">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_CONFIGURE" />
+            </intent-filter>
+        </activity>
+
         <!-- Home-screen (and lock-screen, where the launcher allows) usage widget. -->
         <receiver
             android:name=".widget.UsageWidgetReceiver"

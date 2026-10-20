@@ -4,15 +4,20 @@ import android.annotation.SuppressLint
 import android.content.Context
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
-import androidx.glance.appwidget.updateAll
+import androidx.glance.appwidget.GlanceAppWidgetManager
+import androidx.glance.appwidget.state.getAppWidgetState
+import androidx.glance.appwidget.state.updateAppWidgetState
+import androidx.glance.state.PreferencesGlanceStateDefinition
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import androidx.work.workDataOf
 import com.claudeusage.tracker.AppScope
 import com.claudeusage.tracker.Notifications
 import com.claudeusage.tracker.Pairing
@@ -21,97 +26,206 @@ import com.claudeusage.tracker.R
 import com.claudeusage.tracker.RelayClient
 import com.claudeusage.tracker.Snap
 import com.claudeusage.tracker.push.PushTokens
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-/** Small on-device cache shared by the widget + the ongoing notification. Usage numbers only:
- *  the mirrored conversation (transcripts), the account email and the sparkline history are
- *  stripped before caching (see [stripSensitive]), and pairing keys live in [Prefs]'s
- *  EncryptedSharedPreferences — so nothing sensitive sits in these plaintext prefs. */
+/** Small on-device cache shared by the widgets + the ongoing notification, one snapshot per
+ *  paired account (each widget instance can show a different account). Usage numbers only: the
+ *  mirrored conversation (transcripts), the account email, the sparkline history and the team
+ *  suggestion are stripped before caching (see [stripSensitive]), and pairing keys live in
+ *  [Prefs]'s EncryptedSharedPreferences — so nothing sensitive sits in these plaintext prefs. */
 object WidgetData {
     private const val FILE = "cut_widget"
-    private const val K_SNAP = "snap"
-    private const val K_SNAP_ACCT = "snap_acct"   // which account the cached snapshot belongs to
+    private const val K_SNAP = "snap:"              // + accountId → stripped snapshot JSON
+    private const val K_EMPTY = "empty:"            // + accountId → the relay has nothing yet
+    private const val K_LEGACY_SNAP = "snap"        // ≤ v0.3: one snapshot …
+    private const val K_LEGACY_ACCT = "snap_acct"   // … and the account it belonged to
     private const val K_LOCK = "lockscreen"
+    private const val K_PREVIEW_FOR = "preview_for" // account whose generated picker preview is set
 
     private fun sp(ctx: Context) = ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
     fun saveSnap(ctx: Context, accountId: String, json: String) =
-        sp(ctx).edit().putString(K_SNAP, stripSensitive(json)).putString(K_SNAP_ACCT, accountId).apply()
+        sp(ctx).edit().putString(K_SNAP + accountId, stripSensitive(json)).remove(K_EMPTY + accountId).apply()
+
+    /** The relay answered "no snapshot yet" for this account (desktop never synced). */
+    fun markEmpty(ctx: Context, accountId: String) = sp(ctx).edit().putBoolean(K_EMPTY + accountId, true).apply()
+
+    fun isEmpty(ctx: Context, accountId: String): Boolean = sp(ctx).getBoolean(K_EMPTY + accountId, false)
 
     /** The widget + lock-screen notification render only usage numbers, so drop the mirrored
-     *  conversation and the account email before this string lands in plaintext prefs. */
+     *  conversation, the account email and the teammate suggestion before this string lands in
+     *  plaintext prefs. */
     private fun stripSensitive(json: String): String = runCatching {
         val o = JSONObject(json)
         o.remove("transcripts"); o.remove("transcript")
         o.remove("history")
         o.optJSONObject("account")?.remove("email")
+        o.optJSONObject("decision")?.remove("suggestion")
         o.toString()
     }.getOrDefault("{}")
 
-    /** The cached snapshot, but only if it belongs to the currently-active account. */
-    fun loadSnap(ctx: Context): String? {
-        val active = Prefs.activeId(ctx) ?: return null
-        val s = sp(ctx)
-        val owner = s.getString(K_SNAP_ACCT, null)
-        // Caches written before v0.3 carry no owner; trust them only with a single account.
-        if (owner == null && Prefs.all(ctx).size > 1) return null
-        if (owner != null && owner != active) return null
-        return s.getString(K_SNAP, null)
+    /** The cached snapshot of the currently-active account. */
+    fun loadSnap(ctx: Context): String? = Prefs.activeId(ctx)?.let { loadSnap(ctx, it) }
+
+    /** The cached snapshot of one account (null if none; removing an account clears its entry). */
+    fun loadSnap(ctx: Context, accountId: String): String? {
+        migrateLegacy(ctx)
+        return sp(ctx).getString(K_SNAP + accountId, null)
     }
 
-    /** Drop the cached snapshot (unpair / the cached account was removed). */
-    fun clearSnap(ctx: Context) = sp(ctx).edit().remove(K_SNAP).remove(K_SNAP_ACCT).apply()
+    /** v0.3 kept a single snapshot + its owner; move it under the per-account key. A cache
+     *  without an owner is trusted only when exactly one account is paired. */
+    private fun migrateLegacy(ctx: Context) {
+        val s = sp(ctx)
+        val legacy = s.getString(K_LEGACY_SNAP, null) ?: return
+        val owner = s.getString(K_LEGACY_ACCT, null)
+            ?: Prefs.all(ctx).singleOrNull()?.pairing?.accountId
+        s.edit().apply {
+            if (owner != null && !s.contains(K_SNAP + owner)) putString(K_SNAP + owner, legacy)
+            remove(K_LEGACY_SNAP); remove(K_LEGACY_ACCT)
+        }.apply()
+    }
+
+    /** Drop one account's cached snapshot (the account was removed). */
+    fun clearSnap(ctx: Context, accountId: String) =
+        sp(ctx).edit().remove(K_SNAP + accountId).remove(K_EMPTY + accountId).apply()
+
+    /** Drop every cached snapshot (unpair everything). */
+    fun clearAll(ctx: Context) {
+        val s = sp(ctx)
+        s.edit().apply {
+            s.all.keys.filter { it.startsWith(K_SNAP) || it.startsWith(K_EMPTY) || it == K_LEGACY_SNAP || it == K_LEGACY_ACCT }
+                .forEach { remove(it) }
+            remove(K_PREVIEW_FOR)
+        }.apply()
+    }
 
     fun lockscreen(ctx: Context): Boolean = sp(ctx).getBoolean(K_LOCK, false)
     fun setLockscreen(ctx: Context, on: Boolean) = sp(ctx).edit().putBoolean(K_LOCK, on).apply()
+
+    internal fun previewFor(ctx: Context): String? = sp(ctx).getString(K_PREVIEW_FOR, null)
+    internal fun setPreviewFor(ctx: Context, accountId: String?) =
+        sp(ctx).edit().putString(K_PREVIEW_FOR, accountId).apply()
 }
 
 private const val WORK_NAME = "cut_widget_refresh"
+private const val WORK_NOW = "cut_widget_refresh_now"
+private const val IN_ACCOUNT = "account_id"
 private const val LOCK_NOTIF_ID = 7711
 
 private fun connected() =
     Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
 
-/** Periodic background refresh (min 15 min). Idempotent. */
+/** Periodic background refresh (WorkManager minimum: 15 min) — the fallback behind FCM-driven
+ *  and in-app updates (the widget's updatePeriodMillis is 0). Idempotent. */
 fun scheduleWidgetRefresh(ctx: Context) {
     val req = PeriodicWorkRequestBuilder<WidgetRefreshWorker>(15, TimeUnit.MINUTES)
         .setConstraints(connected()).build()
     WorkManager.getInstance(ctx).enqueueUniquePeriodicWork(WORK_NAME, ExistingPeriodicWorkPolicy.KEEP, req)
 }
 
-/** Fire a one-shot refresh now (widget added, app opened, etc.). */
-fun refreshWidgetsNow(ctx: Context) {
-    WorkManager.getInstance(ctx).enqueue(
-        OneTimeWorkRequestBuilder<WidgetRefreshWorker>().setConstraints(connected()).build())
+/** Fire a one-shot refresh now (widget added, app opened, refresh tapped, push received).
+ *  [accountId] limits the fetch to one account; null = every account a widget or the app shows. */
+fun refreshWidgetsNow(ctx: Context, accountId: String? = null) {
+    val req = OneTimeWorkRequestBuilder<WidgetRefreshWorker>()
+        .setConstraints(connected())
+        .apply { if (accountId != null) setInputData(workDataOf(IN_ACCOUNT to accountId)) }
+        .build()
+    // One pending run per account is enough; taps while one is queued don't pile up fetches.
+    WorkManager.getInstance(ctx).enqueueUniqueWork(
+        WORK_NOW + (accountId?.let { ":$it" } ?: ""),
+        ExistingWorkPolicy.KEEP,
+        req,
+    )
 }
 
-/** Redraw the widget + lock-screen notification from whatever is cached (no network). */
+/** Redraw the widgets (only those whose content changed) + the lock-screen notification from
+ *  whatever is cached (no network). */
 suspend fun redrawWidgets(ctx: Context) {
-    runCatching { UsageWidget().updateAll(ctx) }
+    runCatching { updateWidgets(ctx) }.onFailure { if (it is CancellationException) throw it }
     updateLockNotification(ctx)
 }
 
-/** Fetch the latest snapshot, cache it, redraw the widget, and refresh the ongoing notification.
- *  Without a pairing it clears the cache, cancels the notification and redraws the widget into
- *  its "pair your phone" state; on a fetch error it keeps the last value. */
-suspend fun refreshWidgets(ctx: Context) {
-    val p = Prefs.load(ctx)
-    if (p == null) {
-        WidgetData.clearSnap(ctx)
+/** A fresh snapshot arrived for [accountId] (app poll, worker): cache it and redraw what changed. */
+suspend fun onSnapshot(ctx: Context, accountId: String, json: String) {
+    WidgetData.saveSnap(ctx, accountId, json)
+    redrawWidgets(ctx)
+    WidgetPreviews.maybePublish(ctx)
+}
+
+/**
+ * Update each widget instance whose drawn content would change, and only those. The fingerprint
+ * of what an instance shows (its account's numbers, levels, absolute times, staleness, label) is
+ * kept in its Glance state; writing a new one there is also what makes a still-running Glance
+ * session recompose and re-read the cache.
+ */
+internal suspend fun updateWidgets(ctx: Context) {
+    val ids = GlanceAppWidgetManager(ctx).getGlanceIds(UsageWidget::class.java)
+    if (ids.isEmpty()) return
+    val widget = UsageWidget()
+    val now = System.currentTimeMillis()
+    for (id in ids) {
+        val state = getAppWidgetState(ctx, PreferencesGlanceStateDefinition, id)
+        val fp = WidgetModel.load(ctx, state[KEY_ACCOUNT], now).fingerprint()
+        if (state[KEY_RENDERED] == fp) continue
+        updateAppWidgetState(ctx, id) { it[KEY_RENDERED] = fp }
+        widget.update(ctx, id)
+    }
+}
+
+/** The accounts worth fetching: the app's active one plus any a widget instance is set to. */
+private suspend fun accountsInUse(ctx: Context, all: List<Prefs.Account>): List<Prefs.Account> {
+    val wanted = HashSet<String>()
+    Prefs.activeId(ctx)?.let { wanted += it }
+    runCatching {
+        GlanceAppWidgetManager(ctx).getGlanceIds(UsageWidget::class.java).forEach { id ->
+            getAppWidgetState(ctx, PreferencesGlanceStateDefinition, id)[KEY_ACCOUNT]?.let { wanted += it }
+        }
+    }.onFailure { if (it is CancellationException) throw it }
+    return all.filter { it.pairing.accountId in wanted }
+}
+
+/** Fetch the latest snapshots, cache them, and redraw what changed. Without a pairing it clears
+ *  the cache and redraws into "Pair your desktop"; on a fetch error it keeps the last values
+ *  (which turn stale on their own via the snapshot's age). */
+suspend fun refreshWidgets(ctx: Context, onlyAccount: String? = null) {
+    val all = Prefs.all(ctx)
+    if (all.isEmpty()) {
+        WidgetData.clearAll(ctx)
         redrawWidgets(ctx)
         return
     }
-    val js = runCatching { RelayClient(p).fetchSnapshot() }.getOrNull()
-    // Only cache if the account is still the active one (the user may have switched mid-flight).
-    if (js != null && Prefs.activeId(ctx) == p.accountId) WidgetData.saveSnap(ctx, p.accountId, js)
+    val targets = if (onlyAccount != null) all.filter { it.pairing.accountId == onlyAccount } else accountsInUse(ctx, all)
+    for (a in targets) {
+        val id = a.pairing.accountId
+        val js = try {
+            RelayClient(a.pairing).fetchSnapshot()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            continue
+        }
+        // The account may have been removed while the request was in flight.
+        if (Prefs.all(ctx).none { it.pairing.accountId == id }) continue
+        if (js == null) {
+            WidgetData.markEmpty(ctx, id)
+            continue
+        }
+        WidgetData.saveSnap(ctx, id, js)
+        if (a.label.isNullOrBlank()) {
+            runCatching { Snap.parse(js).org }.getOrNull()?.takeIf { it.isNotBlank() }?.let { Prefs.setLabel(ctx, id, it) }
+        }
+    }
     redrawWidgets(ctx)
+    WidgetPreviews.maybePublish(ctx)
 }
 
 class WidgetRefreshWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
     override suspend fun doWork(): Result {
-        refreshWidgets(applicationContext)
+        refreshWidgets(applicationContext, inputData.getString(IN_ACCOUNT))
         // The relay forgets push tokens after 7 days unless re-sent; re-send at most daily so
         // alerts keep arriving even if the app itself isn't opened for a while.
         runCatching { PushTokens.registerIfDue(applicationContext) }
@@ -120,14 +234,18 @@ class WidgetRefreshWorker(ctx: Context, params: WorkerParameters) : CoroutineWor
 }
 
 /** Remove one paired account everywhere: drop its push token on the relay (best effort, in the
- *  background), forget it locally, clear the cache if it was showing, and redraw. */
+ *  background), forget it locally, clear its cache, and redraw (widgets set to it fall back to
+ *  the app's account). */
 fun removeAccountEverywhere(ctx: Context, accountId: String) {
     val app = ctx.applicationContext
     val pairing = Prefs.all(app).firstOrNull { it.pairing.accountId == accountId }?.pairing
-    val wasActive = Prefs.activeId(app) == accountId
     val token = Prefs.pushToken(app)
     Prefs.remove(app, accountId)
-    if (wasActive) WidgetData.clearSnap(app)
+    WidgetData.clearSnap(app, accountId)
+    // The generated picker preview may show this account: regenerate it for the remaining
+    // active account, or fall back to the static preview when nothing is paired any more.
+    if (WidgetData.previewFor(app) == accountId) WidgetData.setPreviewFor(app, null)
+    if (Prefs.all(app).isEmpty()) WidgetPreviews.remove(app)
     AppScope.launch {
         if (pairing != null) unregisterToken(app, pairing, token)
         refreshWidgets(app)
@@ -135,13 +253,14 @@ fun removeAccountEverywhere(ctx: Context, accountId: String) {
 }
 
 /** Unpair every account: drop push tokens, clear secrets + cache, cancel the ongoing
- *  notification, and redraw the widget into its unpaired state. */
+ *  notification, remove the generated picker preview, and redraw into the unpaired state. */
 fun unpairEverywhere(ctx: Context) {
     val app = ctx.applicationContext
     val pairings = Prefs.all(app).map { it.pairing }
     val token = Prefs.pushToken(app)
     Prefs.clear(app)
-    WidgetData.clearSnap(app)
+    WidgetData.clearAll(app)
+    WidgetPreviews.remove(app)
     NotificationManagerCompat.from(app).cancel(LOCK_NOTIF_ID)
     AppScope.launch {
         pairings.forEach { unregisterToken(app, it, token) }
@@ -192,16 +311,4 @@ internal fun accountPrefix(ctx: Context): String? {
     if (all.size < 2) return null
     val id = Prefs.activeId(ctx)
     return all.firstOrNull { it.pairing.accountId == id }?.label?.ifBlank { null }
-}
-
-/** "14:30" today, else "Tue 09:00" — absolute, because widgets/notifications don't tick. */
-internal fun fmtClock(epochMs: Long): String {
-    val now = java.util.Calendar.getInstance()
-    val then = java.util.Calendar.getInstance().apply { timeInMillis = epochMs }
-    val sameDay = now.get(java.util.Calendar.YEAR) == then.get(java.util.Calendar.YEAR) &&
-        now.get(java.util.Calendar.DAY_OF_YEAR) == then.get(java.util.Calendar.DAY_OF_YEAR)
-    val locale = java.util.Locale.getDefault()
-    // "j" = the locale's preferred hour cycle (12h/24h).
-    val pattern = android.text.format.DateFormat.getBestDateTimePattern(locale, if (sameDay) "jmm" else "EEEjmm")
-    return java.text.SimpleDateFormat(pattern, locale).format(java.util.Date(epochMs))
 }

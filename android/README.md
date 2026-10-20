@@ -27,9 +27,16 @@ is **end-to-end encrypted**; the relay only sees ciphertext. Contract:
   data immediately; a failed refresh shows a non-blocking "Couldn't refresh — showing data
   from 3 min ago · Retry" banner; "synced … ago" turns amber when the desktop stops syncing; the
   desktop's own problems (e.g. its Claude login expired) are surfaced as a banner.
-- **Widget:** responsive (compact / full), reset times, "as of" time (amber when stale), the
-  account name when more than one desktop is paired, and a ↻ refresh button. The visual design
-  is due for a redesign; this release only fixes its plumbing.
+- **Widget:** three responsive layouts — 2×1 (the binding limit's %, bar and "Limit ~16:26" /
+  "Refills 16:40"), 2×2 default (5-hour + Weekly with refill times and one pace line) and 4×2
+  (both limits side by side with pace lines, account label, ↻ refresh). Dynamic colour with
+  fixed day/night state colours; every state has a word and an icon (on pace / watch / will hit
+  / limit reached "back 16:40" / "Desktop offline · as of" / not paired / loading). Absolute
+  times only. Each widget can show a different paired account (long-press → Reconfigure; default
+  follows the app). It reads the desktop's `decision` and per-window `pace`/`level` when present
+  and derives them from the v1 rate/ETA otherwise. Redraws come from pushes, the app and the
+  refresh button (only when the drawn content changed), with the 15-minute worker as fallback;
+  Android 15+ gets a generated picker preview after pairing.
 - **Notifications:** permission is requested after pairing (with a one-line reason), not on
   first launch; tapping an alert or the lock-screen card opens the app. The FCM token is re-sent
   to the relay at most once a day from the background refresh, because the relay forgets push
@@ -86,8 +93,10 @@ desktop (producer) --E2EE snapshot/push--> relay (Cloudflare Worker) --> this ap
   `Snapshot.kt` parses it for the UI.
 - `ui/DashboardViewModel.kt` holds the dashboard state across rotation; `ui/DashboardScreen.kt`
   and `ui/Components.kt` render it.
-- `widget/` — the Glance widget, the WorkManager refresh (every 15 min) and the lock-screen
-  notification; `push/` — FCM receive + token bookkeeping.
+- `widget/` — the Glance widget (`UsageWidget.kt` UI, `WidgetModel.kt` display rules,
+  `WidgetTheme.kt` colours), the per-widget account picker, generated previews, the WorkManager
+  refresh (every 15 min) and the lock-screen notification; `push/` — FCM receive + token
+  bookkeeping.
 
 ## Release checklist
 

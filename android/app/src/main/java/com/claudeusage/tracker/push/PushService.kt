@@ -7,13 +7,15 @@ import com.claudeusage.tracker.Crypto
 import com.claudeusage.tracker.Notifications
 import com.claudeusage.tracker.Prefs
 import com.claudeusage.tracker.R
+import com.claudeusage.tracker.widget.refreshWidgetsNow
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import org.json.JSONObject
 
 /**
  * Receives FCM **data** messages (never notification messages, so Google never sees
- * plaintext), decrypts them with the pairing key, and posts a local notification.
+ * plaintext), decrypts them with the pairing key, posts a local notification, and refreshes the
+ * home-screen widgets for that account.
  */
 class PushService : FirebaseMessagingService() {
 
@@ -29,11 +31,16 @@ class PushService : FirebaseMessagingService() {
         val accounts = Prefs.all(this)
         var plain: String? = null
         var label: String? = null
+        var accountId: String? = null
         for (a in accounts) {
             val s = Crypto.openString(a.pairing.e2eeKeyB64, nonce, ct)
-            if (s != null) { plain = s; label = a.label; break }
+            if (s != null) { plain = s; label = a.label; accountId = a.pairing.accountId; break }
         }
         if (plain == null) return
+        // Every push is a usage change on that desktop (limit ahead, reached, refilled…): refresh
+        // its widgets now instead of waiting for the 15-minute fallback. The worker fetches the
+        // snapshot and redraws only the widget instances whose content changed.
+        refreshWidgetsNow(this, accountId)
         val o = runCatching { JSONObject(plain) }.getOrNull() ?: return
         val title = o.optString("title", "Claude Usage")
         showNotification(

@@ -3,7 +3,12 @@
     <!-- = ui/Theme.kt BrandDark.bg -->
     <color name="bg">#FF100E0C</color>
     <color name="accent">#FFD97757</color>
-    <color name="widget_preview_bg">#FF1A1613</color>
-    <color name="widget_preview_ink">#FFF2EDE5</color>
-    <color name="widget_preview_dim">#FFA99F93</color>
+    <color name="widget_preview_bg">#FF2A2624</color>
+    <color name="widget_preview_ink">#FFECE0DA</color>
+    <color name="widget_preview_dim">#FFBFB0A8</color>
+    <color name="widget_preview_accent">#FFFFB5A0</color>
+    <color name="widget_preview_track">#FF4A403B</color>
+    <color name="widget_preview_hit">#FFF07B3F</color>
+    <color name="widget_preview_hit_text">#FFF49B6E</color>
+    <color name="widget_preview_ok">#FF4FA8E0</color>
 </resources>

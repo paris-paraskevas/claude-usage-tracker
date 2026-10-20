@@ -1,14 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Usage widget (widget/UsageWidget.kt). Default 2×2; resizes from 2×1 up to about 4×3 (taller
+     only adds blank space). Glance draws three responsive layouts (2×1, 2×2, 4×2).
+     updatePeriodMillis is 0: updates come from FCM pushes, the app and the refresh button,
+     with a 15-minute WorkManager job as the fallback (widget/WidgetRefresh.kt).
+     The configuration activity picks the account per widget; it is optional (the widget follows
+     the app's account by default) and reachable later via the launcher's "Reconfigure". -->
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
     android:minWidth="110dp"
-    android:minHeight="80dp"
-    android:minResizeWidth="110dp"
-    android:minResizeHeight="80dp"
-    android:targetCellWidth="3"
+    android:minHeight="110dp"
+    android:minResizeWidth="100dp"
+    android:minResizeHeight="50dp"
+    android:maxResizeWidth="560dp"
+    android:maxResizeHeight="340dp"
+    android:targetCellWidth="2"
     android:targetCellHeight="2"
     android:updatePeriodMillis="0"
     android:resizeMode="horizontal|vertical"
     android:widgetCategory="home_screen|keyguard"
+    android:configure="com.claudeusage.tracker.widget.WidgetConfigActivity"
+    android:widgetFeatures="reconfigurable|configuration_optional"
     android:initialLayout="@layout/glance_default_loading_layout"
     android:previewLayout="@layout/widget_preview"
     android:previewImage="@drawable/widget_preview"
