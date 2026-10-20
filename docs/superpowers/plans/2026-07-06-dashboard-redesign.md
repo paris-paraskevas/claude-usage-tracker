@@ -1,5 +1,7 @@
 # Dashboard Redesign Implementation Plan
 
+> **Status (2026-10): shipped.** The desktop bento + 4-destination nav shipped in v0.2.0 (#38) and the phone redesign in #40. The checkboxes below were never ticked; treat them as a historical record. Open leftovers (refreshed README screenshots, `docs/team.png`, the Play dashboard screenshot) are tracked in `docs/RELEASE-0.3.md`.
+
 > **For agentic workers:** staged restructure of visual code (embedded HTML/CSS/JS + Compose). Not pure TDD — each stage is gated by compile + HTTP smoke + a live visual check. Steps use `- [ ]`.
 
 **Goal:** Reorganise both dashboards to the approved bento + 4-destination design (`docs/superpowers/specs/2026-07-06-dashboard-bento-redesign-design.md`).

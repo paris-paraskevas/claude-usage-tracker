@@ -307,6 +307,8 @@ Standing rules: **every** new table gets `enable row level security`; **every** 
 
 **Client + keys.** Ship the **publishable** key (`sb_publishable_…`) in the binary — safe by design (RLS is the guard, `anon` is granted nothing). Never ship `sb_secret_…`.
 
+> **As built (v0.3):** the desktop does **not** use supabase-py. `supabase_pool.py` is a small stdlib (`urllib`) client for GoTrue + PostgREST, and the session (access + refresh token) is stored in the OS keychain via `keyring`. The supabase-py snippets below are the original design sketch, kept for the reasoning; refresh is serialised behind a lock so rotating refresh tokens are never reused concurrently.
+
 **Session persistence** (supabase-py is in-memory by default → back it with Windows Credential Manager via `keyring`, never plaintext):
 ```python
 class KeyringStorage(SyncSupportedStorage):   # gotrue/supabase_auth base; pin to installed ver (SPIKE-1)
@@ -461,7 +463,7 @@ end $$;
 ```
 
 **Desktop code changes (concrete).**
-- New pywebview **auth gate** (OTP→username→device claim). Add `supabase`+`keyring` to `pyproject.toml` (authoritative) and `requirements.txt`.
+- New pywebview **auth gate** (OTP→username→device claim). Add `keyring` to `pyproject.toml` (authoritative) and `requirements.txt` (as built, no `supabase` dependency: the client is stdlib).
 - Retire identity block (1710-1886): `TEAM_PATH`/`load_team_identity`/`team_create`/`team_join`/`team_add_member`/`team_leave`/`team_parse_join`/`ensure_team_device` → thin module holding the keyring-backed client + a persisted local `device_id`; delete `_team_call`/`_team_get_json` (1732/1753).
 - `TeamSync` (2072): `enabled()` → "valid Supabase session exists"; `sync()` (2099) → the two upserts above (keep login-switch detect 2109 + `build_team_report`); drop `_escrow` (2132); poll dispatch (4764-4768) unchanged.
 - Team-tab data source (3669/3677) → Supabase + reshape; reuse the four merge fns; `team_admin_overview_merged` (2009) rewritten/inlined. **Dashboard HTML/JS untouched.**

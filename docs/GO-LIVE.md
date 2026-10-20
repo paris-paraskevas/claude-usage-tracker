@@ -91,7 +91,7 @@ expired/foreign token is rejected.
 ---
 
 ## 5. Screenshots
-Scrubbed pool captures are prepared (`team-pool.scrubbed.png`, `team-login.scrubbed.png` — real
+Scrubbed pool captures are prepared (`docs/team-pool.scrubbed.png`, `docs/team-login.scrubbed.png` — real
 email/domain/device-id removed, broken "OFFLINE/retrying" chrome cropped). **Still missing:** a
 true **login + consent** capture (the current "login" shot is actually a signed-in pool view). To
 get one: run the app signed-out → Team tab → screenshot the login form with the consent checkbox.

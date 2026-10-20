@@ -1,5 +1,7 @@
 # Dashboard redesign — bento + 4-destination nav (desktop + phone)
 
+> **Status (2026-10): shipped** in v0.2.0 (desktop, #38) and #40 (phone). The brainstorm mockups referenced below were never committed to the repo.
+
 Approved direction 2026-07-06 (mockups: `.superpowers/brainstorm/5055-*/content/{directions,hifi-bento}.html`).
 Full reorganisation of both surfaces to fix the four stated problems: weak hierarchy,
 tab structure/navigation, dated visual style, and clutter/density. Both surfaces share
