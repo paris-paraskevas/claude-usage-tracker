@@ -28,8 +28,8 @@ android {
         applicationId = "com.claudeusage.tracker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 15
-        versionName = "0.2.0"
+        versionCode = 16
+        versionName = "0.3.0"
     }
     signingConfigs {
         if (keystorePropsFile.exists()) create("release") {
@@ -65,6 +65,7 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.material3:material3")
@@ -78,14 +79,18 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
-    // libsodium — exact crypto_secretbox interop with PyNaCl on the desktop
-    implementation("com.goterl:lazysodium-android:5.1.0@aar")
-    implementation("net.java.dev.jna:jna:5.14.0@aar")
+    // libsodium — exact crypto_secretbox interop with PyNaCl on the desktop.
+    // 5.2.0 / JNA 5.17.0 ship 16 KB-aligned .so files (Play's 16 KB page-size requirement);
+    // 5.1.0's libsodium.so was 4 KB-aligned.
+    implementation("com.goterl:lazysodium-android:5.2.0@aar")
+    implementation("net.java.dev.jna:jna:5.17.0@aar")
 
-    // QR scanning
+    // QR scanning (Maven Central)
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
-    // Push (FCM). Initialized manually in App.kt; google-services.json optional at build time.
+    // Push (FCM). Firebase auto-initialises via its ContentProvider when the google-services
+    // plugin is applied (i.e. google-services.json is present); without it, FirebaseMessaging
+    // calls throw and are caught (push off, viewing still works). See push/PushTokens.kt.
     implementation(platform("com.google.firebase:firebase-bom:33.5.1"))
     implementation("com.google.firebase:firebase-messaging-ktx")
 }

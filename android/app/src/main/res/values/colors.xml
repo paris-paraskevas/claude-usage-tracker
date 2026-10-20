@@ -1,6 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="bg">#FF0E0E10</color>
-    <color name="accent">#FFD97757</color>
+    <!-- Window background = the Compose background (ui/Theme.kt BrandLight.bg) so there's no
+         flash between the splash/window and the first Compose frame. Night values in values-night. -->
+    <color name="bg">#FFF5F1EA</color>
+    <color name="accent">#FFB4532F</color>
     <color name="ic_launcher_background">#FFD97757</color>
+    <!-- Static widget-picker preview (layout/widget_preview.xml) -->
+    <color name="widget_preview_bg">#FFFBF9F5</color>
+    <color name="widget_preview_ink">#FF1F1A15</color>
+    <color name="widget_preview_dim">#FF574E45</color>
 </resources>

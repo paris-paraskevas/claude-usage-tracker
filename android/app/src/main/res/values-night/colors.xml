@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- = ui/Theme.kt BrandDark.bg -->
+    <color name="bg">#FF100E0C</color>
+    <color name="accent">#FFD97757</color>
+    <color name="widget_preview_bg">#FF1A1613</color>
+    <color name="widget_preview_ink">#FFF2EDE5</color>
+    <color name="widget_preview_dim">#FFA99F93</color>
+</resources>

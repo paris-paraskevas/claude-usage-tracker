@@ -2,4 +2,10 @@
 <resources>
     <string name="app_name">Usage Tracker for Claude</string>
     <string name="widget_desc">Claude 5-hour, weekly and context usage at a glance</string>
+    <!-- Widget picker preview (sample values) -->
+    <string name="widget_preview_title">Claude</string>
+    <string name="widget_preview_5h">5h</string>
+    <string name="widget_preview_5h_pct">42%</string>
+    <string name="widget_preview_week">Week</string>
+    <string name="widget_preview_week_pct">67%</string>
 </resources>

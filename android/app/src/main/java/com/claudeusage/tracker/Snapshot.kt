@@ -2,26 +2,49 @@ package com.claudeusage.tracker
 
 import org.json.JSONArray
 import org.json.JSONObject
+import java.time.OffsetDateTime
 
-data class Win(val key: String, val label: String, val pct: Double, val resetsAt: Long?, val color: String)
+/** A usage window. [key] is five_hour / seven_day (the main gauges) or the scoped weekly
+ *  windows seven_day_opus / seven_day_sonnet. [ratePerHour] / [etaSeconds] are the desktop's
+ *  burn-rate projection (null = not enough samples; rate 0 = flat usage). */
+data class Win(
+    val key: String, val label: String, val pct: Double, val resetsAt: Long?, val color: String,
+    val ratePerHour: Double?, val etaSeconds: Long?,
+)
 data class Sess(val name: String, val pct: Double, val tokens: Long, val active: Boolean)
 data class Msg(val role: String, val text: String, val ts: Long?)
 data class Transcript(val name: String, val cwd: String?, val sessionId: String?, val active: Boolean, val messages: List<Msg>)
 data class ExtraUsage(val used: Double?, val limit: Double?, val currency: String, val pct: Double?)
 data class NearLimit(val name: String, val window: String, val pct: Double)
-data class TeamMember(
+
+/** One account in the team pool (v0.3: the pool is made of Claude *accounts*, not people). */
+data class PoolAccount(
     val name: String, val fhPct: Double?, val sdPct: Double?,
+    val fhResetsAt: Long?, val sdResetsAt: Long?,
     val monthSpend: Double?, val monthTokens: Long?, val currency: String,
 )
 data class TeamOverview(
-    val orgSpend: Double?, val memberCount: Int, val tz: String,
-    val near: List<NearLimit>, val members: List<TeamMember>,
+    /** Single-currency org total, or null when the pool mixes currencies (see [spendByCurrency]). */
+    val orgSpend: Double?, val orgCurrency: String?,
+    /** Month spend per currency — never summed across currencies. */
+    val spendByCurrency: Map<String, Double>,
+    val accountCount: Int, val tz: String,
+    val near: List<NearLimit>, val accounts: List<PoolAccount>,
+    /** "admin" / "member", or null when an older desktop doesn't say. */
+    val role: String?,
 )
+
+/** Recent usage samples for the sparkline (epoch seconds + percents, oldest first). */
+data class History(val t: LongArray, val fiveHour: DoubleArray, val sevenDay: DoubleArray)
 
 /** A parsed, UI-ready view of the desktop snapshot. Parsing is defensive — any field
  *  may be missing on an early/stale snapshot. */
 data class Snap(
     val ok: Boolean,
+    /** The desktop's own fetch error (e.g. "Login expired"), present when [ok] is false. */
+    val error: String?,
+    /** "ok" / "expired" / "missing" — the desktop's Claude login state. */
+    val tokenState: String?,
     val org: String,
     val email: String,
     val subscription: String,
@@ -42,12 +65,43 @@ data class Snap(
     val atPeak: String?,
     val favModel: String?,
     val transcripts: List<Transcript>,
+    /** The desktop has "mirror conversations to the phone" turned on. */
+    val mirrorOn: Boolean,
     val extra: ExtraUsage?,
+    /** Pool overview — sent to every signed-in team member (admins and members) since v0.3. */
     val teamOverview: TeamOverview?,
+    /** `team.device_ok`: false = this pooled Claude account is in use on another device. */
+    val deviceOk: Boolean?,
+    val history: History?,
 ) {
+    val fiveHour: Win? get() = wins.firstOrNull { it.key == "five_hour" }
+    val sevenDay: Win? get() = wins.firstOrNull { it.key == "seven_day" }
+    /** Scoped weekly windows (Opus / Sonnet), shown as small secondary rows. */
+    val scoped: List<Win> get() = wins.filter { it.key == "seven_day_opus" || it.key == "seven_day_sonnet" }
+    val loginExpired: Boolean get() = tokenState == "expired" || tokenState == "missing"
+
     companion object {
+        private val WINDOW_KEYS = setOf("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet")
+
         private fun JSONObject.optNullableDouble(key: String): Double? =
             if (!has(key) || isNull(key)) null else optDouble(key).let { if (it.isNaN()) null else it }
+
+        private fun JSONObject.optNullableLong(key: String): Long? =
+            if (!has(key) || isNull(key)) null else optDouble(key).let { if (it.isNaN()) null else it.toLong() }
+
+        private fun JSONObject.optText(key: String): String? =
+            if (!has(key) || isNull(key)) null else optString(key).takeIf { it.isNotBlank() && it != "null" }
+
+        /** A reset time as epoch ms: accepts epoch ms, epoch seconds, or an ISO-8601 string
+         *  (the pool rows carry `fh_resets_at` / `sd_resets_at` as ISO text). */
+        private fun JSONObject.optInstantMs(key: String): Long? {
+            if (!has(key) || isNull(key)) return null
+            return when (val v = opt(key)) {
+                is Number -> v.toLong().let { if (it in 1..99_999_999_999L) it * 1000 else it }
+                is String -> runCatching { OffsetDateTime.parse(v).toInstant().toEpochMilli() }.getOrNull()
+                else -> null
+            }
+        }
 
         fun parse(jsonStr: String): Snap {
             val o = JSONObject(jsonStr)
@@ -59,16 +113,18 @@ data class Snap(
             val wins = ArrayList<Win>()
             val wa = o.optJSONArray("windows") ?: JSONArray()
             for (i in 0 until wa.length()) {
-                val w = wa.getJSONObject(i)
+                val w = wa.optJSONObject(i) ?: continue
                 val key = w.optString("key")
-                if (key != "five_hour" && key != "seven_day") continue
+                if (key !in WINDOW_KEYS) continue
                 wins.add(
                     Win(
                         key = key,
-                        label = w.optString("label", key),
+                        label = w.optText("label") ?: key,
                         pct = w.optDouble("pct", 0.0),
-                        resetsAt = if (w.isNull("resets_at")) null else w.optLong("resets_at"),
+                        resetsAt = w.optNullableLong("resets_at"),
                         color = w.optString("color", "#5e9e72"),
+                        ratePerHour = w.optNullableDouble("rate_per_hour"),
+                        etaSeconds = w.optNullableLong("eta_seconds"),
                     )
                 )
             }
@@ -76,7 +132,7 @@ data class Snap(
             val sessions = ArrayList<Sess>()
             val sa = o.optJSONArray("sessions") ?: JSONArray()
             for (i in 0 until sa.length()) {
-                val s = sa.getJSONObject(i)
+                val s = sa.optJSONObject(i) ?: continue
                 sessions.add(
                     Sess(
                         name = s.optString("name", "?"),
@@ -88,17 +144,17 @@ data class Snap(
             }
 
             val watch = ArrayList<String>()
-            ui?.optJSONArray("status_components")?.let { for (i in 0 until it.length()) watch.add(it.getString(i)) }
+            ui?.optJSONArray("status_components")?.let { for (i in 0 until it.length()) watch.add(it.optString(i)) }
             val sv = statusView(o.optJSONObject("status"), watch)
 
             val at = o.optJSONObject("alltime")
             val period = at?.optJSONObject("periods")?.optJSONObject("all")
 
             // `transcripts` (list, user-pickable) is preferred; fall back to the single
-            // `transcript` an older desktop may still send.
+            // `transcript` an older desktop may still send. Read-only mirror.
             val transcripts = ArrayList<Transcript>()
             o.optJSONArray("transcripts")?.let { arr ->
-                for (i in 0 until arr.length()) transcripts.add(parseTranscript(arr.getJSONObject(i)))
+                for (i in 0 until arr.length()) arr.optJSONObject(i)?.let { transcripts.add(parseTranscript(it)) }
             }
             if (transcripts.isEmpty()) o.optJSONObject("transcript")?.let { transcripts.add(parseTranscript(it)) }
 
@@ -107,64 +163,108 @@ data class Snap(
             val extra = if (ex != null) ExtraUsage(
                 used = ex.optNullableDouble("used"),
                 limit = ex.optNullableDouble("limit"),
-                currency = ex.optString("currency", ""),
+                currency = ex.optString("currency", "").let { if (it == "null") "" else it },
                 pct = ex.optNullableDouble("pct"),
             ) else null
 
-            // Compact team overview — present only in an admin's snapshot.
-            val to = o.optJSONObject("team_overview")
-            val teamOverview = if (to != null) {
-                val nearArr = to.optJSONArray("near") ?: JSONArray()
-                val near = ArrayList<NearLimit>()
-                for (i in 0 until nearArr.length()) {
-                    val n = nearArr.getJSONObject(i)
-                    near.add(NearLimit(n.optString("name"), n.optString("window"), n.optNullableDouble("pct") ?: 0.0))
-                }
-                val memArr = to.optJSONArray("members") ?: JSONArray()
-                val members = ArrayList<TeamMember>()
-                for (i in 0 until memArr.length()) {
-                    val mm = memArr.getJSONObject(i)
-                    members.add(TeamMember(
-                        name = mm.optString("name"),
-                        fhPct = mm.optNullableDouble("fh_pct"),
-                        sdPct = mm.optNullableDouble("sd_pct"),
-                        monthSpend = mm.optNullableDouble("month_spend"),
-                        monthTokens = if (mm.isNull("month_tokens")) null else mm.optLong("month_tokens"),
-                        currency = mm.optString("currency", ""),
-                    ))
-                }
-                TeamOverview(
-                    orgSpend = to.optNullableDouble("org_spend"),
-                    memberCount = if (to.isNull("member_count")) 0 else to.optInt("member_count"),
-                    tz = to.optString("tz", ""),
-                    near = near, members = members,
-                )
-            } else null
-
             return Snap(
                 ok = o.optBoolean("ok", false),
+                error = o.optText("error"),
+                tokenState = o.optText("token_state"),
                 org = acc?.optString("org").orEmptyAcct(acc),
-                email = acc?.optString("email")?.takeIf { it.isNotBlank() && it != "null" } ?: "",
-                subscription = o.optString("subscription", ""),
+                email = acc?.optText("email") ?: "",
+                subscription = o.optText("subscription") ?: "",
                 updatedAt = o.optLong("updated_at", 0),
-                verdictText = verdict?.optString("text"),
-                verdictColor = verdict?.optString("color"),
+                verdictText = verdict?.optText("text"),
+                verdictColor = verdict?.optText("color"),
                 wins = wins,
-                ctxPct = ctx?.let { if (it.isNull("used_percentage")) null else it.optDouble("used_percentage") },
+                ctxPct = ctx?.optNullableDouble("used_percentage"),
                 ctxTokens = ctx?.optLong("total_input_tokens")?.takeIf { it > 0 },
                 sessions = sessions,
                 statusWord = sv?.first,
                 statusColor = sv?.second,
-                statusDesc = o.optJSONObject("status")?.optString("description")?.takeIf { it.isNotBlank() && it != "null" },
-                atSessions = period?.optLong("sessions"),
-                atMessages = period?.optLong("messages"),
-                atTokens = period?.optLong("tokens"),
-                atStreak = at?.optInt("streak_current"),
-                atPeak = at?.optString("peak_hour")?.takeIf { it.isNotBlank() && it != "null" },
-                favModel = period?.optString("fav_model")?.takeIf { it.isNotBlank() && it != "null" },
+                statusDesc = o.optJSONObject("status")?.optText("description"),
+                atSessions = period?.optNullableLong("sessions"),
+                atMessages = period?.optNullableLong("messages"),
+                atTokens = period?.optNullableLong("tokens"),
+                atStreak = at?.optNullableLong("streak_current")?.toInt(),
+                atPeak = at?.optText("peak_hour"),
+                favModel = period?.optText("fav_model"),
                 transcripts = transcripts,
+                mirrorOn = ui?.optBoolean("remote_transcript", false) ?: false,
                 extra = extra,
-                teamOverview = teamOverview,
+                teamOverview = parseTeam(o),
+                deviceOk = o.optJSONObject("team")?.let { t ->
+                    if (!t.has("device_ok") || t.isNull("device_ok")) null else t.optBoolean("device_ok")
+                },
+                history = parseHistory(o.optJSONObject("history")),
+            )
+        }
+
+        /** The compact pool overview, sent to every signed-in teammate (admins and members) since
+         *  v0.3. The viewer's role comes from `team_overview.role`, falling back to the snapshot's
+         *  `team.role` (older desktops sent neither and only reached admins). Accepts both
+         *  `members`/`member_count` (current) and `accounts`/`account_count`; the spend totals may
+         *  sit at the top level (compact) or under `kpis` (merged). */
+        private fun parseTeam(o: JSONObject): TeamOverview? {
+            val to = o.optJSONObject("team_overview") ?: return null
+            val nearArr = to.optJSONArray("near") ?: JSONArray()
+            val near = ArrayList<NearLimit>()
+            for (i in 0 until nearArr.length()) {
+                val n = nearArr.optJSONObject(i) ?: continue
+                near.add(NearLimit(n.optText("name") ?: "?", n.optText("window") ?: "", n.optNullableDouble("pct") ?: 0.0))
+            }
+            val accArr = to.optJSONArray("accounts") ?: to.optJSONArray("members") ?: JSONArray()
+            val accounts = ArrayList<PoolAccount>()
+            for (i in 0 until accArr.length()) {
+                val a = accArr.optJSONObject(i) ?: continue
+                // Rows may be flat (compact) or carry the usage under `account` (merged shape).
+                val row = a.optJSONObject("account") ?: a
+                accounts.add(PoolAccount(
+                    name = a.optText("name") ?: "?",
+                    fhPct = row.optNullableDouble("fh_pct"),
+                    sdPct = row.optNullableDouble("sd_pct"),
+                    fhResetsAt = row.optInstantMs("fh_resets_at"),
+                    sdResetsAt = row.optInstantMs("sd_resets_at"),
+                    monthSpend = a.optNullableDouble("month_spend"),
+                    monthTokens = a.optNullableLong("month_tokens"),
+                    currency = a.optText("currency") ?: "",
+                ))
+            }
+            val count = to.optNullableLong("account_count")?.toInt()
+                ?: to.optNullableLong("member_count")?.toInt()
+                ?: accounts.size
+            val k = to.optJSONObject("kpis")
+            val byCur = LinkedHashMap<String, Double>()
+            (to.optJSONObject("org_spend_by_currency") ?: k?.optJSONObject("org_spend_by_currency"))?.let { m ->
+                val keys = m.keys()
+                while (keys.hasNext()) {
+                    val cur = keys.next()
+                    m.optNullableDouble(cur)?.let { v -> byCur[cur] = v }
+                }
+            }
+            return TeamOverview(
+                orgSpend = to.optNullableDouble("org_spend") ?: k?.optNullableDouble("org_spend"),
+                orgCurrency = to.optText("org_currency") ?: k?.optText("org_currency"),
+                spendByCurrency = byCur,
+                accountCount = count,
+                tz = to.optText("tz") ?: "",
+                near = near, accounts = accounts,
+                role = to.optText("role") ?: o.optJSONObject("team")?.optText("role"),
+            )
+        }
+
+        private fun parseHistory(h: JSONObject?): History? {
+            if (h == null) return null
+            val t = h.optJSONArray("t") ?: return null
+            val f = h.optJSONArray("five_hour") ?: JSONArray()
+            val w = h.optJSONArray("seven_day") ?: JSONArray()
+            val n = minOf(t.length(), f.length(), w.length())
+            if (n < 2) return null
+            return History(
+                t = LongArray(n) { t.optLong(it) },
+                fiveHour = DoubleArray(n) { f.optDouble(it, 0.0) },
+                sevenDay = DoubleArray(n) { w.optDouble(it, 0.0) },
             )
         }
 
@@ -172,17 +272,17 @@ data class Snap(
             val ma = tj.optJSONArray("messages") ?: JSONArray()
             val ms = ArrayList<Msg>()
             for (i in 0 until ma.length()) {
-                val mo = ma.getJSONObject(i)
+                val mo = ma.optJSONObject(i) ?: continue
                 ms.add(Msg(
                     role = mo.optString("role"),
                     text = mo.optString("text"),
-                    ts = if (mo.isNull("ts")) null else (mo.optDouble("ts") * 1000).toLong(),
+                    ts = mo.optNullableDouble("ts")?.let { (it * 1000).toLong() },
                 ))
             }
             return Transcript(
                 name = tj.optString("name"),
-                cwd = tj.optString("cwd").takeIf { it.isNotBlank() && it != "null" },
-                sessionId = tj.optString("session_id").takeIf { it.isNotBlank() && it != "null" },
+                cwd = tj.optText("cwd"),
+                sessionId = tj.optText("session_id"),
                 active = tj.optBoolean("active", false),
                 messages = ms,
             )
@@ -193,7 +293,7 @@ data class Snap(
             val name = acc?.optString("name")
             if (!name.isNullOrBlank() && name != "null") return name
             val email = acc?.optString("email")
-            return email?.substringBefore("@") ?: ""
+            return email?.takeIf { it != "null" }?.substringBefore("@") ?: ""
         }
 
         // Mirrors the dashboard's Ok / Errors / Down mapping.
@@ -212,7 +312,7 @@ data class Snap(
             val comps = status.optJSONArray("components")
             if (watch.isNotEmpty() && comps != null) {
                 for (i in 0 until comps.length()) {
-                    val c = comps.getJSONObject(i)
+                    val c = comps.optJSONObject(i) ?: continue
                     if (watch.contains(c.optString("name"))) {
                         sev = maxOf(sev, COMP_RANK[c.optString("status")] ?: 0)
                     }

@@ -1,20 +1,14 @@
 package com.claudeusage.tracker.push
 
-import android.Manifest
-import android.content.pm.PackageManager
-import android.os.Build
+import android.annotation.SuppressLint
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
-import androidx.core.content.ContextCompat
 import com.claudeusage.tracker.Crypto
+import com.claudeusage.tracker.Notifications
 import com.claudeusage.tracker.Prefs
 import com.claudeusage.tracker.R
-import com.claudeusage.tracker.RelayClient
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 /**
@@ -24,11 +18,8 @@ import org.json.JSONObject
 class PushService : FirebaseMessagingService() {
 
     override fun onNewToken(token: String) {
-        // Register the token with every paired account so each desktop can push this phone.
-        val accounts = Prefs.all(this)
-        CoroutineScope(Dispatchers.IO).launch {
-            accounts.forEach { a -> runCatching { RelayClient(a.pairing).registerPushToken(token) } }
-        }
+        // Register the new token with every paired account so each desktop can push this phone.
+        PushTokens.registerAsync(this, token)
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
@@ -52,19 +43,18 @@ class PushService : FirebaseMessagingService() {
         )
     }
 
+    @SuppressLint("MissingPermission")   // checked by Notifications.canPost
     private fun showNotification(title: String, body: String, tag: String) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
-            PackageManager.PERMISSION_GRANTED
-        ) return
+        if (!Notifications.canPost(this)) return
 
-        val n = NotificationCompat.Builder(this, "usage_alerts")
+        val n = NotificationCompat.Builder(this, Notifications.CHANNEL_ALERTS)
             .setSmallIcon(R.drawable.ic_stat_usage)
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
+            .setContentIntent(Notifications.openAppIntent(this, requestCode = 1))
             .build()
         val id = (if (tag.isNotEmpty()) tag else title).hashCode()
         NotificationManagerCompat.from(this).notify(id, n)

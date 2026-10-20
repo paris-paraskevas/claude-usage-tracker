@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Picker preview image for launchers before Android 12 (android:previewImage): a rounded
+     card with the two usage bars of the app mark. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="180dp"
+    android:height="110dp"
+    android:viewportWidth="180"
+    android:viewportHeight="110">
+    <path android:fillColor="#FF1A1613"
+        android:pathData="M18,0h144a18,18 0 0,1 18,18v74a18,18 0 0,1 -18,18h-144a18,18 0 0,1 -18,-18v-74a18,18 0 0,1 18,-18z" />
+    <path android:fillColor="#FFF2EDE5" android:pathData="M14,14h70v8h-70z" />
+    <path android:fillColor="#FF786F65" android:pathData="M14,40h40v6h-40z" />
+    <path android:fillColor="#FF5E9E72" android:pathData="M130,34h36v16h-36z" />
+    <path android:fillColor="#FF786F65" android:pathData="M14,70h40v6h-40z" />
+    <path android:fillColor="#FFCDA24E" android:pathData="M130,64h36v16h-36z" />
+</vector>
