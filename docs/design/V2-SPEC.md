@@ -213,10 +213,13 @@ Native Windows 11 feel; the identity lives in the data visuals.
   16:40 (in 14 m)"). Expands in place to a 340 px panel on hover/click; pin keeps it open. Snaps to
   edges; hides when a full-screen app or presentation is active.
 - **Tray icon**: drawn at the exact small-icon size for the current DPI (16/20/24/32), in taskbar
-  colours from `SystemUsesLightTheme`; the binding limit's used % as 2 digits; corner badge only for
-  watch (orange dot) and will-hit (vermillion triangle); limited → clock glyph; stale → grey digits
-  plus a slashed badge. Redrawn only when (digits, level, stale, theme, DPI) change. Tooltip ≤ 127
-  characters, from `decision.title` + `detail`.
+  colours from `SystemUsesLightTheme`. Default style (owner's choice after the first test build):
+  two vertical bars, 5-hour | weekly, filled to the used %; fill in taskbar colour when ok, amber
+  for watch, vermillion for will-hit, full vermillion when limited, grey when stale. Alternative
+  "number" style (setting `overlay.tray_icon`): the binding limit's % as 2 digits with a status
+  bar along the bottom edge (a corner badge covered the second digit at 16 px); clock when
+  limited. Redrawn only when the icon key changes. Tooltip ≤ 127 characters, from
+  `decision.title` + `detail`.
 - **Flyout**: frameless window above the tray (≈ 300 px wide), closes on blur.
 
 ## 9. Android widget

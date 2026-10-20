@@ -1,9 +1,13 @@
 """Tray icon: a pure renderer (testable anywhere) and the pystray host (Windows).
 
-The icon shows the binding limit's used % as two pixel-snapped digits in taskbar colours, a
-bottom-right badge for watch (dot) / will-hit (triangle), a clock when limited, and grey digits
-with a slashed badge when the data is stale. It is redrawn only when (digits, level, stale,
-theme, size) change."""
+Two styles (Settings > Overlay & tray):
+- "bars" (default): two vertical bars, 5-hour on the left and weekly on the right, filled to the
+  used %. The fill is in taskbar colours when on pace, amber for watch, vermillion for will-hit
+  and a full vermillion bar when limited; grey when the data is stale. Colour follows the
+  forecast, not the raw percentage.
+- "number": the binding limit's used % as two pixel-snapped digits, a status bar along the
+  bottom edge for watch / will-hit / stale, and a clock when limited.
+It is redrawn only when its key (style, values, levels, stale, theme, size) changes."""
 from __future__ import annotations
 
 import math
@@ -38,8 +42,75 @@ def digits_for(state: dict | None):
     return str(min(99, int(math.floor(lim["used_pct"])))), level, stale
 
 
-def icon_key(state: dict | None, theme: str, size: int) -> tuple:
-    return (*digits_for(state), theme, size)
+def bars_for(state: dict | None):
+    """((5h %, level) | None, (weekly %, level) | None, stale) for the bars style."""
+    if not state:
+        return None, None, True
+    by = {l["id"]: l for l in state.get("limits") or []}
+    stale = bool((state.get("source") or {}).get("stale"))
+
+    def one(lid):
+        lim = by.get(lid)
+        if lim is None:
+            return None
+        return int(max(0.0, min(100.0, lim["used_pct"]))), lim["level"]
+    return one("five_hour"), one("seven_day"), stale
+
+
+def icon_key(state: dict | None, theme: str, size: int, style: str = "number") -> tuple:
+    if style == "bars":
+        return ("bars", *bars_for(state), theme, size)
+    return ("number", *digits_for(state), theme, size)
+
+
+def render_key(key: tuple):
+    """The image for an icon_key()."""
+    if key[0] == "bars":
+        _, five, week, stale, theme, size = key
+        return render_bars(size, five, week, stale, theme)
+    _, digits, level, stale, theme, size = key
+    return render_icon(size, digits, level, stale, theme)
+
+
+def render_bars(size: int, five, week, stale: bool, theme: str = "dark"):
+    """Two vertical bars (5-hour | weekly), pixel-snapped for the exact tray size."""
+    from PIL import Image, ImageDraw
+    theme = theme if theme in FG else "dark"
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    fg = FG[theme]
+    m = max(1, round(size / 16))                     # outer margin
+    gap = max(2, round(size / 8))
+    bw = (size - 2 * m - gap) // 2
+    t = 1 if size < 32 else 2                        # track outline
+    top, bot = m, size - 1 - m
+    track_line = STALE if stale else (*fg[:3], 110)
+    track_fill = (*fg[:3], 26)
+    for i, bar in enumerate((five, week)):
+        x0 = m + i * (bw + gap)
+        x1 = x0 + bw - 1
+        d.rectangle([x0, top, x1, bot], fill=track_fill, outline=track_line, width=t)
+        if not bar:
+            continue
+        pct, level = bar
+        if stale:
+            col = STALE
+        elif level == "limited":
+            col, pct = HIT[theme], 100
+        elif level == "will_hit":
+            col = HIT[theme]
+        elif level == "watch":
+            col = WATCH[theme]
+        else:
+            col = fg
+        inner_top, inner_bot = top + t, bot - t
+        h = inner_bot - inner_top + 1
+        px = round(h * pct / 100)
+        if pct > 0:
+            px = max(1, px)                          # a sliver right after a reset
+        if px:
+            d.rectangle([x0 + t, inner_bot - px + 1, x1 - t, inner_bot], fill=col)
+    return img
 
 
 def _draw_digit(d, ch, x0, y0, w, h, t, color):
@@ -245,9 +316,9 @@ class TrayHost:
         self._theme = "light" if winplat.taskbar_light() else "dark"
         self._size = winplat.small_icon_size()
         st = self.engine.snapshot()
-        self._key = icon_key(st, self._theme, self._size)
+        self._key = icon_key(st, self._theme, self._size, self._style())
         cls = _icon_class()
-        self.icon = cls(APP_NAME, icon=render_icon(self._size, *self._key[:3], self._theme),
+        self.icon = cls(APP_NAME, icon=render_key(self._key),
                         title=tooltip(st), menu=self._menu())
         self._tip = tooltip(st)
         self.icon.on_left_click = self._left_click
@@ -267,6 +338,9 @@ class TrayHost:
         except Exception:
             pass
 
+    def _style(self) -> str:
+        return ((self.engine.cfg.get("overlay") or {}).get("tray_icon")) or "bars"
+
     def _left_click(self) -> None:
         if self.shell is not None:
             self.shell.toggle_flyout(self.anchor())
@@ -281,11 +355,11 @@ class TrayHost:
         with self._lock:
             if not self.icon:
                 return
-            key = icon_key(st, self._theme, self._size)
+            key = icon_key(st, self._theme, self._size, self._style())
             try:
                 if key != self._key:
                     self._key = key
-                    self.icon.icon = render_icon(self._size, *key[:3], self._theme)
+                    self.icon.icon = render_key(key)
                 tip = tooltip(st)
                 if tip != self._tip:
                     self._tip = tip

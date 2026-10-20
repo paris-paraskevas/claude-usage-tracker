@@ -14,6 +14,8 @@ SNAP_PX = 12
 FLYOUT_W, FLYOUT_H = 300, 232          # logical px; the page reports its real size (flyout_resize)
 DASH_W, DASH_H, DASH_MIN = 1100, 760, (720, 560)
 OVERLAY_DEFAULT = (360, 30)
+OVERLAY_MIN = (120, 24)                 # pywebview's default min_size (200, 100) would leave a box under the strip
+FLYOUT_MIN = (200, 120)
 BG = {"light": "#F3F3F3", "dark": "#202020"}
 
 
@@ -134,7 +136,7 @@ class Shell:
             pass
         self.flyout = _create(
             webview, "Claude usage", self.url("/flyout"), width=FLYOUT_W, height=FLYOUT_H, resizable=False,
-            frameless=True, easy_drag=False, on_top=True, hidden=True, background_color=self.bg())
+            frameless=True, easy_drag=False, on_top=True, hidden=True, background_color=self.bg(), min_size=FLYOUT_MIN)
         if (self.engine.cfg.get("overlay") or {}).get("shown"):
             self._create_overlay()
         webview.start(self._started, private_mode=False, storage_path=str(paths.WEBVIEW_DIR),
@@ -182,7 +184,9 @@ class Shell:
         w, h = cfg.get("overlay_size") or OVERLAY_DEFAULT
         self.overlay = _create(
             self.webview, "Claude usage overlay", self.url("/overlay"), width=int(w), height=int(h), resizable=False,
-            frameless=True, easy_drag=False, on_top=True, focus=False, shadow=False, background_color=self.bg())
+            frameless=True, easy_drag=False, on_top=True, focus=False, shadow=False, background_color=self.bg(),
+            min_size=OVERLAY_MIN)
+        self._overlay_pending, self._overlay_ready = None, False
         self.overlay.events.shown += self._overlay_shown
         self.overlay.events.moved += self._overlay_moved
         self.overlay.events.closed += self._overlay_closed
@@ -192,6 +196,7 @@ class Shell:
         self.overlay, self._overlay_visible = None, False
 
     def _overlay_shown(self, *_):
+        self._overlay_ready = True
         hwnd = _hwnd(self.overlay)
         self._apply_styles(hwnd, self.engine.cfg.get("overlay") or {})
         pos = self.engine.cfg.get("overlay_pos")
@@ -206,6 +211,9 @@ class Shell:
             if work and pos:
                 x, y = snap_position(pos[0], pos[1], ww, hh, work)
                 winplat.set_window_pos(hwnd, x, y, topmost=True)
+        pending, self._overlay_pending = getattr(self, "_overlay_pending", None), None
+        if pending:                                       # a size the page reported before the window existed
+            self.resize_overlay(*pending)
 
     def _apply_styles(self, hwnd, ov: dict) -> None:
         if not hwnd:
@@ -261,6 +269,9 @@ class Shell:
         if self.overlay is None:
             return
         hwnd = _hwnd(self.overlay)
+        if not hwnd and not getattr(self, "_overlay_ready", True):   # not shown yet: apply once it is
+            self._overlay_pending = (w, h)
+            return
         r, work = winplat.window_rect(hwnd), winplat.work_area_of(hwnd)
         if r and work:
             dpi = winplat.dpi_of(hwnd)

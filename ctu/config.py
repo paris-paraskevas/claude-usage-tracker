@@ -36,7 +36,8 @@ SETTINGS = {
     "phone_push": True,
     "status_components": [],
     "overlay": {"shown": True, "pinned": False, "click_through": False, "opacity": 100,
-                "auto_hide_fullscreen": True, "fields": ["5h", "7d", "ctx", "waiting"]},
+                "auto_hide_fullscreen": True, "fields": ["5h", "7d", "ctx", "waiting"],
+                "tray_icon": "bars"},                # tray: "bars" (5-hour | weekly) or "number"
     "remote_enabled": False,
     "remote_relay_url": DEFAULT_RELAY,
     "remote_transcript": False,
@@ -59,6 +60,7 @@ SCHEMA = {
         "shown": _B, "pinned": _B, "click_through": _B,
         "opacity": {"type": "int", "min": 30, "max": 100},
         "auto_hide_fullscreen": _B,
+        "tray_icon": {"type": "enum", "values": ["bars", "number"]},
         "fields": {"type": "list", "max": len(OVERLAY_FIELDS), "unique": True,
                    "item": {"type": "enum", "values": list(OVERLAY_FIELDS)}}}},
     "remote_enabled": _B,
