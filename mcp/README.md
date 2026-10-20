@@ -1,32 +1,36 @@
-# Claude Usage Tracker — MCP server
+# Claude Usage Tracker: MCP server
 
-Lets **Claude drive the tracker through chat**: ask for your usage, the team overview/ledger,
-force a sync, or hand it an exported spend report. It's a thin bridge to the tracker's own
-loopback API (`127.0.0.1`) — it holds **no secrets** and needs the tray app running.
+This server lets **Claude drive the tracker from a chat**. You can ask for your usage or your
+team's account pool and monthly ledger, or force a sync. It's a thin bridge to the tracker's
+own loopback API (`127.0.0.1`). It holds **no secrets**, and the tray app must be running.
 
-> **What it is / isn't.** This is a *control/interface* layer, not a new data source. It
+> **What it is and isn't.** This is a *control/interface* layer, not a new data source. It
 > exposes exactly what the tracker already knows. It does **not** unlock Anthropic's org
-> analytics — a Team plan can't grant an app that access (see `docs/TEAM.md`).
+> analytics, because a Team plan can't grant an app that access (see `docs/TEAM.md`).
 
 ## Tools
 | Tool | What it returns |
 |---|---|
-| `get_usage` | 5h/weekly utilization + resets, context, extra-usage € |
-| `get_status` | tracker live/stale, Anthropic status, update available |
-| `get_team_overview` | *(team admin)* per-member load, MTD spend, near-limit members |
-| `get_team_ledger` | *(team admin)* per-member monthly spend + tokens |
+| `get_usage` | 5h/weekly utilization and reset times, context, extra-usage spend |
+| `get_status` | tracker live/stale, Anthropic status, whether an update is available |
+| `get_team_overview` | *(signed in to a team)* the shared account pool: per-account load, month-to-date spend, near-limit accounts |
+| `get_team_ledger` | *(signed in to a team)* per-account monthly spend and tokens; `month` defaults to the current local month |
 | `sync_now` | force an immediate usage refresh |
-| `import_spend_report` | ingest an exported spend-report CSV (parser pending the export format) |
+
+The team tools work for any team member signed in to the tracker (dashboard → **Team** tab),
+not only admins. If you aren't signed in, they say so. A spend-report CSV import was
+removed until the tracker has a real import endpoint (issue #2).
 
 ## Use it in Claude Code
 ```bash
 cd mcp && npm install
-claude mcp add claude-usage-tracker -- node "C:/Dev/Personal/claude-usage/mcp/server.mjs"
+claude mcp add claude-usage-tracker -- node "/absolute/path/to/claude-usage-tracker/mcp/server.mjs"
 ```
-Or add to a project `.mcp.json`:
+Or add it to a project's `.mcp.json`:
 ```json
-{ "mcpServers": { "claude-usage-tracker": { "command": "node", "args": ["C:/Dev/Personal/claude-usage/mcp/server.mjs"] } } }
+{ "mcpServers": { "claude-usage-tracker": { "command": "node", "args": ["/absolute/path/to/claude-usage-tracker/mcp/server.mjs"] } } }
 ```
+On Windows, use a path such as `C:/Users/you/claude-usage-tracker/mcp/server.mjs`.
 
 ## Use it in Claude Desktop (one-click `.mcpb`)
 ```bash
@@ -37,12 +41,22 @@ mcpb pack            # produces claude-usage-tracker.mcpb (bundles server + deps
 Then double-click the `.mcpb`, or drag it into **Claude Desktop → Settings → Extensions**.
 
 ## Config
-- The tracker's port is auto-detected from `%LOCALAPPDATA%\ClaudeUsageTracker\server_port`.
-  Override with the `CUT_PORT` env var (or the extension's "Tracker port" setting) if needed.
-- The tray app must be running; otherwise the tools return an actionable "can't reach the tracker" error.
+- The server finds the tracker's port automatically from the `server_port` file
+  (`%LOCALAPPDATA%\ClaudeUsageTracker\server_port`; on macOS/Linux, `~/AppData/Local/ClaudeUsageTracker/server_port`, the same place the tracker writes it).
+  If that fails, it uses 8787.
+- To override the port, set the `CUT_PORT` env var or the extension's "Tracker port"
+  setting. A blank or invalid value is ignored.
+- If the tray app isn't running, the tools return a "can't reach the tracker" error that
+  tells you what to do.
+
+## Tests
+```bash
+cd mcp && npm test   # zero-dependency: port resolution, error mapping, manifest ↔ server tool list
+```
 
 ## claude.ai / mobile
-Those clients reach an MCP server from Anthropic's cloud, so they need the **remote** connector
-on the relay (Cloudflare Worker), not this local server — see `docs/MCP-REMOTE.md` (separate).
-The remote connector can serve the **plaintext team data** (D1); your personal usage stays
-local because the snapshot is end-to-end encrypted.
+These clients reach MCP servers from Anthropic's cloud, so they can't use this local server.
+They need the **remote** connector on the relay (Cloudflare Worker); see `relay/README.md`
+and `docs/MCP-REMOTE.md`. The remote connector serves only the team account pool, read
+from Supabase, and you authorize it with a connector token minted in the desktop app. Your
+personal usage stays local, because the phone-sync snapshot is end-to-end encrypted.

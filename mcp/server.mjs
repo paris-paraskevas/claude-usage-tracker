@@ -8,25 +8,12 @@
  * it never needs the Claude login token or any secret of its own.
  *
  * The tracker writes its live port to %LOCALAPPDATA%\ClaudeUsageTracker\server_port;
- * we read that (falling back to the 8787..8796 range start_server scans, or $CUT_PORT).
+ * we use $CUT_PORT when it's a real port number, else that file, else 8787 (see lib.mjs).
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-
-const APP_DIR = join(process.env.LOCALAPPDATA || process.env.HOME || ".", "ClaudeUsageTracker");
-const PORT_FILE = join(APP_DIR, "server_port");
-
-function trackerPort() {
-  if (process.env.CUT_PORT) return Number(process.env.CUT_PORT);
-  try {
-    const p = Number(readFileSync(PORT_FILE, "utf-8").trim());
-    if (p > 0) return p;
-  } catch { /* fall through to default */ }
-  return 8787;
-}
+import { trackerPort, localMonth, teamErrorMessage, usageSummary, ledgerSummary } from "./lib.mjs";
 
 // A tracker call, with an actionable error if the app isn't running.
 async function trackerCall(method, path, body) {
@@ -53,22 +40,6 @@ async function trackerCall(method, path, body) {
 
 const ok = (obj) => ({ content: [{ type: "text", text: JSON.stringify(obj, null, 2) }] });
 const fail = (msg) => ({ isError: true, content: [{ type: "text", text: msg }] });
-
-// Trim the big snapshot down to the numbers worth putting in a chat.
-function usageSummary(d) {
-  const win = {};
-  for (const w of d.windows || []) win[w.key] = { pct: w.pct, resets_at: w.resets_at, level: w.level };
-  return {
-    ok: d.ok, updated_at: d.updated_at,
-    account: (d.account || {}).org || (d.account || {}).email || d.subscription || null,
-    verdict: (d.verdict || {}).text || null,
-    five_hour: win.five_hour || null,
-    seven_day: win.seven_day || null,
-    context: d.context ? { pct: d.context.used_percentage, tokens: d.context.total_input_tokens } : null,
-    extra_usage: d.extra && d.extra.enabled
-      ? { used: d.extra.used, limit: d.extra.limit, currency: d.extra.currency, pct: d.extra.pct } : null,
-  };
-}
 
 const server = new McpServer({ name: "claude-usage-tracker", version: "0.1.0" });
 
@@ -101,35 +72,33 @@ server.registerTool("get_status", {
 });
 
 server.registerTool("get_team_overview", {
-  title: "Get team overview (admin only)",
-  description: "For team-plan admins: live per-member 5h/weekly load, month-to-date spend, and who is near a limit. " +
-    "Returns an error if you aren't a team admin.",
+  title: "Get team account pool",
+  description: "For members of a team in the tracker: the shared Claude account pool — per-account 5h/weekly load, " +
+    "month-to-date extra-usage spend, and accounts near a limit. Needs you to be signed in to a team in the tracker.",
   inputSchema: {},
   annotations: { readOnlyHint: true, openWorldHint: false },
 }, async () => {
   try {
     const d = await trackerCall("GET", "/api/team/overview");
-    if (d.error === "not_admin") return fail("Not a team admin — no team overview available on this account.");
-    if (d.error) return fail(`Team overview unavailable: ${d.error}`);
-    return ok(d);
+    const err = teamErrorMessage(d);
+    return err ? fail(err) : ok(d);
   } catch (e) { return fail(e.message); }
 });
 
 server.registerTool("get_team_ledger", {
-  title: "Get monthly team spend ledger (admin only)",
-  description: "For team-plan admins: per-member calendar-month extra-usage spend and tokens for a given month.",
+  title: "Get monthly team spend ledger",
+  description: "For members of a team in the tracker: per-account calendar-month extra-usage spend and tokens for a month.",
   inputSchema: {
     month: z.string().regex(/^\d{4}-\d{2}$/).optional()
-      .describe("Month as YYYY-MM (defaults to the current month)."),
+      .describe("Month as YYYY-MM (defaults to the current month in your local time)."),
   },
   annotations: { readOnlyHint: true, openWorldHint: false },
 }, async ({ month }) => {
   try {
-    const m = month || new Date().toISOString().slice(0, 7);
+    const m = month || localMonth();
     const d = await trackerCall("GET", `/api/team/ledger?month=${encodeURIComponent(m)}`);
-    if (d.error === "not_admin") return fail("Not a team admin — no ledger available on this account.");
-    if (d.error) return fail(`Ledger unavailable: ${d.error}`);
-    return ok({ month: d.month, members: d.members, spend: d.computed_spend, tokens: d.month_tokens });
+    const err = teamErrorMessage(d);
+    return err ? fail(err) : ok(ledgerSummary(d));
   } catch (e) { return fail(e.message); }
 });
 
@@ -143,24 +112,7 @@ server.registerTool("sync_now", {
   catch (e) { return fail(e.message); }
 });
 
-server.registerTool("import_spend_report", {
-  title: "Import an exported spend report (CSV)",
-  description: "Ingest a spend report exported from the Claude analytics console into the tracker's monthly ledger. " +
-    "Paste the CSV contents. NOTE: the tracker's import endpoint is not wired yet (pending the export format), " +
-    "so this currently reports the columns it received so the format can be finalized.",
-  inputSchema: {
-    csv: z.string().min(1).describe("Raw CSV contents of the exported spend report."),
-  },
-  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
-}, async ({ csv }) => {
-  // TODO(#2): POST to /api/team/import-spend once the tracker exposes it (needs the real export format).
-  const header = (csv.split(/\r?\n/)[0] || "").trim();
-  return ok({
-    imported: false,
-    reason: "Spend-report import isn't wired into the tracker yet — share this header so the parser can be built.",
-    detected_header: header,
-    detected_columns: header ? header.split(",").map((s) => s.trim()) : [],
-  });
-});
+// A spend-report CSV import tool was stubbed here and removed until the tracker has a real
+// import endpoint — see issue #2.
 
 await server.connect(new StdioServerTransport());

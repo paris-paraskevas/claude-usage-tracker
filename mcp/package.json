@@ -5,6 +5,9 @@
   "type": "module",
   "description": "MCP server exposing the Claude Usage Tracker to Claude (Claude Code + Claude Desktop).",
   "bin": { "claude-usage-tracker-mcp": "server.mjs" },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "zod": "^3.23.8"
