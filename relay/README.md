@@ -49,6 +49,10 @@ npx wrangler deploy
 npx wrangler d1 execute claude-usage-team --remote --file=migrations/0002_drop_team_stack.sql
 ```
 
+Or from GitHub: **Actions › Deploy relay › Run workflow** with migration `0002_drop_team_stack.sql`
+(needs the repository secrets `CLOUDFLARE_API_TOKEN` — Workers + D1 edit — and
+`CLOUDFLARE_ACCOUNT_ID`). It runs the relay tests, deploys, then applies the migration.
+
 This migration does three things:
 
 - It adds `ct_hash`/`used` columns and the `oauth_refresh` and `oauth_reg_rl` tables.

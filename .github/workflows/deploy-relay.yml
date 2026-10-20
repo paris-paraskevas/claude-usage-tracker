@@ -1,0 +1,56 @@
+name: Deploy relay
+
+# Deploys the Cloudflare Worker in relay/ and, optionally, runs one D1 migration right after.
+# Run by hand: Actions > Deploy relay > Run workflow (migration e.g. 0002_drop_team_stack.sql).
+# Needs repository secrets CLOUDFLARE_API_TOKEN (Workers + D1 edit) and CLOUDFLARE_ACCOUNT_ID.
+# Worker secrets (SUPABASE_SECRET, FCM_*) live in Cloudflare and are not touched.
+on:
+  workflow_dispatch:
+    inputs:
+      migration:
+        description: "D1 migration to run once after deploying, e.g. 0002_drop_team_stack.sql (empty = none)"
+        required: false
+        default: ""
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: relay
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check secrets and inputs
+        env:
+          MIGRATION: ${{ inputs.migration }}
+        run: |
+          [ -n "$CLOUDFLARE_API_TOKEN" ] || { echo "::error::repository secret CLOUDFLARE_API_TOKEN is not set"; exit 1; }
+          [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || { echo "::error::repository secret CLOUDFLARE_ACCOUNT_ID is not set"; exit 1; }
+          if [ -n "$MIGRATION" ]; then
+            [[ "$MIGRATION" =~ ^[0-9]{4}_[a-z0-9_]+\.sql$ ]] || { echo "::error::migration must look like 0002_name.sql"; exit 1; }
+            [ -f "migrations/$MIGRATION" ] || { echo "::error::relay/migrations/$MIGRATION not found"; exit 1; }
+          fi
+
+      - name: Test
+        run: npm test
+
+      - name: Install wrangler
+        run: npm install --no-audit --no-fund
+
+      - name: Deploy the Worker
+        run: npx wrangler deploy
+
+      - name: Run the migration
+        if: ${{ inputs.migration != '' }}
+        env:
+          MIGRATION: ${{ inputs.migration }}
+        run: npx wrangler d1 execute claude-usage-team --remote --file="migrations/$MIGRATION"
