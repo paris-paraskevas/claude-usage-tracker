@@ -35,10 +35,10 @@ def test_read_appended_stops_at_end_and_partial_line(tmp_path):
 
 def test_alltime_append_between_scans_no_double_count(data_dir):
     f = _setup(data_dir)
-    f.write_text(_rec(0) + "\n" + _rec(1) + "\n", encoding="utf-8")
+    f.write_text(_rec(0) + "\n" + _rec(1) + "\n", encoding="utf-8", newline="")
     cache = {}
     alltime.scan_all_time(cache, NOW)
-    with open(f, "a", encoding="utf-8") as fh:
+    with open(f, "a", encoding="utf-8", newline="") as fh:
         fh.write(_rec(2) + "\n")
     a = alltime.scan_all_time(cache, NOW)
     assert a["total"]["msgs"] == 3
@@ -51,12 +51,12 @@ def test_alltime_append_between_scans_no_double_count(data_dir):
 def test_alltime_half_line_then_completed(data_dir):
     f = _setup(data_dir)
     first, second = _rec(0) + "\n", _rec(1)
-    f.write_text(first + second[:40], encoding="utf-8")              # writer is mid-line
+    f.write_text(first + second[:40], encoding="utf-8", newline="")              # writer is mid-line
     cache = {}
     a = alltime.scan_all_time(cache, NOW)
     assert a["total"]["msgs"] == 1
     assert cache["files"][str(f)] == len(first.encode())             # offset parks before the half line
-    with open(f, "a", encoding="utf-8") as fh:
+    with open(f, "a", encoding="utf-8", newline="") as fh:
         fh.write(second[40:] + "\n")
     a = alltime.scan_all_time(cache, NOW)
     assert a["total"]["msgs"] == 2                                    # completed line counted once, whole
@@ -65,7 +65,7 @@ def test_alltime_half_line_then_completed(data_dir):
 
 def test_alltime_error_mid_file_commits_nothing(data_dir, monkeypatch):
     f = _setup(data_dir)
-    f.write_text(_rec(0) + "\n" + _rec(1, model="claude-boom-1") + "\n", encoding="utf-8")
+    f.write_text(_rec(0) + "\n" + _rec(1, model="claude-boom-1") + "\n", encoding="utf-8", newline="")
     real = alltime.pretty_model
 
     def flaky(raw):
@@ -85,7 +85,7 @@ def test_alltime_error_mid_file_commits_nothing(data_dir, monkeypatch):
 def test_scan_sessions_half_line_and_append(data_dir):
     f = _setup(data_dir)
     first, second = _rec(0) + "\n", _rec(1)
-    f.write_text(first + second[:30], encoding="utf-8")
+    f.write_text(first + second[:30], encoding="utf-8", newline="")
     tr = sessions.SessionTracker(window_s=10 ** 9)
     tail = logtail.LogTailer([tr])
 
@@ -94,7 +94,7 @@ def test_scan_sessions_half_line_and_append(data_dir):
         return sessions.v1_rows(tr.build(NOW), NOW)[0]["tokens"]
     assert tokens() == 110
     assert tr.files[str(f)]["offset"] == len(first.encode())
-    with open(f, "a", encoding="utf-8") as fh:
+    with open(f, "a", encoding="utf-8", newline="") as fh:
         fh.write(second[30:] + "\n" + _rec(2) + "\n")
     assert tokens() == 3 * 110                                        # no double count, nothing lost
     assert tokens() == 3 * 110
@@ -104,7 +104,7 @@ def test_one_read_feeds_both_consumers(data_dir):
     """A single tailer pass feeds sessions and all-time; each keeps its own offset, and a consumer
     that starts later (all-time restored from disk) never sees bytes it already counted."""
     f = _setup(data_dir)
-    f.write_text(_rec(0) + "\n" + _rec(1) + "\n", encoding="utf-8")
+    f.write_text(_rec(0) + "\n" + _rec(1) + "\n", encoding="utf-8", newline="")
     at = alltime.AllTime()
     at.cache["files"][str(f)] = len((_rec(0) + "\n").encode())       # restored offset: rec 0 counted before
     tr = sessions.SessionTracker(window_s=10 ** 9)
@@ -116,7 +116,7 @@ def test_one_read_feeds_both_consumers(data_dir):
 
 def test_failing_consumer_does_not_block_the_other(data_dir, monkeypatch):
     f = _setup(data_dir)
-    f.write_text(_rec(0, model="claude-boom-1") + "\n", encoding="utf-8")
+    f.write_text(_rec(0, model="claude-boom-1") + "\n", encoding="utf-8", newline="")
     monkeypatch.setattr(alltime, "pretty_model", lambda raw: (_ for _ in ()).throw(RuntimeError("boom")))
     at, tr = alltime.AllTime(), sessions.SessionTracker(window_s=10 ** 9)
     logtail.LogTailer([at, tr]).poll(NOW)
@@ -145,3 +145,16 @@ def test_heatmap_is_a_full_sunday_aligned_year_even_for_new_users():
     first = _dt.date.fromisoformat(days[0]["d"])
     assert first.weekday() == 6 and days[-1]["d"] == "2026-10-20"        # Sunday .. today
     assert 365 <= len(days) <= 378 and sum(d["lvl"] > 0 for d in days) == 1
+
+
+def test_alltime_handles_crlf_line_endings(data_dir):
+    f = _setup(data_dir)
+    first, second = _rec(0) + "\r\n", _rec(1)
+    f.write_bytes((first + second[:40]).encode())                     # Windows-style, mid-line
+    cache = {}
+    a = alltime.scan_all_time(cache, NOW)
+    assert a["total"]["msgs"] == 1
+    assert cache["files"][str(f)] == len(first.encode())             # offset includes the \r\n
+    with open(f, "ab") as fh:
+        fh.write((second[40:] + "\r\n").encode())
+    assert alltime.scan_all_time(cache, NOW)["total"]["msgs"] == 2
