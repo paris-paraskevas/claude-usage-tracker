@@ -5,6 +5,11 @@ one question — *will I get through my limits at this pace?* — with a new eng
 and a new tray icon. Design: [design/V2-SPEC.md](design/V2-SPEC.md) (direction A "Native"
 with the runway chart from direction B).
 
+## 0.4.1
+
+- Overlay: a click opens the panel; hovering only highlights the strip (it no longer opens on
+  its own when the pointer passes over it). Leaving an open, unpinned panel folds it back.
+
 ## What changed
 
 **Desktop UI (new, `ctu/ui`)**
@@ -13,7 +18,7 @@ with the runway chart from direction B).
   Sessions · Team pool · History · Settings. Follows Windows light/dark, accent colour and
   12/24-hour clock; keyboard and screen-reader friendly; Windows High Contrast supported.
 - One overlay replaces the mini widget and the HUD bar: a single line at rest, expands on
-  hover/click, pin, snap to edges, hides in full screen, optional click-through.
+  click, pin, snap to edges, hides in full screen, optional click-through.
 - Tray: two bars (5-hour | weekly) at the exact DPI size, filled to the used % and coloured by
   the forecast (taskbar colour on pace, amber watch, vermillion will-hit / limited, grey stale);
   a "number" style is in Settings › Overlay & tray. Left-click flyout, right-click menu.
@@ -68,7 +73,7 @@ dead relay team stack removed, phone Chat removed, push token refresh, and more.
    - tray: left-click opens the flyout, right-click the menu; icon crisp at 100/125/150/200%
      scaling; light and dark taskbar; redraw on theme change;
    - flyout appears above the tray icon and closes on click-away / Escape;
-   - overlay: no focus stealing, hover expands, pin, drag + snap, position remembered,
+   - overlay: no focus stealing, a click expands it (hover only highlights), pin, drag + snap, position remembered,
      hides in full screen; **click-through and opacity** (WS_EX_LAYERED on WebView2 may
      render blank on some systems — if so, disable those two options);
    - toasts with Open dashboard / Mute 1 h buttons;

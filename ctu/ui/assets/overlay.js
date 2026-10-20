@@ -1,5 +1,5 @@
 // Overlay (spec §8): one-line strip at rest, expands in place to a 340 px
-// panel on hover or click; pin keeps it open. After every size change the
+// panel on click (hover only highlights it); pin keeps it open. After every size change the
 // rendered size is POSTed to /api/v2/actions/overlay_resize {w, h, expanded}
 // (debounced) so the host can resize its frameless window. Drag via
 // pywebview's `pywebview-drag-region` class (strip, and the panel header).
@@ -25,7 +25,6 @@ let settings = { overlay: { fields: ["5h", "7d", "ctx", "waiting", "status"], op
 let expanded = false;
 let pinned = false;
 let pinPending = null; // optimistic pin until the state confirms
-let openTimer = null;
 let closeTimer = null;
 let openedBy = null;
 let lastTitle = "";
@@ -236,7 +235,6 @@ new ResizeObserver(scheduleResize).observe(ov);
 window.addEventListener("resize", scheduleResize);
 
 function setExpanded(on, reason = null) {
-  clearTimeout(openTimer);
   clearTimeout(closeTimer);
   if (expanded === on) return;
   expanded = on;
@@ -248,16 +246,15 @@ function setExpanded(on, reason = null) {
 
 /* ---------------- interaction ---------------- */
 
-// hover: open after a short intent delay; leave: close unless pinned
+// Hover only brightens the strip; a click opens the panel. Leaving an open, unpinned panel
+// folds it back after a moment so it doesn't sit over your work.
 ov.addEventListener("mouseenter", () => {
   clearTimeout(closeTimer);
   ov.classList.add("is-hover");
-  if (!expanded) openTimer = setTimeout(() => setExpanded(true, "hover"), 280);
 });
 ov.addEventListener("mouseleave", () => {
-  clearTimeout(openTimer);
   ov.classList.remove("is-hover");
-  if (expanded && !pinned) closeTimer = setTimeout(() => setExpanded(false), openedBy === "click" ? 1200 : 500);
+  if (expanded && !pinned) closeTimer = setTimeout(() => setExpanded(false), 1200);
 });
 
 // click (but not the end of a drag) expands immediately

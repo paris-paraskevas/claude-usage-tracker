@@ -270,16 +270,17 @@ def test_config_has_no_dead_keys():
     assert not hasattr(remote, "remote_decrypt")
 
 
-def test_version_bumped():
+def test_version_matches_pyproject():
     import ctu
     import claude_usage_tracker as shim
-    assert ctu.__version__ == shim.__version__ == "0.4.0"
     toml = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "0.4.0"' in toml
+    assert ctu.__version__ == shim.__version__
+    assert f'version = "{ctu.__version__}"' in toml
 
 
 @pytest.mark.parametrize("argv", [["--version"]])
 def test_shim_main(argv, capsys):
     import claude_usage_tracker as shim
     assert shim.main(argv) == 0
-    assert "0.4.0" in capsys.readouterr().out
+    import ctu
+    assert ctu.__version__ in capsys.readouterr().out

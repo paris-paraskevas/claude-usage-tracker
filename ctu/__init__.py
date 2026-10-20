@@ -2,5 +2,5 @@
 
 Kept import-free: the --session-hook / --statusline fast paths import this package."""
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 APP_NAME = "Claude Usage Tracker"

@@ -205,7 +205,7 @@ function overlayHTML() {
     .join("");
   const op = Math.max(30, Math.min(100, o.opacity ?? 90));
   const rows = `<div class="set-card">
-    ${row("Show overlay", "A one-line strip, always on top, that never takes focus. Hover or click it for details.", sw("ov-shown", "@overlay.show", shown, "Show overlay"), { ic: "overlay" })}
+    ${row("Show overlay", "A one-line strip, always on top, that never takes focus. Click it for details.", sw("ov-shown", "@overlay.show", shown, "Show overlay"), { ic: "overlay" })}
     <div class="set-row set-row-col"><div class="set-text"><div class="set-title" id="of-h">Fields, left to right</div><div class="set-desc">Hidden fields still show in the expanded panel.</div></div><ol class="field-list" aria-labelledby="of-h">${fl}</ol></div>
     ${row("Let clicks pass through", "Clicks reach the window underneath. Turn it off from the tray icon menu.", sw("ov-ct", "overlay.click_through", !!o.click_through, "Let clicks pass through"))}
     ${row("Opacity at rest", "Full opacity while you hover.", `<span class="range-row"><input type="range" class="range" min="30" max="100" step="5" id="ov-op" data-key="ov-op" data-set="overlay.opacity" value="${op}" aria-label="Opacity at rest" aria-valuetext="${op}%"><output for="ov-op" class="num range-out" id="ov-op-out">${op}%</output></span>`)}
