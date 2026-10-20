@@ -1,0 +1,67 @@
+name: Release
+
+# Publishes a version from main: creates the vX.Y.Z tag and GitHub release, then starts the
+# Windows installer build (attached to the release) and the PyPI publish on that tag.
+# Run by hand (Actions > Release > Run workflow) with the version to publish; it must equal the
+# package version (ctu.__version__) and the tag must not exist yet.
+#
+# Why this starts the other two workflows itself: a release created with GITHUB_TOKEN does not
+# trigger `release: published` workflows, but it may start workflow_dispatch runs.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish, e.g. 0.4.0 (must equal ctu.__version__)"
+        required: true
+      title:
+        description: "Release title (default: vX.Y.Z)"
+        required: false
+      notes:
+        description: "Release notes, Markdown (default: a link to docs/RELEASE-X.Y.md)"
+        required: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # create the tag + release
+      actions: write           # start installer.yml and publish.yml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version must look like 1.2.3"; exit 1; }
+          pkg=$(python -c 'import ctu; print(ctu.__version__)')
+          [ "$pkg" = "$VERSION" ] || { echo "::error::the package is $pkg on this commit, not $VERSION"; exit 1; }
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::tag v$VERSION already exists"; exit 1
+          fi
+
+      - name: Create the tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          TITLE: ${{ inputs.title }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          tag="v$VERSION"
+          minor="${VERSION%.*}"
+          if [ -z "$NOTES" ]; then
+            NOTES="Release notes: [docs/RELEASE-$minor.md](https://github.com/${GITHUB_REPOSITORY}/blob/$tag/docs/RELEASE-$minor.md)"
+          fi
+          gh release create "$tag" --target "$GITHUB_SHA" --title "${TITLE:-$tag}" --notes "$NOTES"
+
+      - name: Build the installer and publish to PyPI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          gh workflow run installer.yml --ref "v$VERSION"
+          gh workflow run publish.yml --ref "v$VERSION"
+          echo "Started installer.yml and publish.yml on v$VERSION"

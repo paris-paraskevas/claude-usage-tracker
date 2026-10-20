@@ -79,4 +79,6 @@ dead relay team stack removed, phone Chat removed, push token refresh, and more.
 4. **Still open from 0.3** (see RELEASE-0.3.md and COMPLIANCE.md): legal read of Anthropic's
    terms, DPA, Supabase Pro, CAPTCHA widget, `worker_reader` role, 2-domain isolation test,
    the privacy policy's contact address and its coverage of the team pool.
-5. Tag `v0.4.0`, publish the GitHub release (installer) and PyPI.
+5. Publish: **Actions › Release › Run workflow** with version `0.4.0`. It creates the `v0.4.0` tag
+   and GitHub release from `main`, then starts the installer build (attached to the release) and the
+   PyPI publish. Publishing a release by hand in GitHub's UI works too.
