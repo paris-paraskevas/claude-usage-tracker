@@ -2,15 +2,11 @@
 
 # Claude Usage Tracker
 
-A small Windows desktop app that tracks your Claude plan limits — the **5-hour**
-and **weekly** usage windows, the exact numbers the `/usage` command shows — with
-always-on-top overlays (a mini **widget** and a one-line **HUD bar**), a tabbed
-**dashboard** (Live · All-time · Status · Settings), a live tray icon, and a toast
-notification every time usage crosses a 20% mark.
-
-It reads the OAuth token Claude Code already stores on your machine and calls the
-same endpoint `/usage` uses. **Read-only** — it never modifies your credentials and
-talks to nothing but that one Anthropic endpoint.
+A Windows tray app that tells you, at a glance, whether you'll get through your Claude
+plan limits: how much of the **5-hour** and **weekly** windows is left, when each refills,
+and whether **your current pace** runs out before the refill. It sits in the tray, in a
+one-line always-on-top overlay, and in a dashboard, and it pings you only when there's
+something to act on.
 
 > **Unofficial.** An independent, open-source project — not affiliated with, endorsed by, or
 > sponsored by Anthropic. "Claude" and "Claude Code" are trademarks of Anthropic, used only
@@ -19,129 +15,84 @@ talks to nothing but that one Anthropic endpoint.
 <p align="center">
   <a href="https://play.google.com/store/apps/details?id=com.claudeusage.tracker"><img alt="Get the Android app on Google Play" src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" height="60"></a><br>
   <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/play-qr.png" width="150" alt="Scan to get the Android app on Google Play"><br>
-  <em>Companion <strong>Android</strong> app — view your usage + alerts on your phone (scan to install)</em>
+  <em>Companion <strong>Android</strong> app and home-screen widget (scan to install)</em>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/widget.png" alt="Always-on-top mini widget" width="392"><br>
-  <em>The always-on-top mini <strong>widget</strong> — 5h / weekly / context %, with a session picker, verdict, and status dot (sample data)</em>
+  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/dashboard.png" alt="Dashboard — Now" width="760"><br>
+  <em><strong>Now</strong>: the verdict, the runway chart (time until the limit vs. time until the refill) and every limit with its pace (sample data)</em>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/bar.png" alt="Minimal one-line HUD bar" width="360"><br>
-  <em>The minimal one-line <strong>HUD bar</strong> — a solid, FPS-counter-style strip; fields and order are configurable (sample data)</em>
+  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/overlay.png" alt="Overlay at rest" width="420"><br>
+  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/overlay-expanded.png" alt="Overlay expanded" width="300">
+  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/flyout.png" alt="Tray flyout" width="300"><br>
+  <em>The <strong>overlay</strong> (one line at rest, expands on hover) and the <strong>tray flyout</strong> (sample data)</em>
+</p>
+
+## What it answers
+
+1. **How much is left, and when does it refill?** 5-hour and weekly windows, plus the
+   per-model weekly scopes, with every refill shown as both a countdown and a clock time.
+2. **Will I make it at this pace?** A least-squares pace over the last 30 minutes (weekly:
+   6 hours) projected to the refill. Colour comes from that forecast, not from the raw
+   percentage: 70% used ten minutes before a refill is fine; 30% used at a steep pace is not.
+3. **What should I do?** "Slow to 19%/h to make it", "Mute until refill", or — with a team
+   pool — "Switch to ops@acme.dev, 82% left".
+4. **Which sessions need me?** Context fill per Claude Code session (compact before 90%) and
+   sessions that finished a turn and are **waiting for your reply** or **need approval**.
+5. **Is it me or Claude?** Anthropic's status, shown separately from your limits.
+
+## Surfaces
+
+- **Tray icon** — the binding limit's used % as two digits in your taskbar colours, drawn at
+  the exact size for your display scaling. A bar along the bottom appears only when it
+  matters: amber halves for *watch pace*, solid vermillion for *will hit the limit*, grey
+  dashes when the data is stale; a clock when the limit is reached. Left-click opens the
+  **flyout**; right-click opens the menu.
+- **Overlay** — replaces the old mini widget and HUD bar. One always-on-top line
+  (`▲ 5h 64% limit ~16:26 │ 7d 41% │ ctx 73% │ 1 waiting`) that never steals focus, expands
+  in place on hover or click, can be pinned, snaps to screen edges and hides during
+  full-screen apps and presentations. Fields, opacity and click-through are in Settings.
+- **Dashboard** — **Now** (verdict, runway chart, limits, active session, waiting sessions,
+  extra usage) · **Sessions** · **Team pool** · **History** (usage over time, totals,
+  streaks, activity heatmap, models, projects) · **Settings** (gear). Light and dark follow
+  Windows, as do your accent colour and 12/24-hour clock.
+- **Alerts** — one toast per episode, never a stream: *will hit the limit*, *limit
+  reached*, *refilled*, *context almost full*, *extra usage near its cap*, *session
+  waiting*, *needs approval*, and (opt-in) *Claude incident*. Mute until the refill, for an
+  hour, or set quiet hours.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/tray-icons.png" alt="Tray icon states" width="720"><br>
+  <em>Tray icon at 16 and 24 px, light and dark taskbar: on pace, watch pace, will hit limit, limit reached, stale</em>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/dashboard.png" alt="Dashboard — Live tab" width="760"><br>
-  <em>The dashboard's <strong>Live</strong> tab — instrument-dial gauges, reset countdowns, a burn-rate projection, a usage-history sparkline, overage credits, scoped weekly limits, and Sessions (sample data)</em>
-</p>
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/alltime.png" alt="Dashboard — All-time tab" width="760"><br>
-  <em>The <strong>All-time</strong> tab — sessions, messages, total tokens, active days, streaks, peak hour, favorite model, a contribution heatmap, and by-project totals, with a 7d / 30d / All toggle (sample data)</em>
-</p>
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/status.png" alt="Dashboard — Status tab" width="760"><br>
-  <em>The <strong>Status</strong> tab — Anthropic service status (Ok / Errors / Down) with every component listed (sample data)</em>
-</p>
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/settings.png" alt="Dashboard — Settings tab" width="760"><br>
-  <em>The <strong>Settings</strong> tab — show/hide the overlays, choose the HUD-bar fields, pick which status components drive the indicator, and pair an Android phone for end-to-end-encrypted remote access (sample data)</em>
-</p>
-
-## Features
-
-- **Always-on-top overlays** — a frameless, draggable, **resizable** mini **widget** (5h,
-  weekly, **context %**) with Refresh / Check-for-updates buttons and a **dropdown** to pick
-  which session's context to track; **and** a **minimal HUD bar** — a solid, one-line,
-  FPS-counter-style strip (`dir  Ctx: 73%  5h: 64%  7d: 41%  ● Ok`) whose controls appear on hover.
-  Toggle either from the tray; they can be shown together. Drag any edge or corner to resize; size is remembered.
-- **Full dashboard** — animated ring gauges, live reset countdowns, a **burn-rate /
-  time-to-limit projection** ("≈7%/h · hits 100% in ~1h 10m"), a usage history
-  sparkline, overage credits, and per-model (Opus/Sonnet) scoped weekly limits.
-- **Open Sessions** — per-project **context-window fill %** and last-5h token usage,
-  read from your local Claude Code logs (token counts only, never content), with
-  **Context % / Tokens** tabs and active indicators — see which terminal is burning
-  your usage.
-- **All-time stats** — a second dashboard tab that mines your whole local history:
-  an **Overview** (sessions, messages, total tokens, active days, current/longest
-  streak, peak hour, favorite model, a contribution **heatmap**, and a "you've burned
-  N× more tokens than *War and Peace*" line) and a **Models** view (tokens-over-time
-  stacked chart + per-model input/output split), all with a **7d / 30d / All** toggle.
-  Folded incrementally from your local logs (each file read once, then only new bytes),
-  so it's accurate without rescanning gigabytes — token counts only, never content.
-- **Proactive alerts + traffic-light verdict** — toasts when a window is on track to
-  run out *before* it resets, when the active context hits 90% (time to `/compact`),
-  or when overage credits near the cap; plus a one-glance **green / amber / red**
-  verdict in the widget and dashboard, and a daily update check with a **one-click in-app
-  Update** that upgrades in place and restarts — the `.exe` runs the signed installer,
-  and pip/pipx installs upgrade themselves via the app's own Python (no `pipx` on PATH
-  needed, no trip to GitHub). **Refresh** and **Check for updates** are one click away in
-  the dashboard, widget, and tray menu too.
-- **Anthropic status** — a live **Ok / Errors / Down** service-status indicator (from
-  status.anthropic.com) on the dashboard, widget, and bar, plus a **Status tab** listing every
-  component (claude.ai / API / Claude Code / Console / …). Pick which components drive the
-  indicator in Settings, or use the overall status.
-- **Remote (phone) access** *(optional, opt-in)* — view your stats and receive usage
-  alerts on an **Android** phone, **end-to-end encrypted**, via a tiny zero-knowledge
-  relay you deploy. Pair by scanning a QR in Settings; your Claude token never leaves
-  your PC. **Android only** (no iOS yet). See [docs/REMOTE.md](docs/REMOTE.md).
-- **Session-waiting alerts** *(optional, opt-in)* — get a toast (and, if remote is on, a
-  phone push) when a Claude Code session goes idle **awaiting your response**, with the
-  directory name. Enable it in **Settings → Alerts**; it installs a Claude Code idle hook
-  (`Notification` / `idle_prompt`) in `~/.claude/settings.json` (backed up, removable) and
-  fires only after you've stepped away.
-- **Live tray icon** — two bars (left = 5h, right = weekly) that fill and change
-  colour with usage.
-- **20% notifications** — a Windows toast each time the 5h or weekly window crosses
-  20 / 40 / 60 / 80 / 100%. The first reading is recorded silently, so you only get
-  pinged on *future* crossings, never a burst at startup.
-- **One-click sign-in** — when your login expires, a **Sign in to Claude** action (in
-  the tray menu and on the dashboard banner) runs `claude auth login` — Claude Code's
-  own sign-in — so you can refresh it without opening a terminal. The app never writes
-  your credentials itself; it just triggers Claude Code's flow.
-- **Auto-start on login**, single-instance, graceful rate-limit (HTTP 429) back-off,
-  and automatic pickup of account/token changes (it re-reads your login each poll).
-
-### Colour scale
-
-Bars, gauges, and the tray icon share one muted scale:
-
-| Usage | under 60% | 60–80% | 80%+ |
-|-------|:---------:|:------:|:----:|
-| Colour | green | amber | red |
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/tray-icons.png" alt="Tray icon at various usage levels" width="560"><br>
-  <em>Tray icon at 5/40, 45/72, 85/94, 95/100, and 0/0 percent</em>
+  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/team.png" alt="Team pool" width="380">
+  <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/history.png" alt="History" width="380"><br>
+  <em>Team pool and History (sample data)</em>
 </p>
 
 ## Install
 
-Requires Windows 10/11, **Claude Code installed and logged in** (so
-`~/.claude/.credentials.json` exists), and the Edge **WebView2** runtime
-(preinstalled on Windows 11; otherwise a free
+Requires Windows 10/11, **Claude Code installed and signed in**, and the Edge **WebView2**
+runtime (preinstalled on Windows 11; otherwise a free
 [download](https://developer.microsoft.com/microsoft-edge/webview2/)). Then pick one:
 
-### Option A — Installer (easiest, no Python needed)
+### Option A — Installer (no Python needed)
 
 Download **`ClaudeUsageTracker-Setup.exe`** from the
 [latest release](https://github.com/paris-paraskevas/claude-usage-tracker/releases/latest)
-and run it. A standard Windows wizard: accept the license, then tick the shortcuts
-you want — **Desktop / Start Menu / start at sign-in**.
+and run it; tick the shortcuts you want (Desktop / Start Menu / start at sign-in).
+Release builds are signed through SignPath when signing is configured for the release; if
+Windows SmartScreen still warns, choose **More info → Run anyway**.
 
-> **Windows SmartScreen** ("Windows protected your PC") appears because the installer
-> isn't code-signed — normal for small open-source apps. Click **More info → Run anyway**.
-
-### Option B — pipx (updatable from the command line)
+### Option B — pipx
 
 ```bash
 pipx install claude-usage-tracker
-claude-usage-tracker --install      # interactive: Desktop / Start Menu / Startup
-pipx upgrade claude-usage-tracker   # later, to update
+claude-usage-tracker --install      # Desktop / Start Menu / Startup shortcuts
 ```
 
 ### Option C — from source
@@ -152,124 +103,97 @@ cd claude-usage-tracker
 python install.py
 ```
 
-After any of these, the mini widget appears top-right and a tray icon by the clock.
-**To pin it to the taskbar** (Windows blocks apps from doing this themselves):
-right-click the running app's taskbar icon → *Pin to taskbar*.
+**Updating:** the app checks daily (installer builds against GitHub releases, pip/pipx
+installs against PyPI) and offers a one-click **Update** that upgrades in place and restarts.
 
-**Updating:** the app checks daily and surfaces an **Update** action (tray menu, and on
-the dashboard/widget). One click upgrades in place and restarts — the installer build
-runs the new Setup.exe, pip/pipx installs upgrade via the app's own Python, and a source
-checkout runs `git pull`. **Check for updates** is available any time too.
+### Near-live numbers (recommended)
+
+Open **Settings › Data source › Install** once. It adds the tracker as Claude Code's
+`statusLine` command, which receives your 5-hour and weekly usage after every Claude reply
+([Claude Code docs](https://code.claude.com/docs/en/statusline)), and the session hooks
+that detect *waiting* and *needs approval*. If you already have a status line, the tracker
+tells you and leaves yours alone. Without it, usage comes from the API every 5 minutes.
 
 ## Usage
 
-Launch "Claude Usage Tracker" from the Start Menu/Desktop, or run it directly:
+Launch **Claude Usage Tracker** from the Start Menu. Tray menu: **Open dashboard**,
+**Show overlay**, **Mute alerts ›**, **Refresh now**, **Settings**, **Quit**.
 
 ```bash
-.venv\Scripts\pythonw.exe claude_usage_tracker.py
+claude-usage-tracker --once          # print usage once (add --debug for raw API JSON)
+claude-usage-tracker --headless      # engine + local API only, no tray or windows
+claude-usage-tracker --selftest      # build state from fixtures (no network) and exit
+claude-usage-tracker --install       # shortcuts and autostart
+claude-usage-tracker --uninstall     # remove shortcuts, our Claude Code hooks and status line
 ```
 
-Tray menu: **Show/Hide widget**, **Show/Hide minimal bar**, **Open dashboard**, **Open
-in browser**, **Refresh now**, **Check for updates**, **Sign in to Claude…**, open
-config/log, **Quit**. Overlays drag anywhere, resize from any edge, and have a `×` to hide.
-
-CLI:
-
-```bash
-.venv\Scripts\python.exe claude_usage_tracker.py --once          # print status once
-.venv\Scripts\python.exe claude_usage_tracker.py --once --debug  # + raw API JSON
-.venv\Scripts\pythonw.exe claude_usage_tracker.py --widget       # just the widget
-.venv\Scripts\pythonw.exe claude_usage_tracker.py --bar          # just the minimal HUD bar
-.venv\Scripts\pythonw.exe claude_usage_tracker.py --window       # just the dashboard window
-.venv\Scripts\python.exe claude_usage_tracker.py --uninstall-autostart
-```
-
-## Configuration
-
-Edit `config.json` (created on first run, in the app's data dir), then restart:
-
-| Key | Default | Meaning |
-|-----|---------|---------|
-| `poll_interval_seconds` | `60` | How often to check usage. |
-| `threshold_step` | `20` | Ping every N percent. |
-| `windows` | `["five_hour", "seven_day"]` | Which limits to notify on. |
-| `notify_at_100` | `true` | Ping when a limit hits 100%. |
-| `notify_on_start` | `true` | One summary toast at launch. |
-| `dashboard_port` | `8787` | Local dashboard port. |
-| `show_widget_on_start` | `true` | Show the mini widget at launch. |
-| `widget_width` / `widget_height` | `392` / `216` | Widget size in pixels. |
-| `show_bar_on_start` | `false` | Show the minimal HUD bar at launch. |
-| `bar_fields` | `["dir","ctx","5h","7d"]` | HUD-bar fields, in order. |
-| `bar_opacity` | `85` | HUD-bar background opacity (30–100). |
-| `alltime_days` | `30` | Days shown in the All-time daily-usage chart. |
-| `remote_enabled` | `false` | Opt-in: relay an E2E-encrypted snapshot to your phone. |
-| `remote_relay_url` | `""` | Your Cloudflare Worker relay URL (see `docs/REMOTE.md`). |
-| `remote_sync_seconds` | `300` | How often to push the snapshot to the relay. Each push is 1 KV write on the relay, so 300s is ~288 writes/day — well within Cloudflare's free-tier budget (1000 writes/day free). |
+Settings live in the dashboard (gear icon) and are saved to `config.json` in the app's data
+folder (`%LOCALAPPDATA%\ClaudeUsageTracker` when installed).
 
 ## How it works
 
-`GET https://api.anthropic.com/api/oauth/usage` with the bearer token from
-`~/.claude/.credentials.json` (`claudeAiOauth.accessToken`) and the
-`anthropic-beta: oauth-2025-04-20` header. The response carries `five_hour`,
-`seven_day`, scoped per-model weekly limits, overage `spend`, and reset timestamps —
-the same data the CLI's `/usage` renders.
+- **Usage numbers:** Claude Code's status line input (`rate_limits`, per-session context
+  window) when installed; otherwise `GET https://api.anthropic.com/api/oauth/usage` with the
+  OAuth token Claude Code stores in `~/.claude/.credentials.json`. That call also supplies
+  the per-model weekly scopes and extra-usage spend. The token is only read, never written.
+- **Sessions, context and history:** your local Claude Code logs under `~/.claude/projects`
+  (token counts, model and timestamps only — never message content), read incrementally.
+- **Forecast and decision:** see [docs/design/V2-SPEC.md](docs/design/V2-SPEC.md).
+- **The UI** is plain HTML/CSS/JS in `ctu/ui`, served by the engine on `127.0.0.1` (every
+  route rejects other origins) and updated live over Server-Sent Events.
 
-Token refresh is handled by Claude Code itself; if your login expires, the tracker
-shows an error state until you run any `claude` command to refresh it. The token is
-only ever read — never written, logged, or sent anywhere but that endpoint.
+## Privacy and network
 
-## Privacy
+Local-first, no telemetry. The app contacts only:
 
-Read-only and local. It reads your Claude login token and session logs from
-`~/.claude` and displays the numbers; it sends nothing anywhere except the Anthropic
-usage endpoint (using your own token) — and, **only if you opt in**, an
-**end-to-end-encrypted** snapshot to a relay you run (see *Remote / phone access*
-below) and/or a **numbers-only usage row** to your team's relay (see *Team
-dashboard* below). No telemetry, no analytics, no data collection.
+| Host | Why | When |
+|---|---|---|
+| `api.anthropic.com` (`/api/oauth/usage`, `/api/oauth/profile`) | your usage, your account's org | always (your own token) |
+| `status.anthropic.com` | service status | always |
+| `api.github.com` / `pypi.org` | update check | daily, can be turned off |
+| the relay (Cloudflare Worker) | end-to-end-encrypted snapshot for your phone | only if you pair a phone |
+| Supabase (EU) | usage numbers shared with your email domain's pool | only if you sign in to Team pool |
 
-## Remote / phone access (optional)
+## Phone (optional)
 
-View your stats and get usage alerts on an **Android phone**, end-to-end encrypted.
-**Opt-in and off by default.** Because sessions/context/all-time only exist on the machine
-running Claude Code, the desktop relays an **encrypted** snapshot through a tiny
-**zero-knowledge relay** (a Cloudflare Worker you deploy) to the app — the relay only ever
-stores ciphertext, and your Claude token never leaves your PC. Push uses Firebase (FCM)
-with **data-only** messages decrypted on-device.
+View your usage and get alerts on **Android**, end-to-end encrypted: the desktop sends an
+encrypted snapshot through a zero-knowledge relay, and pushes use data-only FCM messages
+decrypted on the phone. Pair from **Settings › Phone**. Includes a home-screen widget
+(2×1, 2×2, 4×2). See [docs/REMOTE.md](docs/REMOTE.md), [`relay/`](relay/), [`android/`](android/).
 
-Enable it in **Settings → Remote (phone)** and scan the pairing QR with the app. Live data
-and alerts arrive whenever your desktop is on and online. **Android only — no iOS yet.**
-Setup (Cloudflare Worker + optional Firebase + the app): see
-**[docs/REMOTE.md](docs/REMOTE.md)**, [`relay/`](relay/), and [`android/`](android/).
+## Team pool (optional) — Claude Team plans
 
-## Team dashboard (optional) — Claude Team plans
-
-Share a **pool of Claude accounts** across your company: everyone signs in to the
-**Team** tab with their **work email** (a one-time code — no password), and your team
-is your email **domain**. See every pooled account's live 5-hour / weekly load and
-**extra-usage spend (€)** in one place, plus a per-account **monthly ledger** frozen at
-month-end. Month spend is computed robustly across Anthropic's mid-month billing-cycle
-reset, and exports to CSV.
-
-The pool lives in a central (EU) Supabase database, isolated per domain by row-level
-security; you consent at sign-in that **usage numbers only** are shared with domain
-teammates (5h / weekly %, extra-usage €, token counts) — never sessions, projects, or
-conversation content. The first person per domain is the admin and can mint a token for
-the claude.ai connector. See **[docs/TEAM.md](docs/TEAM.md)**.
-
-## Code signing
-
-Windows builds are signed with free code signing provided by
-[SignPath.io](https://signpath.io), with a free code signing certificate from the
-[SignPath Foundation](https://signpath.org).
+Share a pool of Claude accounts across your company: sign in to **Team pool** with your work
+email (a one-time code; your team is your email domain). See every pooled account's 5-hour
+and weekly load, who has headroom right now, and a per-account monthly extra-usage ledger
+with CSV export. You consent at sign-in that **usage numbers only** are shared with domain
+teammates — never sessions, projects or conversation content. Admins can mint a token for
+the claude.ai connector. See [docs/TEAM.md](docs/TEAM.md) and [`mcp/`](mcp/).
 
 ## Layout
 
 ```
-claude_usage_tracker.py   the whole app (tray, server, dashboard+widget HTML, poller)
-install.py / uninstall.py shortcut setup / teardown
-requirements.txt          pystray, Pillow, winotify, pywebview
-docs/                     screenshots
+claude_usage_tracker.py   entry point (shim)
+ctu/                      the engine: usage, statusline, forecast, alerts, sessions, alltime,
+                          team (Supabase pool), remote (relay), server, tray, windows, cli
+ctu/ui/                   the desktop UI (dashboard, overlay, flyout) — no build step
+relay/                    Cloudflare Worker: phone relay + claude.ai connector
+mcp/                      local MCP server for Claude Code / Claude Desktop
+android/                  companion app + home-screen widget
+supabase/                 team pool schema
+tests/                    pytest (engine) and tests/ui (node --test)
 ```
 
-Runtime files (`config.json`, `state.json`, `history.json`, `*.log`) live next to the
-script (or in `%LOCALAPPDATA%\ClaudeUsageTracker` when packaged) and are git-ignored.
+## Development
+
+```bash
+python -m pytest -q                        # engine
+cd tests/ui && npm test                    # UI formatting + runway chart
+python tests/ui/mock_server.py --variant will_hit   # the UI on fixtures, no engine needed
+```
+
+## Code signing
+
+Windows builds can be signed with free code signing provided by
+[SignPath.io](https://signpath.io), with a certificate from the
+[SignPath Foundation](https://signpath.org).

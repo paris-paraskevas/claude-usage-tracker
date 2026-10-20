@@ -46,7 +46,7 @@ Dashboard → your project. Do these in order (SMTP before OTP-as-code).
 2. Supabase → **Authentication → Attack Protection** (`/dashboard/project/_/auth/protection`)
    → **Enable CAPTCHA protection** → provider **Turnstile** → paste **Secret key** → Save.
 3. **⚠ Client dependency:** once CAPTCHA is ON, every `/auth/v1/otp` call must carry a token or
-   it fails. `supabase_pool.sign_in_start(captcha_token=…)` already forwards it, **but the login
+   it fails. `ctu.team.pool.sign_in_start(captcha_token=…)` (was `supabase_pool.py` before v0.4) already forwards it, **but the login
    webview must render the Turnstile widget** (embed the Turnstile JS with the Sitekey, capture
    the token, pass it in). Do **not** enable 1d until that widget ships, or sign-in breaks.
 

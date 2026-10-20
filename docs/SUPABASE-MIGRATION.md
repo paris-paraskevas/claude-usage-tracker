@@ -307,7 +307,7 @@ Standing rules: **every** new table gets `enable row level security`; **every** 
 
 **Client + keys.** Ship the **publishable** key (`sb_publishable_…`) in the binary — safe by design (RLS is the guard, `anon` is granted nothing). Never ship `sb_secret_…`.
 
-> **As built (v0.3):** the desktop does **not** use supabase-py. `supabase_pool.py` is a small stdlib (`urllib`) client for GoTrue + PostgREST, and the session (access + refresh token) is stored in the OS keychain via `keyring`. The supabase-py snippets below are the original design sketch, kept for the reasoning; refresh is serialised behind a lock so rotating refresh tokens are never reused concurrently.
+> **As built (v0.3):** the desktop does **not** use supabase-py. `ctu/team/pool.py` (top-level `supabase_pool.py` before v0.4) is a small stdlib (`urllib`) client for GoTrue + PostgREST, and the session (access + refresh token) is stored in the OS keychain via `keyring`. The supabase-py snippets below are the original design sketch, kept for the reasoning; refresh is serialised behind a lock so rotating refresh tokens are never reused concurrently.
 
 **Session persistence** (supabase-py is in-memory by default → back it with Windows Credential Manager via `keyring`, never plaintext):
 ```python
