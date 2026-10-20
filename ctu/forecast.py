@@ -143,17 +143,27 @@ def resume_at(limits: list, active_scope: str | None):
 
 # ---- strings ----
 
+CLOCK_12H = False      # set by the engine from the Windows short-time format
+
+
+def _hm(lt) -> str:
+    if CLOCK_12H:
+        return time.strftime("%I:%M %p", lt).lstrip("0")
+    return time.strftime("%H:%M", lt)
+
+
 def fmt_clock(ts, now=None) -> str:
-    """'16:40' today, 'Fri 16:40' within a week, else 'Oct 24 16:40' (local time)."""
+    """'16:40' today, 'Fri 16:40' within a week, else 'Oct 24 16:40' (local time; '4:40 PM' when
+    Windows uses a 12-hour clock)."""
     if not ts:
         return "?"
     now = now or time.time()
     lt, ln = time.localtime(ts), time.localtime(now)
     if (lt.tm_year, lt.tm_yday) == (ln.tm_year, ln.tm_yday):
-        return time.strftime("%H:%M", lt)
+        return _hm(lt)
     if 0 <= ts - now < 6.5 * 86400:
-        return time.strftime("%a %H:%M", lt)
-    return time.strftime("%b %d %H:%M", lt)
+        return time.strftime("%a ", lt) + _hm(lt)
+    return time.strftime("%b %d ", lt) + _hm(lt)
 
 
 def fmt_dur(s) -> str:

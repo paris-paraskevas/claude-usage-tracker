@@ -151,3 +151,9 @@ test("odd locale tags and unknown zones never throw", () => {
   assert.equal(typeof f.clock(RESET_5H, { locale: "en-GB", timeZone: "Mars/Olympus" }), "string");
   assert.equal(f.percent(64, { locale: "not a locale" }).replace(/\s/g, ""), "64%");
 });
+
+test("clock follows the host's 12/24-hour setting over the locale", () => {
+  const t = Date.UTC(2026, 9, 20, 16, 40) / 1000;
+  assert.equal(f.clock(t, { locale: "en-US", timeZone: "UTC", hour12: false }), "16:40");
+  assert.equal(f.clock(t, { locale: "en-GB", timeZone: "UTC", hour12: true }).replace(/\s/g, " ").toLowerCase(), "4:40 pm");
+});

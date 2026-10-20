@@ -144,7 +144,7 @@ class Engine:
         self._team_pool_err = None
         self.remote = remote.RemoteSync()
         self.refills: dict = {}            # limit id -> {"at", "resets_at"}
-        self.platform = {"accent": dict(winplat.DEFAULT_ACCENT), "theme": "light"}
+        self.platform = {"accent": dict(winplat.DEFAULT_ACCENT), "theme": "system", "clock": "system"}
         self.claude_integration = {"statusline": {"installed": False, "existing": None}, "hook": {"installed": False}}
         self.state: dict = {}
         self.rev = 0
@@ -311,7 +311,8 @@ class Engine:
 
     def job_platform(self) -> None:
         """Accent / theme and our ~/.claude/settings.json integration, once a minute."""
-        plat = {"accent": winplat.accent(), "theme": "light" if winplat.apps_light() else "dark"}
+        plat = {"accent": winplat.accent(), "theme": winplat.apps_theme(), "clock": winplat.clock_pref()}
+        forecast.CLOCK_12H = plat["clock"] == "12h"
         with self.lock:
             if plat != self.platform:
                 self.platform = plat
@@ -529,6 +530,7 @@ class Engine:
                     "overlay": {"shown": bool(ov.get("shown")), "pinned": bool(ov.get("pinned"))},
                     "accent": dict(self.platform["accent"]),
                     "theme": self.platform["theme"],
+                    "clock": self.platform.get("clock", "system"),
                     "statusline": dict(self.claude_integration["statusline"]),
                     "hook": dict(self.claude_integration["hook"]),
                 },
@@ -742,7 +744,7 @@ class Engine:
             config.save(self.cfg)
 
     # ------------------------------------------------------------------ actions
-    ACTIONS = ("refresh", "login", "update", "check_update", "mute", "overlay", "overlay_resize", "flyout_close",
+    ACTIONS = ("refresh", "login", "update", "check_update", "mute", "overlay", "overlay_resize", "flyout_resize", "flyout_close",
                "open_dashboard", "remote_pair", "remote_rotate", "remote_unpair", "remote_sync", "team_login_start",
                "team_login_verify", "team_logout", "team_claim_device", "team_connector_token",
                "install_statusline", "remove_statusline", "open_logs")
@@ -824,6 +826,16 @@ class Engine:
         self.save_internal(overlay_size=[w, h])
         if self.host:
             self.host.resize_overlay(w, h)
+        return {"ok": True, "w": w, "h": h}
+
+    def _a_flyout_resize(self, b):
+        try:
+            w, h = int(b.get("w")), int(b.get("h"))
+        except Exception:
+            return {"ok": False, "error": "w and h must be integers"}
+        w, h = max(200, min(480, w)), max(120, min(600, h))
+        if self.host:
+            self.host.resize_flyout(w, h)
         return {"ok": True, "w": w, "h": h}
 
     def _a_flyout_close(self, b):

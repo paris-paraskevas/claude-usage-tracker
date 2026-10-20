@@ -106,6 +106,21 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") close();
 });
 
+// Report the rendered size so the host fits the frameless window to it (flyout_resize).
+let lastSize = "";
+let sizeTimer = 0;
+new ResizeObserver(() => {
+  clearTimeout(sizeTimer);
+  sizeTimer = setTimeout(() => {
+    const r = document.getElementById("fly").getBoundingClientRect();
+    const w = Math.ceil(r.width), h = Math.ceil(r.height);
+    const key = w + "x" + h;
+    if (!w || !h || key === lastSize) return;
+    lastSize = key;
+    post("flyout_resize", { w, h }).catch(() => {});
+  }, 60);
+}).observe(document.getElementById("fly"));
+
 subscribe((s, m) => {
   st = s;
   meta = m;

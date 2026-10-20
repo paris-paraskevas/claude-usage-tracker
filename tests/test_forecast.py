@@ -199,3 +199,12 @@ def test_staleness():
     assert f.is_stale(NOW - 901, NOW, 300, False)                          # 15 min floor
     assert not f.is_stale(NOW - 1700, NOW, 600, False) and f.is_stale(NOW - 1801, NOW, 600, False)
     assert f.is_stale(NOW - 10, NOW, 300, True)                            # last fetch failed
+
+
+def test_fmt_clock_follows_the_windows_clock_setting(monkeypatch):
+    import time as _t
+    ts = _t.mktime((2026, 10, 20, 16, 40, 0, 0, 0, -1))
+    monkeypatch.setattr(f, "CLOCK_12H", False)
+    assert f.fmt_clock(ts, ts - 600) == "16:40"
+    monkeypatch.setattr(f, "CLOCK_12H", True)
+    assert f.fmt_clock(ts, ts - 600) == "4:40 PM"

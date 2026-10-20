@@ -239,16 +239,14 @@ def _period(cache, now, today, ndays):
 
 
 def heatmap(cache, today):
-    """A ~1-year day grid (Sunday-aligned), shaded 0-4 relative to the busiest DISPLAYED day."""
+    """A 53-week day grid ending today (Sunday-aligned), shaded 0-4 relative to the busiest
+    displayed day. Always full length, so the layout and labels never depend on data age."""
     toks = {ds: at_tokens(r) for ds, r in cache["days"].items()}
     first = cache.get("first_ts")
     if not first:
         return {"days": [], "max": 0}
-    start = datetime.fromtimestamp(first).date()
-    start = start - timedelta(days=(start.weekday() + 1) % 7)
-    floor = today - timedelta(days=371)
-    floor = floor - timedelta(days=(floor.weekday() + 1) % 7)
-    start = max(start, floor)
+    start = today - timedelta(days=371)                      # always ~53 weeks ending today
+    start = start - timedelta(days=(start.weekday() + 1) % 7)  # Sunday-aligned
     lo, hi = start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
     mx = max((t for ds, t in toks.items() if lo <= ds <= hi), default=0)
     out, d = [], start

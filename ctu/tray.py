@@ -43,6 +43,10 @@ def icon_key(state: dict | None, theme: str, size: int) -> tuple:
 
 
 def _draw_digit(d, ch, x0, y0, w, h, t, color):
+    if ch == "1":                                    # one centred stroke reads better than the
+        cx = x0 + (w - t) // 2                       # right-hand segments of a 7-seg "1"
+        d.rectangle((cx, y0, cx + t - 1, y0 + h - 1), fill=color)
+        return
     ym = y0 + (h - t) // 2
     boxes = {"a": (x0, y0, x0 + w - 1, y0 + t - 1), "d": (x0, y0 + h - t, x0 + w - 1, y0 + h - 1),
              "g": (x0, ym, x0 + w - 1, ym + t - 1), "f": (x0, y0, x0 + t - 1, ym + t - 1),
@@ -80,7 +84,11 @@ def render_icon(size: int, digits, level: str, stale: bool, theme: str = "dark")
     gap = max(1, size // 16)
     t = max(2, round(size / 8))
     my = max(1, size // 16)
-    h = size - 2 * my
+    badge = "stale" if stale else level if level in ("watch", "will_hit") else None
+    # Status is a bar along the bottom edge (pattern + colour), never drawn over the digits:
+    # at 16 px a corner badge would eat half of the second digit.
+    bar = max(3, round(size * 0.19)) if badge else 0
+    h = size - 2 * my - (bar + gap if bar else 0)
     w = (size - gap) // 2
     text = digits if digits is not None else "--"
     if len(text) == 1:
@@ -88,24 +96,18 @@ def render_icon(size: int, digits, level: str, stale: bool, theme: str = "dark")
     else:
         _draw_digit(d, text[0], 0, my, w, h, t, fg)
         _draw_digit(d, text[1], w + gap, my, w, h, t, fg)
-    badge = "stale" if stale else level if level in ("watch", "will_hit") else None
     if badge:
-        b = max(6, round(size * 0.4))
-        x0 = y0 = size - b
-        d.rectangle([x0 - 1, y0 - 1, size - 1, size - 1], fill=(0, 0, 0, 0))     # cut-out ring
-
-        def draw_badge(dd, S):
-            k = S / size
-            bx, by, bb = x0 * k, y0 * k, b * k
-            if badge == "watch":
-                dd.ellipse([bx, by, bx + bb - 1, by + bb - 1], fill=WATCH[theme])
-            elif badge == "will_hit":
-                dd.polygon([(bx + bb / 2, by), (bx + bb - 1, by + bb - 1), (bx, by + bb - 1)], fill=HIT[theme])
-            else:
-                lw = max(2, round(bb / 6))
-                dd.ellipse([bx + lw / 2, by + lw / 2, bx + bb - 1 - lw / 2, by + bb - 1 - lw / 2], outline=STALE, width=lw)
-                dd.line([bx + bb * 0.2, by + bb * 0.8, bx + bb * 0.8, by + bb * 0.2], fill=STALE, width=lw)
-        img = Image.alpha_composite(img, _ss_layer(size, draw_badge))
+        y0, y1 = size - bar, size - 1
+        if badge == "will_hit":                       # solid
+            d.rectangle([0, y0, size - 1, y1], fill=HIT[theme])
+        elif badge == "watch":                        # two halves
+            half = (size - gap) // 2
+            d.rectangle([0, y0, half - 1, y1], fill=WATCH[theme])
+            d.rectangle([half + gap, y0, size - 1, y1], fill=WATCH[theme])
+        else:                                         # stale: dashes
+            seg = max(2, size // 6)
+            for x in range(0, size, seg * 2):
+                d.rectangle([x, y0, min(size - 1, x + seg - 1), y1], fill=STALE)
     return img
 
 

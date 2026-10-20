@@ -51,7 +51,7 @@ jobs:
   node:
     # Relay Worker + local MCP server. Zero-dependency tests (node:test, node:sqlite for a
     # fake D1), so no npm install is needed.
-    name: Node tests (relay + mcp)
+    name: Node tests (relay + mcp + desktop UI)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -67,4 +67,7 @@ jobs:
         run: npm test
       - name: MCP tests
         working-directory: mcp
+        run: npm test
+      - name: Desktop UI tests (formatting, runway chart)
+        working-directory: tests/ui
         run: npm test

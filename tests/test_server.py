@@ -281,6 +281,9 @@ def test_overlay_and_window_actions_reach_the_host(api):
     assert r == {"ok": True, "w": 800, "h": 24}                    # clamped
     assert ("resize_overlay", (800, 24)) in api.host.calls and api.cfg["overlay_size"] == [800, 24]
     assert not jcall(api, "/api/v2/actions/overlay_resize", method="POST", body={"w": "x"})[1]["ok"]
+    st, r = jcall(api, "/api/v2/actions/flyout_resize", method="POST", body={"w": 300, "h": 9000})
+    assert r == {"ok": True, "w": 300, "h": 600}                   # clamped
+    assert ("resize_flyout", (300, 600)) in api.host.calls
     jcall(api, "/api/v2/actions/flyout_close", method="POST", body={})
     jcall(api, "/api/v2/actions/open_dashboard", method="POST", body={"view": "sessions"})
     jcall(api, "/api/v2/actions/open_dashboard", method="POST", body={"view": "x'); alert(1"})

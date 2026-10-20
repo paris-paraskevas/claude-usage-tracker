@@ -134,3 +134,14 @@ def test_heatmap_scales_to_displayed_range():
     hm = alltime.heatmap(cache, today)
     assert hm["max"] == 1000
     assert next(c for c in hm["days"] if c["d"] == "2026-06-25")["lvl"] == 4
+
+
+def test_heatmap_is_a_full_sunday_aligned_year_even_for_new_users():
+    today = _dt.date(2026, 10, 20)                                      # a Tuesday
+    cache = alltime.empty_cache()
+    cache["days"]["2026-10-20"] = {"in": 500, "out": 0, "cw": 0, "cr": 0, "msgs": 1}
+    cache["first_ts"] = _dt.datetime.combine(today, _dt.time()).timestamp()
+    days = alltime.heatmap(cache, today)["days"]
+    first = _dt.date.fromisoformat(days[0]["d"])
+    assert first.weekday() == 6 and days[-1]["d"] == "2026-10-20"        # Sunday .. today
+    assert 365 <= len(days) <= 378 and sum(d["lvl"] > 0 for d in days) == 1

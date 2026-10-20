@@ -11,7 +11,7 @@ from ctu import paths
 EXAMPLE = json.loads((Path(__file__).resolve().parent.parent / "docs" / "design" / "state-v2.example.json")
                      .read_text(encoding="utf-8"))
 # Fields the engine emits beyond the example (documented in the hand-off report).
-EXTRAS = {"app.accent", "app.theme", "app.statusline", "app.hook"}
+EXTRAS = {"app.accent", "app.theme", "app.clock", "app.statusline", "app.hook"}
 
 
 def _kind(v):
@@ -99,7 +99,7 @@ def test_state_matches_the_example(make_engine):
     assert st["limits"][0]["binding"] and not any(l["binding"] for l in st["limits"][1:])
     assert st["alerts"][0]["kind"] == "will_hit" and st["alerts"][0]["id"].startswith("will_hit:five_hour:")
     assert st["sessions"][0]["context"]["window"] == 200000
-    assert st["app"]["theme"] in ("light", "dark") and set(st["app"]["accent"]) == {"light", "dark"}
+    assert st["app"]["theme"] in ("light", "dark", "system") and set(st["app"]["accent"]) == {"light", "dark"}
     json.dumps(st)                                           # serialisable
 
 

@@ -11,7 +11,7 @@ import webbrowser
 from ctu import APP_NAME, io, paths, winplat
 
 SNAP_PX = 12
-FLYOUT_W, FLYOUT_H = 320, 400          # logical px
+FLYOUT_W, FLYOUT_H = 300, 232          # logical px; the page reports its real size (flyout_resize)
 DASH_W, DASH_H, DASH_MIN = 1100, 760, (720, 560)
 OVERLAY_DEFAULT = (360, 30)
 BG = {"light": "#F3F3F3", "dark": "#202020"}
@@ -111,6 +111,7 @@ class Shell:
         self.tray = None
         self._flyout_visible = False
         self._flyout_hidden_at = 0.0
+        self._flyout_size = (FLYOUT_W, FLYOUT_H)
         self._overlay_auto_hidden = False
         self._overlay_visible = False
         self._move_timer = None
@@ -127,6 +128,10 @@ class Shell:
     def run(self) -> None:
         import webview
         self.webview = webview
+        try:
+            webview.settings["ALLOW_DOWNLOADS"] = True     # Team pool > CSV export
+        except Exception:
+            pass
         self.flyout = _create(
             webview, "Claude usage", self.url("/flyout"), width=FLYOUT_W, height=FLYOUT_H, resizable=False,
             frameless=True, easy_drag=False, on_top=True, hidden=True, background_color=self.bg())
@@ -268,6 +273,19 @@ class Shell:
             io.log(f"overlay resize failed: {exc}")
 
     # ---- flyout ----
+    def resize_flyout(self, w: int, h: int) -> None:
+        """flyout_resize: the page's rendered size in logical px. Applied now if the flyout is open
+        (keeping the edge nearest the taskbar fixed), otherwise used on the next open."""
+        with self._lock:
+            self._flyout_size = (w, h)
+            if self.flyout is None or not self._flyout_visible:
+                return
+            hwnd = _hwnd(self.flyout)
+            r, work = winplat.window_rect(hwnd), winplat.work_area_of(hwnd)
+            if r and work:
+                dpi = winplat.dpi_of(hwnd)
+                winplat.set_window_pos(hwnd, *anchored_resize(r, scale(w, dpi), scale(h, dpi), work), topmost=True)
+
     def toggle_flyout(self, anchor=None) -> None:
         with self._lock:
             if self.flyout is None:
@@ -285,7 +303,7 @@ class Shell:
                     if anchor else None)
             if hwnd and work:
                 dpi = winplat.dpi_of(hwnd)
-                w, h = scale(FLYOUT_W, dpi), scale(FLYOUT_H, dpi)
+                w, h = scale(self._flyout_size[0], dpi), scale(self._flyout_size[1], dpi)
                 x, y = flyout_position(anchor, work, w, h, margin=scale(12, dpi))
                 winplat.set_window_pos(hwnd, x, y, w, h, topmost=True)
             self.flyout.show()
@@ -344,6 +362,9 @@ class BrowserHost:
         pass
 
     def resize_overlay(self, w, h):
+        pass
+
+    def resize_flyout(self, w, h):
         pass
 
     def close_flyout(self):

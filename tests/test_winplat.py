@@ -23,3 +23,10 @@ def test_defaults_off_windows():
     assert winplat.notification_state() is None and winplat.notify_icon_rect(1, 0) is None
     assert winplat.set_ex_style(1, add=winplat.WS_EX_LAYERED) is False
     assert winplat.work_area_at(0, 0) is None and winplat.register_protocol("x") is False
+
+
+def test_clock_pref_from_short_time_format(monkeypatch):
+    from ctu import winplat
+    for fmt_, want in (("HH:mm", "24h"), ("H:mm", "24h"), ("h:mm tt", "12h"), (None, "system"), ("", "system")):
+        monkeypatch.setattr(winplat, "reg_value", lambda key, name, v=fmt_: v)
+        assert winplat.clock_pref() == want

@@ -201,7 +201,12 @@ function heatmapHTML(d) {
   const active = days.filter((x) => x.tok > 0).length;
   const busiest = days.reduce((a, b) => (b.tok > (a ? a.tok : 0) ? b : a), null);
   const label = `Activity over the last ${weeks} weeks: ${active} active days.${busiest ? " Busiest day " + dayLabel(busiest.d) + " with " + tokens(busiest.tok) + " tokens." : ""}`;
-  const wd = (i) => weekdayOfKey(days[i] ? days[i].d : "2026-10-18");
+  // Row labels from the first day + i (rows are consecutive weekdays), never from the data length.
+  const wd = (i) => {
+    const [y, m, dd] = days[0].d.split("-").map(Number);
+    const k = new Date(Date.UTC(y, m - 1, dd + i, 12)).toISOString().slice(0, 10);
+    return weekdayOfKey(k);
+  };
   return `<section class="card heat-card" aria-labelledby="heat-h">
     <div class="card-head"><h2 id="heat-h">Activity</h2><span class="card-sub">${esc(count(active, "active day", "active days"))} in the last ${weeks} weeks</span></div>
     <div class="hm" style="--weeks:${weeks}" role="img" aria-label="${esc(label)}">

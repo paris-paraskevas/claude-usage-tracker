@@ -1,3 +1,4 @@
+import { setFormatDefaults } from "./format.js";
 // Theme + accent. The OS theme drives prefers-color-scheme; state.app.theme
 // ("light" | "dark" | "system") or ?theme= can force one via [data-theme].
 // state.app.accent ("#RRGGBB" or { light, dark }) becomes --accent, adjusted
@@ -75,6 +76,7 @@ export function applyAppearance(state) {
   const theme = q.get("theme") || app.theme || null;
   if (theme === "light" || theme === "dark") root.setAttribute("data-theme", theme);
   else root.removeAttribute("data-theme");
+  if (app.clock === "24h" || app.clock === "12h") setFormatDefaults({ hour12: app.clock === "12h" });
   current.accent = q.get("accent") ? "#" + q.get("accent").replace(/^#/, "") : app.accent || null;
   lastKey = lastKey + "!"; // force re-evaluation when data-theme changed
   apply();

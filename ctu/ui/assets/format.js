@@ -3,7 +3,7 @@
 // Locale defaults to navigator.language; tests pass both explicitly.
 
 const cache = new Map();
-let defaults = { locale: undefined, timeZone: undefined };
+let defaults = { locale: undefined, timeZone: undefined, hour12: undefined };
 
 /** Override defaults (used by the app once, and by tests). */
 export function setFormatDefaults(o = {}) {
@@ -215,16 +215,23 @@ export function clock(epoch, o) {
   return fmt("d", loc(o), clockOptions(o)).format(new Date(epoch * 1000));
 }
 // 24-hour locales get a padded hour ("09:00"); 12-hour ones stay "9:00 AM".
+// The host's own clock setting (Windows short-time format, via state.app.clock) wins over the
+// locale, so an English UI on a 24-hour system still shows "16:40" like the taskbar clock.
 function clockOptions(o) {
-  const l = loc(o);
-  const key = "hc|" + l;
-  let hc = cache.get(key);
-  if (!hc) {
-    hc = fmt("d", l, { hour: "numeric" }).resolvedOptions().hourCycle || "h23";
-    cache.set(key, hc);
+  const forced = o && typeof o.hour12 === "boolean" ? o.hour12 : defaults.hour12;
+  let h24;
+  if (typeof forced === "boolean") h24 = !forced;
+  else {
+    const l = loc(o);
+    const key = "hc|" + l;
+    let hc = cache.get(key);
+    if (!hc) {
+      hc = fmt("d", l, { hour: "numeric" }).resolvedOptions().hourCycle || "h23";
+      cache.set(key, hc);
+    }
+    h24 = hc === "h23" || hc === "h24";
   }
-  const h24 = hc === "h23" || hc === "h24";
-  return { hour: h24 ? "2-digit" : "numeric", minute: "2-digit", timeZone: tz(o) };
+  return { hour: h24 ? "2-digit" : "numeric", minute: "2-digit", hourCycle: h24 ? "h23" : "h12", timeZone: tz(o) };
 }
 
 /** Weekday + clock: "Thu 09:00". */

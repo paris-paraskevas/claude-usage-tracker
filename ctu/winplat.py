@@ -69,6 +69,21 @@ def apps_light() -> bool:
     return v is None or bool(v)
 
 
+def clock_pref() -> str:
+    """"24h" / "12h" from the Windows short-time format (Control Panel > Region), else "system"."""
+    v = reg_value(r"Control Panel\International", "sShortTime")
+    if not isinstance(v, str) or not v:
+        return "system"
+    return "24h" if "H" in v else "12h"
+
+
+def apps_theme() -> str:
+    """App theme for the UI: "light" / "dark" from AppsUseLightTheme, "system" when unreadable
+    (not Windows), so the page follows prefers-color-scheme instead of being forced light."""
+    v = reg_value(_PERSONALIZE, "AppsUseLightTheme")
+    return "system" if v is None else ("light" if v else "dark")
+
+
 def accent() -> dict:
     pal = accent_from_palette(reg_value(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent", "AccentPalette"))
     if pal:
