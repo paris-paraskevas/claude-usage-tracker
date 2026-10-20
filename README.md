@@ -45,15 +45,16 @@ something to act on.
 
 ## Surfaces
 
-- **Tray icon** — the binding limit's used % as two digits in your taskbar colours, drawn at
-  the exact size for your display scaling. A bar along the bottom appears only when it
-  matters: amber halves for *watch pace*, solid vermillion for *will hit the limit*, grey
-  dashes when the data is stale; a clock when the limit is reached. Left-click opens the
+- **Tray icon** — two bars, 5-hour on the left and weekly on the right, filled to the used %
+  and drawn at the exact size for your display scaling. The fill is in your taskbar colours
+  when you're on pace, amber when you should *watch your pace*, vermillion when you'll *hit the
+  limit* before it refills (a full vermillion bar once it's reached), and grey when the data
+  is stale. Prefer a number? Settings › Overlay & tray › Tray icon. Left-click opens the
   **flyout**; right-click opens the menu.
 - **Overlay** — replaces the old mini widget and HUD bar. One always-on-top line
   (`▲ 5h 64% limit ~16:26 │ 7d 41% │ ctx 73% │ 1 waiting`) that never steals focus, expands
   in place on hover or click, can be pinned, snaps to screen edges and hides during
-  full-screen apps and presentations. Fields, opacity and click-through are in Settings.
+  full-screen apps and presentations. Fields, opacity and click-through are in Settings › Overlay & tray.
 - **Dashboard** — **Now** (verdict, runway chart, limits, active session, waiting sessions,
   extra usage) · **Sessions** · **Team pool** · **History** (usage over time, totals,
   streaks, activity heatmap, models, projects) · **Settings** (gear). Light and dark follow
@@ -65,7 +66,7 @@ something to act on.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/tray-icons.png" alt="Tray icon states" width="720"><br>
-  <em>Tray icon at 16 and 24 px, light and dark taskbar: on pace, watch pace, will hit limit, limit reached, stale</em>
+  <em>Tray icon (5-hour | weekly) at 16 and 24 px, light and dark taskbar: on pace, watch pace, will hit limit, limit reached, stale</em>
 </p>
 
 <p align="center">

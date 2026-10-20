@@ -36,7 +36,8 @@
     ],
     "click_through": false,
     "opacity": 90,
-    "auto_hide_fullscreen": true
+    "auto_hide_fullscreen": true,
+    "tray_icon": "bars"
   },
   "remote": {
     "enabled": true,

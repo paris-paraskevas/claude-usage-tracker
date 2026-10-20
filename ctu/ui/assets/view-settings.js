@@ -38,7 +38,7 @@ const REFRESH = [
 ];
 const GROUPS = [
   ["alerts", "Alerts"],
-  ["overlay", "Overlay"],
+  ["overlay", "Overlay & tray"],
   ["phone", "Phone"],
   ["team", "Team"],
   ["data", "Data source"],
@@ -210,8 +210,9 @@ function overlayHTML() {
     ${row("Let clicks pass through", "Clicks reach the window underneath. Turn it off from the tray icon menu.", sw("ov-ct", "overlay.click_through", !!o.click_through, "Let clicks pass through"))}
     ${row("Opacity at rest", "Full opacity while you hover.", `<span class="range-row"><input type="range" class="range" min="30" max="100" step="5" id="ov-op" data-key="ov-op" data-set="overlay.opacity" value="${op}" aria-label="Opacity at rest" aria-valuetext="${op}%"><output for="ov-op" class="num range-out" id="ov-op-out">${op}%</output></span>`)}
     ${row("Hide during full-screen apps and presentations", "", sw("ov-fs", "overlay.auto_hide_fullscreen", !!o.auto_hide_fullscreen, "Hide during full-screen apps and presentations"))}
+    ${row("Tray icon", "Bars: 5-hour on the left, weekly on the right. Number: the % of the limit closest to running out.", `<select class="input" id="ov-tray" data-key="ov-tray" data-set="overlay.tray_icon" aria-label="Tray icon">${[["bars", "Two bars"], ["number", "Number"]].map(([v, l]) => `<option value="${v}"${(o.tray_icon || "bars") === v ? " selected" : ""}>${l}</option>`).join("")}</select>`)}
   </div>`;
-  return group("overlay", "Overlay", rows);
+  return group("overlay", "Overlay & tray", rows);
 }
 
 function phoneHTML() {

@@ -14,8 +14,9 @@ with the runway chart from direction B).
   12/24-hour clock; keyboard and screen-reader friendly; Windows High Contrast supported.
 - One overlay replaces the mini widget and the HUD bar: a single line at rest, expands on
   hover/click, pin, snap to edges, hides in full screen, optional click-through.
-- Tray: the binding limit's % in taskbar colours at the exact DPI size, a status bar for
-  watch / will-hit / stale, a clock when limited; left-click flyout, right-click menu.
+- Tray: two bars (5-hour | weekly) at the exact DPI size, filled to the used % and coloured by
+  the forecast (taskbar colour on pace, amber watch, vermillion will-hit / limited, grey stale);
+  a "number" style is in Settings › Overlay & tray. Left-click flyout, right-click menu.
 
 **Engine (`ctu` package; `claude_usage_tracker.py` is now a shim)**
 - Forecast: least-squares pace, projection to the refill, time until the limit only when it

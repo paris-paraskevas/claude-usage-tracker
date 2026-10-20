@@ -290,7 +290,7 @@ def settings() -> dict:
         "quiet_hours": {"enabled": False, "start": "22:00", "end": "08:00"},
         "status_components": ["claude.ai", "Claude Code", "Claude API (api.anthropic.com)"],
         "status_components_available": ["claude.ai", "Claude Code", "Claude API (api.anthropic.com)", "Claude Console (platform.claude.com)"],
-        "overlay": {"fields": ["5h", "7d", "ctx", "waiting", "status"], "click_through": False, "opacity": 90, "auto_hide_fullscreen": True},
+        "overlay": {"fields": ["5h", "7d", "ctx", "waiting", "status"], "click_through": False, "opacity": 90, "auto_hide_fullscreen": True, "tray_icon": "bars"},
         "remote": {"enabled": True, "relay_url": "https://claude-usage-relay.businessofzeus.workers.dev", "transcript": False},
         "team": {"tz": "Europe/Athens"},
         "data": {"statusline_installed": True, "refresh_s": 60},
