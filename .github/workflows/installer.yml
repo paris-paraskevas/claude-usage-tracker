@@ -55,12 +55,13 @@ jobs:
           }
           if (-not (Test-Path "dist\ClaudeUsageTracker\_internal\ctu\ui\dashboard.html")) { throw "ctu/ui missing from the bundle" }
 
-      # A release uses its tag (v0.4.0 -> 0.4.0); a manual run (test build) uses the package version.
+      # A release (or a run started on a release tag by release.yml) uses the tag (v0.4.0 -> 0.4.0);
+      # a manual run on a branch (test build) uses the package version.
       - name: Resolve version
         id: ver
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
+          if [ "${{ github.event_name }}" = "release" ] || [ "${{ github.ref_type }}" = "tag" ]; then
             echo "v=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
           else
             echo "v=$(python -c 'import ctu; print(ctu.__version__)')" >> "$GITHUB_OUTPUT"
@@ -113,7 +114,7 @@ jobs:
           retention-days: 14
 
       - name: Attach installer to the release (signed if available)
-        if: ${{ github.event_name == 'release' }}
+        if: ${{ github.event_name == 'release' || github.ref_type == 'tag' }}
         shell: bash
         run: |
           SETUP=dist/ClaudeUsageTracker-Setup.exe
