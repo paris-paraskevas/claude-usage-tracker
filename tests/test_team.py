@@ -189,3 +189,37 @@ def test_teamsync_enabled_tracks_session(monkeypatch):
     assert m.TeamSync.enabled({}) is False          # signed out -> disabled
     monkeypatch.setattr(m.supabase_pool, "has_session", lambda: True)
     assert m.TeamSync.enabled({}) is True           # signed in -> enabled
+
+
+# ---- currencies, role, team clock --------------------------------------------
+
+def test_overview_merge_never_sums_mixed_currencies():
+    ov = {"accounts": [
+        {"acct": "a", "name": "A", "account": {"extra": {"currency": "EUR"}}},
+        {"acct": "b", "name": "B", "account": {"extra": {"currency": "USD"}}},
+        {"acct": "c", "name": "C", "account": {"extra": None}},
+    ]}
+    led = {"accounts": {}, "finals": {}, "days": {
+        "2026-07-01": {"a": {"d": _dev(1.0, 1)}, "b": {"d": _dev(2.0, 1)}},
+        "2026-07-02": {"a": {"d": _dev(4.0, 2)}, "b": {"d": _dev(7.0, 2)}}}}
+    k = m.team_overview_merge(ov, led)["kpis"]
+    assert k["org_spend"] is None and k["org_currency"] is None
+    assert k["org_spend_by_currency"] == {"EUR": 3.0, "USD": 5.0}
+    one = m.team_overview_merge({"accounts": ov["accounts"][:1] + ov["accounts"][2:]}, led)["kpis"]
+    assert one["org_spend"] == 3.0 and one["org_currency"] == "EUR"
+
+
+def test_overview_compact_carries_role():
+    c = m.team_overview_compact({"kpis": {}, "accounts": []}, role="member")
+    assert c["role"] == "member" and c["members"] == []
+
+
+def test_team_now_falls_back_on_bad_zone():
+    assert m.team_now("Not/AZone").tzinfo is not None              # no exception, local clock
+    assert m.team_now(None).tzinfo is not None
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo("UTC")
+    except Exception:
+        return                                                     # no tz database here
+    assert m.team_now("UTC").utcoffset().total_seconds() == 0

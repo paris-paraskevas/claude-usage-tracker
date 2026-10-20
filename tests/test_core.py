@@ -131,6 +131,9 @@ def test_scan_sessions(tmp_path, monkeypatch):
 def test_pretty_model():
     assert m.pretty_model("claude-opus-4-8") == "Opus 4.8"
     assert m.pretty_model("claude-fable-5") == "Fable 5"
+    assert m.pretty_model("claude-opus-5-5") == "Opus 5.5"
+    assert m.pretty_model("claude-sonnet-5-5") == "Sonnet 5.5"
+    assert m.pretty_model("claude-fable-5-1") == "Fable 5.1"
     assert m.pretty_model("claude-sonnet-4-6") == "Sonnet 4.6"
     assert m.pretty_model("claude-haiku-4-5-20251001") == "Haiku 4.5"   # date suffix dropped
     assert m.pretty_model("<synthetic>") == "Other"
@@ -269,9 +272,9 @@ def test_safe_login_email_blocks_shell_injection():
     assert m._safe_login_email("") is None
 
 
-def test_remote_sync_throttle_and_inflight():
-    """The RemoteSync coordinator's throttle + in-flight decisions are now unit-testable
-    (they used to be tangled into the poll loop)."""
+def test_remote_sync_throttle():
+    """The RemoteSync coordinator's throttle decisions are unit-testable (they used to be
+    tangled into the poll loop). There is no in-flight guard — only the time throttle."""
     rs = m.RemoteSync()
     assert rs.due(100.0, 60) is True       # first call → due, arms the window at t=100
     assert rs.due(130.0, 60) is False      # +30s, under the 60s interval
@@ -291,3 +294,35 @@ def test_read_transcripts_exposes_session_id(tmp_path, monkeypatch):
                     "message": {"role": "user", "content": "hi"}}), encoding="utf-8")
     ts = m.read_transcripts(limit=1)
     assert ts and ts[0]["session_id"] == "abc123"
+
+
+def test_build_snapshot_rate_steady_vs_unknown(monkeypatch):
+    monkeypatch.setattr(m, "read_oauth", lambda: {})
+    monkeypatch.setattr(m, "read_account", lambda: None)
+    now = time.time()
+    r = m.FetchResult(True, windows={"five_hour": {"pct": 40.0, "resets_at": None}})
+    flat = {"t": [int(now - 1800 + i * 300) for i in range(7)], "five_hour": [40] * 7, "seven_day": [5] * 7}
+    w = m.build_snapshot(r, flat, {})["windows"][0]
+    assert w["rate_per_hour"] == 0                                 # flat -> 0 ("steady"), not None
+    w = m.build_snapshot(r, {"t": [], "five_hour": [], "seven_day": []}, {})["windows"][0]
+    assert w["rate_per_hour"] is None                              # no samples -> "gathering rate…"
+
+
+def test_usage_bands_are_distinct():
+    cols = [m.usage_style(p)[0] for p in (10, 65, 85, 95, 100)]
+    assert len(set(cols)) == 5                                     # 80/90/100 no longer near-identical
+
+
+def test_check_latest_uses_pypi_for_pip_installs(monkeypatch):
+    monkeypatch.setattr(m, "check_github_latest", lambda: ("9.9.9", "https://x/Setup.exe"))
+    monkeypatch.setattr(m, "check_pypi_latest", lambda: "0.3.0")
+    monkeypatch.setattr(m, "_is_installed_pkg", lambda: True)
+    assert m.check_latest() == ("0.3.0", None)                     # pip upgrades from PyPI
+    monkeypatch.setattr(m, "_is_installed_pkg", lambda: False)
+    assert m.check_latest() == ("9.9.9", "https://x/Setup.exe")
+
+
+def test_config_has_no_dead_keys():
+    for k in ("team_share_token", "alltime_days"):
+        assert k not in m.DEFAULT_CONFIG and k not in m.CONFIG_ALLOW
+    assert not hasattr(m, "remote_decrypt")

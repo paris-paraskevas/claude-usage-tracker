@@ -20,13 +20,13 @@ from __future__ import annotations
 import base64
 import json
 import os
+import threading
 import time
 import uuid
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlparse
 
 # Public config — real values baked in (publishable key is safe to ship); env overrides for dev.
 SUPABASE_URL = os.environ.get(
@@ -39,6 +39,17 @@ _SESSION_KEY = "session"
 _DEVICE_PATH = Path(os.path.expanduser("~")) / ".claude-usage-tracker" / "device_id"
 _TIMEOUT = 10
 _REFRESH_SKEW = 120  # refresh this many seconds before the access token expires
+
+# The session is read on every 10s tick by several threads (push, overview, whoami). Keep the
+# last-known value in memory so each tick doesn't hit the OS keychain repeatedly, and serialise
+# refreshes: with ROTATING refresh tokens, two threads refreshing at once means one of them
+# reuses a spent token -> 400 -> family revoked -> the user is silently signed out.
+_SESSION_LOCK = threading.RLock()
+_session_cache: dict = {"loaded": False, "sess": None}
+
+
+class PoolError(Exception):
+    """A pool read failed (network / HTTP / not signed in) — distinct from an empty pool."""
 
 
 def configured() -> bool:
@@ -53,22 +64,33 @@ def _keyring():
 
 
 def _load_session() -> dict | None:
-    try:
-        raw = _keyring().get_password(_KEYRING_SERVICE, _SESSION_KEY)
-        return json.loads(raw) if raw else None
-    except Exception:
-        return None
+    """The stored session, from the in-memory cache after the first successful keychain read.
+    A keychain error is not cached (the next call retries)."""
+    with _SESSION_LOCK:
+        if _session_cache["loaded"]:
+            return _session_cache["sess"]
+        try:
+            raw = _keyring().get_password(_KEYRING_SERVICE, _SESSION_KEY)
+            sess = json.loads(raw) if raw else None
+        except Exception:
+            return None
+        _session_cache.update(loaded=True, sess=sess)
+        return sess
 
 
 def _save_session(sess: dict) -> None:
-    _keyring().set_password(_KEYRING_SERVICE, _SESSION_KEY, json.dumps(sess))
+    with _SESSION_LOCK:
+        _keyring().set_password(_KEYRING_SERVICE, _SESSION_KEY, json.dumps(sess))
+        _session_cache.update(loaded=True, sess=sess)
 
 
 def _clear_session() -> None:
-    try:
-        _keyring().delete_password(_KEYRING_SERVICE, _SESSION_KEY)
-    except Exception:
-        pass
+    with _SESSION_LOCK:
+        _session_cache.update(loaded=True, sess=None)
+        try:
+            _keyring().delete_password(_KEYRING_SERVICE, _SESSION_KEY)
+        except Exception:
+            pass
 
 
 # --- HTTP ---------------------------------------------------------------------------------
@@ -136,22 +158,6 @@ def sign_in_verify_code(email: str, code: str):
     return False, resp
 
 
-def sign_in_verify_url(link: str):
-    """Complete a magic-link login from a pasted URL — used before custom SMTP delivers codes."""
-    q = parse_qs(urlparse(link).query)
-    body = {"type": (q.get("type") or ["magiclink"])[0]}
-    if q.get("token_hash"):
-        body["token_hash"] = q["token_hash"][0]
-    elif q.get("token"):
-        body["token"] = q["token"][0]
-    else:
-        return False, "no token in url"
-    st, resp = _http("POST", "/auth/v1/verify", body=body)
-    if st == 200 and _store(resp):
-        return True, claims()
-    return False, resp
-
-
 def sign_out() -> None:
     sess = _load_session()
     if sess and sess.get("access_token"):
@@ -171,16 +177,28 @@ def _refresh(sess: dict) -> dict | None:
     return None
 
 
+def _fresh(sess: dict) -> bool:
+    return (sess.get("expires_at") or 0) > time.time() + _REFRESH_SKEW
+
+
 def access_token() -> str | None:
-    """A valid access token, refreshed ahead of expiry. None → signed out / re-login needed."""
+    """A valid access token, refreshed ahead of expiry. None → signed out / re-login needed.
+    Refresh is serialised: a thread that waited on the lock re-reads the session first, so it
+    uses the token the winner just stored instead of replaying the spent refresh token."""
     sess = _load_session()
     if not sess:
         return None
-    if (sess.get("expires_at") or 0) <= time.time() + _REFRESH_SKEW:
-        sess = _refresh(sess)
+    if _fresh(sess):
+        return sess.get("access_token")
+    with _SESSION_LOCK:
+        sess = _load_session()
         if not sess:
             return None
-    return sess.get("access_token")
+        if not _fresh(sess):
+            sess = _refresh(sess)
+            if not sess:
+                return None
+        return sess.get("access_token")
 
 
 def signed_in() -> bool:
@@ -250,6 +268,18 @@ def set_username(username: str) -> bool:
     return st in (200, 201, 204)
 
 
+def claim_device() -> bool:
+    """Make THIS machine the account's active device (signing in here = using it here). A PATCH
+    of the caller's own profile row; no-op (False) when there is no profile yet."""
+    tok, u = access_token(), uid()
+    if not tok or not u:
+        return False
+    st, _ = _http("PATCH", f"/rest/v1/profiles?user_id=eq.{u}", token=tok, prefer="return=minimal",
+                  body={"active_device_id": device_id(),
+                        "device_claimed_at": datetime.now(timezone.utc).isoformat()})
+    return st in (200, 204)
+
+
 def device_matches() -> bool:
     """Soft device-lock self-check (call each poll tick). NOT the isolation boundary — RLS is.
     True when no profile yet or the claimed device is this one."""
@@ -267,7 +297,8 @@ def device_matches() -> bool:
 def push(row: dict, dev: dict, account: dict, local_date: str) -> bool:
     """Upsert the pooled account + today's usage row as the logged-in user (RLS-scoped).
     `row` is build_team_report(snap, dev, account). team/writer_uid/by_name are NOT sent —
-    the usage_force trigger stamps them. Returns True on success."""
+    the usage_force trigger stamps them. `device` is informational (not part of the key), so it
+    carries the human-readable machine name teammates see. Returns True on success."""
     tok = access_token()
     if not tok:
         return False
@@ -279,7 +310,7 @@ def push(row: dict, dev: dict, account: dict, local_date: str) -> bool:
     st2, _ = _http("POST", "/rest/v1/usage?on_conflict=team,acct,date", token=tok,
                    prefer="resolution=merge-duplicates,return=minimal",
                    body={
-                       "acct": acct, "device": dev.get("did"), "date": local_date,
+                       "acct": acct, "device": dev.get("device") or dev.get("did"), "date": local_date,
                        "display_name": row.get("name"),
                        "fh_pct": row.get("fh_pct"), "sd_pct": row.get("sd_pct"),
                        "fh_resets_at": row.get("fh_resets_at"), "sd_resets_at": row.get("sd_resets_at"),
@@ -293,12 +324,16 @@ def push(row: dict, dev: dict, account: dict, local_date: str) -> bool:
 
 # --- read (reshape Supabase rows into the shapes the existing merge fns expect) ------------
 
-def _get(path: str):
+def _get(path: str) -> list:
+    """GET a PostgREST collection. Raises PoolError on any failure so callers can tell
+    "Supabase unreachable" apart from a genuinely empty pool."""
     tok = access_token()
     if not tok:
-        return None
+        raise PoolError("not signed in")
     st, resp = _http("GET", path, token=tok)
-    return resp if st == 200 and isinstance(resp, list) else None
+    if st == 200 and isinstance(resp, list):
+        return resp
+    raise PoolError(f"supabase read failed (HTTP {st})" if st else f"supabase unreachable: {resp}")
 
 
 def _row_from_db(r: dict) -> dict:
@@ -319,9 +354,9 @@ def _row_from_db(r: dict) -> dict:
 
 def read_overview(tz: str, today: str, yesterday: str) -> dict:
     """Same shape the relay /overview did — feed straight into team_overview_merge. RLS scopes
-    rows to the caller's team, so no team filter is sent."""
-    accts = {a["acct"]: a for a in (_get("/rest/v1/accounts?select=acct,display_name,org") or [])}
-    rows = _get(f"/rest/v1/usage?select=*&date=in.({today},{yesterday})") or []
+    rows to the caller's team, so no team filter is sent. Raises PoolError on a failed read."""
+    accts = {a["acct"]: a for a in _get("/rest/v1/accounts?select=acct,display_name,org")}
+    rows = _get(f"/rest/v1/usage?select=*&date=in.({today},{yesterday})")
     by_date: dict = {today: {}, yesterday: {}}
     for r in rows:
         by_date.setdefault(r["date"], {}).setdefault(r["acct"], {})[r["device"]] = _row_from_db(r)
@@ -344,17 +379,17 @@ def read_overview(tz: str, today: str, yesterday: str) -> dict:
             "account_is_today": bool(top),
             "last_used": {"ts": last["ts"], "device": last["device"], "by": last.get("by_name")} if last else None,
             "devices": [{"did": d, **row} for d, row in tdev.items()],
-            "escrow": {"present": False},  # escrow dropped in the Supabase model
         })
     return {"tz": tz, "today": today, "accounts": accounts}
 
 
 def read_ledger(month: str) -> dict:
-    """Relay /ledger shape — feed into team_ledger_computed / member_month_tokens."""
+    """Relay /ledger shape — feed into team_ledger_computed / member_month_tokens.
+    Raises PoolError on a failed read."""
     names = {a["acct"]: (a.get("display_name") or a["acct"])
-             for a in (_get("/rest/v1/accounts?select=acct,display_name") or [])}
-    rows = _get(f"/rest/v1/usage?select=*&date=like.{month}-*") or []
-    finals_rows = _get(f"/rest/v1/finals?select=*&month=eq.{month}") or []
+             for a in _get("/rest/v1/accounts?select=acct,display_name")}
+    rows = _get(f"/rest/v1/usage?select=*&date=like.{month}-*")
+    finals_rows = _get(f"/rest/v1/finals?select=*&month=eq.{month}")
     days: dict = {}
     for r in rows:
         days.setdefault(r["date"], {}).setdefault(r["acct"], {})[r["device"]] = _row_from_db(r)

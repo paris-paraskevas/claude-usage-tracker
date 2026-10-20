@@ -7,10 +7,13 @@ serves a small dark-glass dashboard with animated gauges, live reset
 countdowns, a burn-rate / time-to-limit projection, usage history, and overage
 credits.
 
-Data source: GET https://api.anthropic.com/api/oauth/usage, authenticated with
-the OAuth token Claude Code already stores in ~/.claude/.credentials.json.
-Read-only — it never writes to your credentials file and talks to nothing but
-that one Anthropic endpoint.
+Data source: the usage snapshot Claude Code's statusline writes locally, with
+GET https://api.anthropic.com/api/oauth/usage (authenticated with the OAuth token
+Claude Code already stores in ~/.claude/.credentials.json) as an occasional
+fallback and for overage credits. Read-only — it never writes to your
+credentials file. Other network calls: status.anthropic.com (service status),
+GitHub releases / PyPI (daily update check), and — only if you opt in — the
+phone relay (end-to-end encrypted) and the Supabase team pool.
 
     pythonw claude_usage_tracker.py            # tray widget (normal use)
     python  claude_usage_tracker.py --once     # print status once and exit
@@ -18,6 +21,8 @@ that one Anthropic endpoint.
     python  claude_usage_tracker.py --window --port 8787   # dashboard window
     python  claude_usage_tracker.py --install-autostart
     python  claude_usage_tracker.py --uninstall-autostart
+    python  claude_usage_tracker.py --uninstall      # shortcuts + the Claude Code Stop hook
+    python  claude_usage_tracker.py --remove-hook    # just the Claude Code Stop hook
 """
 
 from __future__ import annotations
@@ -104,10 +109,10 @@ DEFAULT_CONFIG = {
     "sessions_top_n": 8,
     "alltime_interval_seconds": 600,     # how often to fold new session bytes into lifetime totals
     "alltime_top_n": 8,                  # projects shown on the All-time tab
-    "alltime_days": 30,                  # span of the daily-usage chart
     "predictive_alerts": True,           # burn-rate / context-full / overage toasts
     "danger_alerts": True,               # loud per-percent warnings in the 95-100% zone
-    "update_check": True,                # daily check for a newer version on PyPI
+    "update_check": True,                # daily check for a newer version (GitHub releases;
+                                         # PyPI for pip/pipx installs, since that's what pip upgrades to)
     "threshold_step": 20,            # ping every N percent
     "windows": ["five_hour", "seven_day"],
     "notify_at_100": True,
@@ -136,8 +141,6 @@ DEFAULT_CONFIG = {
     "remote_transcript": False,                 # opt-in: mirror the active conversation's text to your phone (E2EE)
     "team_report_seconds": 10,                  # how often a team member pushes its usage row to D1 (docs/TEAM.md);
                                                 # bounded below by ui_refresh_seconds (the loop tick)
-    "team_share_token": True,                   # escrow the short-lived OAuth access token so the relay's
-                                                # 23:59 cron can capture the ledger with this machine off
     "team_tz": "Europe/Athens",                 # the team's wall clock for daily/month-end ledger rows
 }
 
@@ -148,7 +151,7 @@ CONFIG_ALLOW = {
     "open_as_window", "predictive_alerts", "update_check", "danger_alerts",
     "status_check", "status_components", "remote_enabled", "remote_relay_url",
     "notify_session_waiting", "remote_transcript",
-    "team_report_seconds", "team_share_token", "team_tz",
+    "team_report_seconds", "team_tz",
 }
 
 LABELS = {
@@ -164,6 +167,7 @@ _instance_guard = None   # holds the single-instance socket for the process life
 STORE_LOCK = threading.Lock()
 STORE: dict = {"snapshot": {"ok": False, "error": "starting", "windows": []}}
 CONFIG_LOCK = threading.Lock()   # serialize config read-modify-write (tray is the only writer)
+ALLTIME_LOCK = threading.Lock()   # guards the all-time cache: the poll thread folds into it, the team thread reads it
 CONTROL: dict = {}   # {"refresh","check_update","update","set_config","toggle_overlay","remote_action"}
                      # — wired by the running TrayApp so the dashboard/widget drive it over HTTP
 REMOTE_PUSH = None   # optional callable(title, msg) set by TrayApp to mirror toasts to the phone
@@ -498,12 +502,12 @@ def fetch_profile_org(timeout: int = 10):
 # Severity, formatting, projections
 # ---------------------------------------------------------------------------
 
-# Usage color scale (low -> high):
-#   0-20 green · 20-60 blue · 60-80 orange · 80-90 red · 90-99 near-black · 100 yellow
+# Usage color scale (low -> high), mirrored by the --ok/--warn/--high/--hot/--max CSS tokens:
+#   0-60 green · 60-80 amber · 80-90 orange · 90-100 red-orange · 100 red
 USAGE_BANDS = [
-    (100, "#c94f38", "max"),
-    (90,  "#cf6049", "crit"),
-    (80,  "#d4694f", "high"),
+    (100, "#c8372d", "max"),
+    (90,  "#dd5f42", "crit"),
+    (80,  "#e2893f", "high"),
     (60,  "#cda24e", "warn"),
     (0,   "#5e9e72", "ok"),
 ]
@@ -618,19 +622,42 @@ def _usage_of(o: dict) -> dict | None:
     return u if isinstance(u, dict) else None
 
 
-def _read_appended(path: Path, offset: int):
-    """Stream parsed JSON records appended to `path` since byte `offset`, skipping blank or
-    unparseable lines. Streams line-by-line (a first-run backfill can be hundreds of MB, so we
-    never materialize it). The caller handles stat/rotation and persists the new offset
-    (= the file size it read up to)."""
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+def _read_appended(path: Path, offset: int, end: int | None = None, pos: list | None = None):
+    """Stream parsed JSON records from the COMPLETE lines of `path` in [offset, end), skipping
+    blank or unparseable lines. Streams line-by-line (a first-run backfill can be hundreds of MB,
+    so we never materialize it). `end` is the size the caller stat'd — bytes appended after the
+    stat wait for the next scan, so nothing is counted twice. A trailing line without a newline
+    is a write in progress: it is left for the next scan unless it already parses as a whole
+    record (a JSON object can't parse until its closing brace is written). `pos[0]` is kept at
+    the byte offset just past the last consumed line — the offset the caller persists once it
+    has committed what it read."""
+    if pos is None:
+        pos = [offset]
+    pos[0] = offset
+    with open(path, "rb") as fh:
         fh.seek(offset)
-        for line in fh:
-            line = line.strip()
+        cur = offset
+        while end is None or cur < end:
+            raw = fh.readline() if end is None else fh.readline(end - cur)
+            if not raw:
+                break
+            if not raw.endswith(b"\n"):                       # partial / in-progress last line
+                try:
+                    rec = json.loads(raw.decode("utf-8", errors="replace"))
+                except Exception:
+                    break
+                if not isinstance(rec, dict):
+                    break
+                pos[0] = cur + len(raw)
+                yield rec
+                break
+            cur += len(raw)
+            pos[0] = cur
+            line = raw.strip()
             if not line:
                 continue
             try:
-                yield json.loads(line)
+                yield json.loads(line.decode("utf-8", errors="replace"))
             except Exception:
                 continue
 
@@ -664,9 +691,13 @@ def scan_sessions(cache: dict, now: float, window_s: int = 5 * 3600,
             ent = {"size": 0, "mtime": 0, "cwd": ent.get("cwd"), "events": []}
         if st.st_size > ent["size"]:
             try:
-                for o in _read_appended(f, ent["size"]):
-                    if ent["cwd"] is None and isinstance(o.get("cwd"), str):
-                        ent["cwd"] = o["cwd"]
+                # Fold into temporaries and commit only once the read succeeds, so an error
+                # mid-file can't leave half-counted events behind an un-advanced offset.
+                pos = [ent["size"]]
+                cwd, events, ctx_last, max_ctx = ent["cwd"], [], None, ent.get("max_ctx", 0)
+                for o in _read_appended(f, ent["size"], st.st_size, pos):
+                    if cwd is None and isinstance(o.get("cwd"), str):
+                        cwd = o["cwd"]
                     u = _usage_of(o)
                     if not u:
                         continue
@@ -678,12 +709,17 @@ def scan_sessions(cache: dict, now: float, window_s: int = 5 * 3600,
                     # 5h burn excludes cheap cache-reads; context fill is the full prompt.
                     tok = inp + out + cc
                     if tok > 0:
-                        ent["events"].append((ts, tok))
+                        events.append((ts, tok))
                     ctx = inp + cc + cr
                     if ctx > 0:
-                        ent["ctx"], ent["ctx_ts"] = ctx, ts
-                        ent["max_ctx"] = max(ent.get("max_ctx", 0), ctx)
-                ent["size"] = st.st_size
+                        ctx_last = (ctx, ts)
+                        max_ctx = max(max_ctx, ctx)
+                ent["cwd"] = cwd
+                ent["events"].extend(events)
+                if ctx_last:
+                    ent["ctx"], ent["ctx_ts"] = ctx_last
+                ent["max_ctx"] = max_ctx
+                ent["size"] = pos[0]
             except Exception:
                 pass
         ent["mtime"] = st.st_mtime
@@ -734,6 +770,8 @@ MODEL_NAMES = {
     "claude-opus-4-6": "Opus 4.6", "claude-opus-4-5": "Opus 4.5",
     "claude-sonnet-4-6": "Sonnet 4.6", "claude-sonnet-4-5": "Sonnet 4.5",
     "claude-haiku-4-5": "Haiku 4.5", "claude-fable-5": "Fable 5",
+    "claude-opus-5-5": "Opus 5.5", "claude-sonnet-5-5": "Sonnet 5.5",
+    "claude-fable-5-1": "Fable 5.1",
 }
 
 # "you've used Nx more tokens than <work>" — rough token estimates (words x 1.3).
@@ -774,6 +812,32 @@ def _empty_alltime_cache() -> dict:
             "first_ts": None, "last_ts": None}
 
 
+def _merge_alltime(cache: dict, delta: dict) -> None:
+    """Fold one file's freshly-read aggregate (same shape as the cache) into the cache."""
+    for sect in ("models", "projects", "days"):
+        dst = cache[sect]
+        for k, r in delta[sect].items():
+            a = dst.get(k)
+            if a is None:
+                dst[k] = dict(r)
+            else:
+                for f in ("in", "out", "cw", "cr", "msgs"):
+                    a[f] = a.get(f, 0) + r.get(f, 0)
+    for ds, mm in delta["day_models"].items():
+        dm = cache["day_models"].setdefault(ds, {})
+        for model, r in mm.items():
+            a = dm.setdefault(model, {"in": 0, "out": 0, "cw": 0})
+            a["in"] += r["in"]; a["out"] += r["out"]; a["cw"] += r["cw"]
+    for hk, v in delta["hours"].items():
+        cache["hours"][hk] = cache["hours"].get(hk, 0) + v
+    for sid, ts in delta["sessions"].items():
+        if ts > cache["sessions"].get(sid, 0):
+            cache["sessions"][sid] = ts
+    for k, fn in (("first_ts", min), ("last_ts", max)):
+        if delta[k] is not None:
+            cache[k] = delta[k] if cache[k] is None else fn(cache[k], delta[k])
+
+
 def _acc(d: dict, key: str, inp, out, cw, cr) -> None:
     r = d.get(key)
     if r is None:
@@ -786,7 +850,7 @@ def _at_tokens(r) -> int:
     return r["in"] + r["out"] + r["cw"]
 
 
-def scan_all_time(cache: dict, now: float, top_n: int = 8, days: int = 30) -> dict:
+def scan_all_time(cache: dict, now: float, top_n: int = 8) -> dict:
     """Lifetime Claude Code usage from ~/.claude/projects/*/*.jsonl.
 
     Each session log is read incrementally — only the bytes appended since the
@@ -794,10 +858,15 @@ def scan_all_time(cache: dict, now: float, top_n: int = 8, days: int = 30) -> di
     the whole history and every later call is cheap. Token counts, models, and
     timestamps only; message content is never read. `cache` is mutated and
     persisted between runs. Returns a display dict for the All-time tab.
+
+    Each file's new lines are folded into a temporary aggregate and merged (under
+    ALLTIME_LOCK) only when the read succeeds; the stored offset is the end of the last
+    complete line consumed, so partial lines and mid-file errors never double count.
     """
-    if not isinstance(cache, dict) or cache.get("v") != ALLTIME_VERSION:
-        cache.clear()
-        cache.update(_empty_alltime_cache())
+    with ALLTIME_LOCK:
+        if not isinstance(cache, dict) or cache.get("v") != ALLTIME_VERSION:
+            cache.clear()
+            cache.update(_empty_alltime_cache())
     files = cache["files"]
     try:
         paths = list(PROJECTS_DIR.glob("*/*.jsonl"))
@@ -816,8 +885,10 @@ def scan_all_time(cache: dict, now: float, top_n: int = 8, days: int = 30) -> di
         if st.st_size < consumed:             # rotated / truncated -> re-read from the top
             consumed = 0
         cwd = None
+        delta = _empty_alltime_cache()
+        pos = [consumed]
         try:
-            for o in _read_appended(f, consumed):
+            for o in _read_appended(f, consumed, st.st_size, pos):
                 if cwd is None and isinstance(o.get("cwd"), str):
                     cwd = o["cwd"]
                 u = _usage_of(o)
@@ -832,36 +903,38 @@ def scan_all_time(cache: dict, now: float, top_n: int = 8, days: int = 30) -> di
                 msg = o.get("message")
                 model = pretty_model(msg.get("model") if isinstance(msg, dict) else None)
                 name = project_name(cwd, Path(key).parent.name)
-                _acc(cache["models"], model, inp, out, cw, cr)
-                _acc(cache["projects"], name, inp, out, cw, cr)
+                _acc(delta["models"], model, inp, out, cw, cr)
+                _acc(delta["projects"], name, inp, out, cw, cr)
                 ts = _parse_iso(o.get("timestamp"))
                 if ts:
                     dt = datetime.fromtimestamp(ts)
                     ds = dt.strftime("%Y-%m-%d")
-                    _acc(cache["days"], ds, inp, out, cw, cr)
-                    dm = cache["day_models"].setdefault(ds, {})
+                    _acc(delta["days"], ds, inp, out, cw, cr)
+                    dm = delta["day_models"].setdefault(ds, {})
                     dr = dm.get(model)
                     if dr is None:
                         dr = dm[model] = {"in": 0, "out": 0, "cw": 0}
                     dr["in"] += inp; dr["out"] += out; dr["cw"] += cw
                     hk = str(dt.hour)
-                    cache["hours"][hk] = cache["hours"].get(hk, 0) + inp + out + cw
+                    delta["hours"][hk] = delta["hours"].get(hk, 0) + inp + out + cw
                     sid = o.get("sessionId")
                     if isinstance(sid, str):
-                        prev = cache["sessions"].get(sid, 0)
+                        prev = delta["sessions"].get(sid, 0)
                         if ts > prev:
-                            cache["sessions"][sid] = ts
-                    cache["first_ts"] = ts if cache["first_ts"] is None else min(cache["first_ts"], ts)
-                    cache["last_ts"] = ts if cache["last_ts"] is None else max(cache["last_ts"], ts)
-            files[key] = st.st_size
+                            delta["sessions"][sid] = ts
+                    delta["first_ts"] = ts if delta["first_ts"] is None else min(delta["first_ts"], ts)
+                    delta["last_ts"] = ts if delta["last_ts"] is None else max(delta["last_ts"], ts)
+            with ALLTIME_LOCK:                # commit only a fully-read chunk
+                _merge_alltime(cache, delta)
+                files[key] = pos[0]
         except Exception:
             log("all-time scan error on a file:\n" + traceback.format_exc())
     live = {str(p) for p in paths}
-    for k in list(files.keys()):              # drop offsets for deleted files (totals stay — it's cumulative)
-        if k not in live:
-            del files[k]
-
-    return _alltime_display(cache, now, top_n)
+    with ALLTIME_LOCK:
+        for k in list(files.keys()):          # drop offsets for deleted files (totals stay — it's cumulative)
+            if k not in live:
+                del files[k]
+        return _alltime_display(cache, now, top_n)
 
 
 def _d(ds):
@@ -956,7 +1029,6 @@ def _period(cache, now, today, ndays, rank):
 
 def _heatmap(cache, today):
     toks = {ds: _at_tokens(r) for ds, r in cache["days"].items()}
-    mx = max(toks.values()) if toks else 0
     first = cache.get("first_ts")
     if not first:
         return {"days": [], "max": 0}
@@ -966,6 +1038,10 @@ def _heatmap(cache, today):
     floor = floor - timedelta(days=(floor.weekday() + 1) % 7)
     if start < floor:
         start = floor
+    # Shade relative to the busiest day in the DISPLAYED range (an old all-time peak that
+    # scrolled out of the grid would otherwise wash everything visible out to level 1).
+    lo, hi = start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
+    mx = max((t for ds, t in toks.items() if lo <= ds <= hi), default=0)
     out, d = [], start
     while d <= today:
         t = toks.get(d.strftime("%Y-%m-%d"), 0)
@@ -1081,8 +1157,8 @@ def fmt_secs(s) -> str:
 VERDICTS = {
     "ok": ("#5e9e72", "All clear"),
     "caution": ("#cda24e", "Ease up"),
-    "stop": ("#d4694f", "Near limit"),
-    "over": ("#c94f38", "At limit"),
+    "stop": ("#dd5f42", "Near limit"),
+    "over": ("#c8372d", "At limit"),
 }
 _VERDICT_ORDER = ("ok", "caution", "stop", "over")
 
@@ -1116,6 +1192,7 @@ def _vtuple(v):
 
 
 RELEASES_URL = "https://github.com/paris-paraskevas/claude-usage-tracker/releases/latest"
+PYPI_URL = "https://pypi.org/pypi/claude-usage-tracker/json"
 
 
 def check_github_latest():
@@ -1133,6 +1210,27 @@ def check_github_latest():
         return (ver or None), url
     except Exception:
         return None, None
+
+
+def check_pypi_latest():
+    """Latest version published on PyPI, or None. A pip/pipx install upgrades from PyPI, so
+    that copy is only offered an update once PyPI actually has it (GitHub can be ahead)."""
+    try:
+        req = urllib.request.Request(PYPI_URL, headers={"Accept": "application/json",
+                                                        "User-Agent": "claude-usage-tracker"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            d = json.load(resp)
+        return (d.get("info") or {}).get("version") or None
+    except Exception:
+        return None
+
+
+def check_latest():
+    """(latest_version, installer_url) from the source this copy actually updates from:
+    PyPI for a pip/pipx install, GitHub releases for the frozen installer / a source checkout."""
+    if _is_installed_pkg():
+        return check_pypi_latest(), None
+    return check_github_latest()
 
 
 STATUS_URL = "https://status.anthropic.com/api/v2/summary.json"   # -> status.claude.com (Statuspage)
@@ -1288,7 +1386,8 @@ def build_snapshot(r: FetchResult, hist: dict, cfg: dict) -> dict:
                 "rate_per_hour": None, "eta_seconds": None}
         if key in ("five_hour", "seven_day"):
             rate, eta = project(hist["t"], hist[key], w["pct"], reset_ms, now_s)
-            item["rate_per_hour"] = round(rate, 2) if (rate is not None and rate > 0) else None
+            # None = not enough samples yet ("gathering rate…"); 0 = flat or falling ("steady").
+            item["rate_per_hour"] = None if rate is None else (round(rate, 2) if rate > 0 else 0)
             item["eta_seconds"] = None if eta is None else int(eta)
         snap["windows"].append(item)
 
@@ -1472,10 +1571,11 @@ def remote_encrypt(obj):
             "ct": base64.b64encode(enc.ciphertext).decode(), "ts": int(time.time())}
 
 
-def remote_pair_uri(cfg: dict):
-    """`cutpair1:<base64url(json{u,a,t,k})>` — the QR payload the phone scans."""
+def remote_pair_uri(cfg: dict, create: bool = True):
+    """`cutpair1:<base64url(json{u,a,t,k})>` — the QR payload the phone scans. create=False
+    (the GET /api/pair-qr path) never mints an identity as a side effect of a read."""
     import base64
-    ident = load_remote_identity(create=True)
+    ident = load_remote_identity(create=create)
     url = (cfg.get("remote_relay_url") or "").rstrip("/")
     if not ident or not url:
         return None
@@ -1484,9 +1584,9 @@ def remote_pair_uri(cfg: dict):
     return "cutpair1:" + raw
 
 
-def remote_pair_qr_png(cfg: dict):
+def remote_pair_qr_png(cfg: dict, create: bool = True):
     """PNG bytes of the pairing QR, or None."""
-    uri = remote_pair_uri(cfg)
+    uri = remote_pair_uri(cfg, create=create)
     if not uri:
         return None
     try:
@@ -1543,32 +1643,29 @@ def remote_push(cfg: dict, title: str, body: str, tag: str = "") -> None:
         _relay_call("POST", cfg, f"/v1/acct/{ident['account_id']}/push", blob)
 
 
-def remote_decrypt(blob: dict):
-    """Decrypt a {nonce, ct} blob the phone sent, with our shared e2ee key. Returns obj|None."""
-    import base64
-    from nacl.secret import SecretBox
-    ident = load_remote_identity(create=False)
-    if not ident or not isinstance(blob, dict):
-        return None
-    try:
-        box = SecretBox(base64.b64decode(ident["e2ee_key"]))
-        plain = box.decrypt(base64.b64decode(blob["ct"]), base64.b64decode(blob["nonce"]))
-        return json.loads(plain.decode("utf-8"))
-    except Exception:
-        return None
-
-
 # ---------------------------------------------------------------------------
-# Team mode (optional, opt-in) — see docs/TEAM.md
+# Team mode (optional, opt-in) — see docs/TEAM.md and docs/SUPABASE-MIGRATION.md
 #
-# An admin-owned relay aggregates a Claude Team plan's members. Members push a
-# compact PLAINTEXT row (usage numbers only — never sessions, paths, or content)
-# and, if `team_share_token` is on, escrow their short-lived OAuth access token
-# so the relay's nightly cron can capture the 23:59 ledger row (daily + the
-# month-end freeze) even while this machine is off. The refresh token NEVER
-# leaves this machine. Unlike phone sync, team rows are not E2EE: the relay is
-# the admin's own Worker and the numbers are exactly what the dashboard shows.
+# Signed-in teammates share a pool of Claude accounts in Supabase (RLS-scoped to
+# the email domain). Each tracker upserts a compact PLAINTEXT row for the Claude
+# account it's logged into (usage numbers only — never sessions, paths, content,
+# or any Claude token); month-end finals are captured server-side by pg_cron.
+# Unlike phone sync, team rows are not E2EE: they're exactly what the dashboard
+# shows, readable by the team.
 # ---------------------------------------------------------------------------
+
+def team_now(tz_name=None) -> datetime:
+    """Now on the team's wall clock (`team_tz`), so ledger dates/months agree across
+    machines in different zones. Falls back to the local clock for an invalid zone or when
+    the tz database is missing (Windows Python ships without `tzdata` unless installed)."""
+    if tz_name:
+        try:
+            from zoneinfo import ZoneInfo
+            return datetime.now(ZoneInfo(str(tz_name)))
+        except Exception:          # ZoneInfoNotFoundError (KeyError), ValueError, ImportError
+            pass
+    return _now_local()
+
 
 def _sha256_hex(s: str) -> str:
     import hashlib
@@ -1578,16 +1675,18 @@ def _sha256_hex(s: str) -> str:
 def device_month_tokens(cache, month: str) -> int:
     """This machine's Claude Code tokens for a calendar month, from the all-time
     cache's per-day buckets. Same headline metric as the All-time tab (in+out+cw;
-    cheap cache reads excluded). Day keys are local dates."""
+    cheap cache reads excluded). Day keys are local dates. Reads under ALLTIME_LOCK: the
+    team thread calls this while the poll thread may be folding new bytes into the cache."""
     if not isinstance(cache, dict):
         return 0
     total = 0
-    for ds, r in (cache.get("days") or {}).items():
-        if isinstance(ds, str) and ds.startswith(month + "-"):
-            try:
-                total += _at_tokens(r)
-            except Exception:
-                pass
+    with ALLTIME_LOCK:
+        for ds, r in list((cache.get("days") or {}).items()):
+            if isinstance(ds, str) and ds.startswith(month + "-"):
+                try:
+                    total += _at_tokens(r)
+                except Exception:
+                    pass
     return total
 
 
@@ -1692,36 +1791,53 @@ def member_month_tokens(led: dict, mid: str) -> int:
 
 def team_overview_merge(ov: dict, led, prev_led=None) -> dict:
     """Attach month spend/tokens per ACCOUNT and the KPI aggregates to a relay pool
-    overview. Pure — the dashboard JS only formats what this returns."""
+    overview. Pure — the dashboard JS only formats what this returns.
+
+    Spend is totalled per currency (`org_spend_by_currency`); `org_spend`/`org_currency` are
+    set only when every account bills in one currency — different currencies are never summed."""
     out = dict(ov)
     accounts = [dict(a0) for a0 in (ov.get("accounts") or [])]
     near = []
-    org_spend = 0.0
+    by_cur: dict = {}
     spend = team_ledger_computed(led, prev_led) if led else {}
     for a0 in accounts:
         a0["month_spend"] = spend.get(a0.get("acct"))
         a0["month_tokens"] = member_month_tokens(led, a0.get("acct")) if led else 0
-        if isinstance(a0["month_spend"], (int, float)):
-            org_spend += a0["month_spend"]
         row = a0.get("account") or {}
+        if isinstance(a0["month_spend"], (int, float)):
+            cur = (row.get("extra") or {}).get("currency") or ""
+            by_cur[cur] = by_cur.get(cur, 0.0) + a0["month_spend"]
         for key, label in (("fh_pct", "5h"), ("sd_pct", "weekly")):
             p = row.get(key)
             if isinstance(p, (int, float)) and p >= 80:
                 near.append({"name": a0.get("name"), "window": label, "pct": p})
     near.sort(key=lambda x: -x["pct"])
+    if "" in by_cur and (len(by_cur) > 1 or not by_cur[""]):
+        unknown = by_cur.pop("")              # zero spend with no currency (overage off) is noise
+        if unknown and len(by_cur) == 1:
+            k = next(iter(by_cur))
+            by_cur[k] += unknown              # unlabeled spend alongside a single currency: same bill
+        elif unknown:
+            by_cur[""] = unknown
+    by_cur = {k: round(v, 2) for k, v in by_cur.items()}
+    single = len(by_cur) <= 1
     out["accounts"] = accounts
-    out["kpis"] = {"org_spend": round(org_spend, 2), "account_count": len(accounts), "near": near}
+    out["kpis"] = {"org_spend": (round(sum(by_cur.values()), 2) if single else None),
+                   "org_currency": (next(iter(by_cur), "") if single else None),
+                   "org_spend_by_currency": by_cur,
+                   "account_count": len(accounts), "near": near}
     return out
 
 
 def supabase_team_overview():
     """Build the merged pool overview from Supabase (read_overview + this/prev-month ledger),
     reusing the existing merge fns. RLS scopes every read to the caller's team, so any signed-in
-    member sees their team's pool (no admin gate). Returns the merged dict or None."""
+    member sees their team's pool (no admin gate). Returns the merged dict or None (signed
+    out); raises supabase_pool.PoolError when Supabase can't be read."""
     if not supabase_pool.signed_in():
         return None
     tz = load_config().get("team_tz", "Europe/Athens")
-    today = _now_local()
+    today = team_now(tz)
     tstr = today.strftime("%Y-%m-%d")
     ystr = (today - timedelta(days=1)).strftime("%Y-%m-%d")
     ov = supabase_pool.read_overview(tz, tstr, ystr)
@@ -1731,10 +1847,11 @@ def supabase_team_overview():
     return team_overview_merge(ov, led, prev)
 
 
-def team_overview_compact(merged):
+def team_overview_compact(merged, role=None):
     """Strip a merged pool overview to the small projection the phone renders — org totals +
-    per-account name / window percents / month €. Keeps the E2EE snapshot small. Output keeps the
-    `members`/`member_count` keys for the phone's existing contract; each entry is a pooled account."""
+    per-account name / window percents / month spend. Keeps the E2EE snapshot small. Output keeps the
+    `members`/`member_count` keys for the phone's existing contract; each entry is a pooled account.
+    `role` ("admin"/"member") is the viewer's own role — every signed-in teammate gets this."""
     if not isinstance(merged, dict):
         return None
     k = merged.get("kpis") or {}
@@ -1749,7 +1866,9 @@ def team_overview_compact(merged):
             "month_tokens": a.get("month_tokens"),
             "currency": (row.get("extra") or {}).get("currency"),
         })
-    return {"org_spend": k.get("org_spend"), "member_count": k.get("account_count"),
+    return {"org_spend": k.get("org_spend"), "org_currency": k.get("org_currency"),
+            "org_spend_by_currency": k.get("org_spend_by_currency") or {},
+            "member_count": k.get("account_count"), "role": role,
             "near": k.get("near") or [], "tz": merged.get("tz"), "members": members}
 
 
@@ -1777,14 +1896,17 @@ def team_ledger_computed(led: dict, prev_led=None) -> dict:
 class TeamSync:
     """Opt-in account-pool push for the poll loop: a throttled ~10s upsert of the current
     Claude account's usage row to Supabase, as the signed-in user (RLS-scoped). Enabled ==
-    a valid Supabase session exists. Token escrow is gone (the Supabase model stores no
-    Claude tokens); month-end finals are captured by pg_cron. See docs/SUPABASE-MIGRATION.md."""
+    a valid Supabase session exists. The Supabase model stores no Claude tokens; month-end
+    finals are captured by pg_cron. Each tick also runs the soft device-lock self-check:
+    if this pool login was claimed by another machine, pushing pauses until the user
+    reclaims it here. See docs/SUPABASE-MIGRATION.md."""
 
     def __init__(self):
         self._last_report = 0.0
         self._acct_email = None         # currently-pooled Claude account; a change = login switch
         self._acct_org = None           # its org uuid (cached; re-fetched only on switch)
         self.last_ok: bool | None = None
+        self.device_ok: bool | None = None   # False = this pool login is active on another device
 
     @staticmethod
     def enabled(cfg: dict) -> bool:
@@ -1799,9 +1921,19 @@ class TeamSync:
     def reset_throttle(self) -> None:
         self._last_report = 0.0
 
+    def session_changed(self) -> None:
+        """Sign-in / sign-out / device claim: re-check the device-lock and push right away."""
+        self.device_ok = None
+        self.reset_throttle()
+
     def sync(self, snap: dict, cfg: dict, alltime_cache=None) -> None:
         try:
             if not supabase_pool.signed_in():
+                return
+            # Soft device-lock (never the isolation boundary — RLS is): don't push for a
+            # login another machine has claimed; the Team tab offers "use it here".
+            self.device_ok = supabase_pool.device_matches()
+            if not self.device_ok:
                 return
             acct = read_account() or {}
             email = (acct.get("email") or "").strip().lower()
@@ -1816,13 +1948,12 @@ class TeamSync:
                 host = socket.gethostname()[:32] or "device"
             except Exception:
                 host = "device"
-            month = _now_local().strftime("%Y-%m")
+            tnow = team_now(cfg.get("team_tz"))       # ledger dates are on the team's clock
             dev = {"did": supabase_pool.device_id(), "device": host,
-                   "tok_month": device_month_tokens(alltime_cache, month)}
+                   "tok_month": device_month_tokens(alltime_cache, tnow.strftime("%Y-%m"))}
             account = {"acct": email, "name": acct.get("name"), "org": self._acct_org}
             row = build_team_report(snap, dev, account)
-            self.last_ok = supabase_pool.push(row, dev, account,
-                                              _now_local().strftime("%Y-%m-%d"))
+            self.last_ok = supabase_pool.push(row, dev, account, tnow.strftime("%Y-%m-%d"))
         except Exception:
             self.last_ok = False
             log("team: sync error:\n" + traceback.format_exc())
@@ -2020,9 +2151,12 @@ DASHBOARD_HTML = r"""<!doctype html>
     --bg:#100e0c; --panel:#1a1613; --panel2:#221e1a;
     --card:#1e1a16; --card2:#26211c;
     --line:#332e28; --line2:#2a2621;
-    --ink:#f2ede5; --dim:#a99f93; --faint:#786f65;
+    --ink:#f2ede5; --dim:#a99f93; --faint:#948a7f;   /* faint >= 4.5:1 on every panel */
     --accent:#d97757; --accent2:#7f93b0;
-    --ok:#5e9e72; --warn:#cda24e; --high:#d4694f; --hot:#d4694f;
+    /* usage bands (mirror USAGE_BANDS): amber 60 -> orange 80 -> red-orange 90 -> red 100 */
+    --ok:#5e9e72; --warn:#cda24e; --high:#e2893f; --hot:#dd5f42; --max:#c8372d;
+    --empty:#3a352f;                                   /* a bar/meter with no data */
+    --hm0:#2a2420; --hm1:#5a3526; --hm2:#8a4a33; --hm3:#b56043; --hm4:#d97757;   /* heatmap levels */
     --mono:ui-monospace,"Cascadia Mono","Cascadia Code","SF Mono","JetBrains Mono",Consolas,"Liberation Mono",monospace;
     --sans:ui-sans-serif,"Segoe UI",system-ui,-apple-system,sans-serif;
   }
@@ -2045,6 +2179,8 @@ DASHBOARD_HTML = r"""<!doctype html>
   .live .dot{width:7px;height:7px;border-radius:50%;background:var(--ok)}
 
   .tabpane[hidden]{display:none}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .sdot2{width:7px;height:7px;border-radius:50%;flex:none;display:inline-block}
 
   /* nav bar (redesign) — 4 destinations, replaces .tabs */
   .navbar{display:inline-flex;gap:3px;margin-bottom:20px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:5px}
@@ -2102,18 +2238,19 @@ DASHBOARD_HTML = r"""<!doctype html>
   .tmkpis{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
   .tmkpi{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:12px 14px}
   .tmkpi b{display:block;font:600 22px/1.2 var(--mono);color:var(--ink);margin-top:4px;font-variant-numeric:tabular-nums}
-  .tmkpi.warn b{color:#d4694f}
+  .tmkpi.warn b{color:var(--hot)}
   .tmrow{padding:11px 0;border-top:1px solid var(--line)}
   .tmrow:first-child{border-top:0;padding-top:2px}
-  .tmtop{display:flex;align-items:center;gap:14px}
-  .tmname{width:150px;min-width:0}
+  .tmtop{display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap}
+  .tmname{flex:1 1 140px;min-width:0}
   .tmname b{font:600 13px/1.3 var(--sans);display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .tmwin{flex:1;min-width:110px}
+  .tmwin{flex:1 1 110px;min-width:100px}
   .tmwin .wcap{display:flex;justify-content:space-between;font:10px/1.4 var(--mono);color:var(--dim)}
   .tmwin .bar{height:7px;margin-top:3px}
-  .tmspend{width:150px;text-align:right;font-variant-numeric:tabular-nums}
+  .tmspend{flex:0 1 auto;min-width:90px;margin-left:auto;text-align:right;font-variant-numeric:tabular-nums}
   .tmspend b{font:600 15px/1.3 var(--mono);color:var(--ink)}
-  .tmdevs{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 0 164px}
+  .tmdevs{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 0}
+  .tmtablewrap{overflow-x:auto}
   .tmdev{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:3px 8px;font:10px/1.5 var(--mono);color:var(--dim)}
   .tmdev b{color:var(--ink);font-weight:600}
   .tmtable{width:100%;border-collapse:collapse;font:12px/1.5 var(--mono)}
@@ -2155,6 +2292,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   .err{padding:13px 15px;border:1px solid rgba(212,105,79,.4);background:rgba(212,105,79,.08);
     border-radius:9px;color:#e9b3a6;margin-bottom:16px;font-size:13px;display:none}
   .err.show{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+  .err[hidden]{display:none}
   .err .signin{background:var(--accent);color:#1c0f08;border:0;font:600 12px/1 var(--sans);
     padding:7px 13px;border-radius:6px;cursor:pointer;margin-left:auto}
   .err .signin:hover{filter:brightness(1.08)} .err .signin:disabled{opacity:.6;cursor:default}
@@ -2179,9 +2317,17 @@ DASHBOARD_HTML = r"""<!doctype html>
   .mrow .mname{width:108px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .mrow .mio{flex:1;text-align:right;color:var(--dim);font:12px/1 var(--mono)}
   .mrow .mshare{width:54px;text-align:right;font:600 12px/1 var(--mono)}
-  .heatmap{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,1fr);gap:3px;overflow-x:auto;padding-bottom:3px}
-  .hm{width:12px;height:12px;border-radius:2px;background:#2a2a31;box-shadow:inset 0 0 0 1px rgba(255,255,255,.035)}
-  .hm.l1{background:#5a3526}.hm.l2{background:#8a4a33}.hm.l3{background:#b56043}.hm.l4{background:#d97757}
+  .hmwrap{display:flex;gap:6px;align-items:flex-start}
+  .hmwk{display:grid;grid-template-rows:repeat(7,12px);gap:3px;margin-top:17px;font:9px/12px var(--mono);color:var(--faint)}
+  .hmscroll{overflow-x:auto;padding-bottom:3px;min-width:0}
+  .hmmon{display:grid;grid-auto-flow:column;grid-auto-columns:12px;gap:3px;height:14px;margin-bottom:3px;
+    font:9px/14px var(--mono);color:var(--faint);white-space:nowrap}
+  .hmmon span{overflow:visible}
+  .heatmap{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,12px);grid-auto-columns:12px;gap:3px}
+  .hm{width:12px;height:12px;border-radius:2px;background:var(--hm0);box-shadow:inset 0 0 0 1px rgba(255,255,255,.035)}
+  .hm.l1{background:var(--hm1)}.hm.l2{background:var(--hm2)}.hm.l3{background:var(--hm3)}.hm.l4{background:var(--hm4)}
+  .hmleg{display:inline-flex;align-items:center;gap:3px;font:11px/1 var(--mono);color:var(--dim);text-transform:none;letter-spacing:0}
+  .hmleg .hm{width:10px;height:10px}
   /* header controls: refresh + update */
   .ic{background:var(--panel);border:1px solid var(--line);color:var(--dim);width:30px;height:30px;
     border-radius:7px;cursor:pointer;font-size:14px;line-height:1;display:grid;place-items:center}
@@ -2191,6 +2337,10 @@ DASHBOARD_HTML = r"""<!doctype html>
   .updcta{font:600 11px/1 var(--sans);text-transform:uppercase;letter-spacing:.3px;padding:7px 11px;
     border-radius:6px;background:var(--accent);color:#1c0f08;text-decoration:none;white-space:nowrap}
   .linkbtn{background:none;border:0;color:var(--accent);font:inherit;cursor:pointer;padding:0}
+  .updbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:12px 14px;margin-bottom:16px;
+    border:1px solid var(--line);background:var(--panel);border-radius:9px;font-size:13px}
+  .updbar[hidden]{display:none}
+  .updbar .acts{margin-left:auto;display:flex;gap:8px}
   .linkbtn:hover{text-decoration:underline}
   footer a{color:var(--accent)}
   /* settings tab */
@@ -2230,16 +2380,20 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="live"><span class="dot" id="livedot"></span><span id="livetxt">live</span></div>
     <a class="statuspill" id="statuspill" target="_blank" rel="noopener" hidden title="Anthropic status"></a>
     <button class="updcta" id="updcta" hidden></button>
-    <button class="ic" id="btn-refresh" title="Re-check usage now">↻</button>
+    <button class="ic" id="btn-refresh" title="Re-check usage now" aria-label="Refresh usage now">↻</button>
   </header>
 
-  <div class="err" id="err"></div>
+  <div class="err" id="err" role="alert"></div>
+  <div class="updbar" id="updconfirm" hidden role="alertdialog" aria-labelledby="updconfirm-txt">
+    <span id="updconfirm-txt">Install the update now? The tracker will close and restart.</span>
+    <span class="acts"><button class="sbtn on" id="updgo">Update &amp; restart</button><button class="sbtn" id="updno">Not now</button></span>
+  </div>
 
-  <div class="navbar">
-    <button class="on" data-t="home"><span class="gl">⌂</span> Home</button>
-    <button data-t="team" id="nav-team"><span class="gl">👥</span> Team</button>
-    <button data-t="history"><span class="gl">▤</span> History</button>
-    <button data-t="settings"><span class="gl">⚙</span> Settings</button>
+  <div class="navbar" role="tablist" aria-label="Sections">
+    <button class="on" data-t="home" role="tab" aria-selected="true" aria-controls="tab-home"><span class="gl" aria-hidden="true">⌂</span> Home</button>
+    <button data-t="team" id="nav-team" role="tab" aria-selected="false" aria-controls="tab-team"><span class="gl" aria-hidden="true">👥</span> Team</button>
+    <button data-t="history" role="tab" aria-selected="false" aria-controls="tab-history"><span class="gl" aria-hidden="true">▤</span> History</button>
+    <button data-t="settings" role="tab" aria-selected="false" aria-controls="tab-settings"><span class="gl" aria-hidden="true">⚙</span> Settings</button>
   </div>
 
   <div id="tab-home" class="tabpane">
@@ -2266,7 +2420,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="card" id="sesscard">
       <div class="clab" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
         <span>Sessions · last 5h <span class="legend" id="sesssub" style="text-transform:none;letter-spacing:0"></span></span>
-        <span class="stabs"><button class="stab on" data-m="context">Ctx</button><button class="stab" data-m="tokens">Tok</button></span></div>
+        <span class="stabs" role="group" aria-label="Session metric"><button class="stab on" data-m="context" aria-pressed="true" title="Context window fill">Ctx</button><button class="stab" data-m="tokens" aria-pressed="false" title="Tokens used">Tok</button></span></div>
       <div id="sessions"></div>
     </div>
     <div class="card" id="home-team-card">
@@ -2274,8 +2428,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div id="home-team"><div class="hsub">—</div></div>
     </div>
     <div class="card span2">
-      <div class="clab" style="display:flex;justify-content:space-between">Usage · last 30 days
-        <span class="legend"><span><i style="background:#d97757"></i>5h</span><span><i style="background:#7f93b0"></i>weekly</span></span></div>
+      <div class="clab" style="display:flex;justify-content:space-between"><span id="spark-lab">Usage · recent</span>
+        <span class="legend"><span><i style="background:var(--accent)"></i>5h</span><span><i style="background:var(--accent2)"></i>weekly</span></span></div>
       <svg class="spark" id="spark" preserveAspectRatio="none"></svg>
     </div>
     <div class="card span2">
@@ -2287,22 +2441,25 @@ DASHBOARD_HTML = r"""<!doctype html>
 
   <div id="tab-history" class="tabpane" hidden>
     <div class="atbar">
-      <div class="stabs" id="at-view">
-        <button class="stab on" data-v="overview">Overview</button>
-        <button class="stab" data-v="models">Models</button>
+      <div class="stabs" id="at-view" role="group" aria-label="View">
+        <button class="stab on" data-v="overview" aria-pressed="true">Overview</button>
+        <button class="stab" data-v="models" aria-pressed="false">Models</button>
       </div>
-      <div class="stabs" id="at-period">
-        <button class="stab" data-p="7">7d</button>
-        <button class="stab" data-p="30">30d</button>
-        <button class="stab on" data-p="all">All</button>
+      <div class="stabs" id="at-period" role="group" aria-label="Period">
+        <button class="stab" data-p="7" aria-pressed="false">7d</button>
+        <button class="stab" data-p="30" aria-pressed="false">30d</button>
+        <button class="stab on" data-p="all" aria-pressed="true">All</button>
       </div>
     </div>
 
     <div id="at-overview">
       <div class="statgrid" id="at-stats"><div class="sempty">calculating from your session history…</div></div>
       <div class="card panel">
-        <div class="ptitle"><span>Activity</span><span class="legend">level <i style="background:#5a3526"></i><i style="background:#8a4a33"></i><i style="background:#b56043"></i><i style="background:#d97757"></i></span></div>
-        <div id="at-heatmap" class="heatmap"></div>
+        <div class="ptitle"><span>Activity</span><span class="hmleg" aria-label="Shading: less to more tokens">Less <i class="hm"></i><i class="hm l1"></i><i class="hm l2"></i><i class="hm l3"></i><i class="hm l4"></i> More</span></div>
+        <div class="hmwrap">
+          <div class="hmwk" aria-hidden="true"><span></span><span>Mon</span><span></span><span>Wed</span><span></span><span>Fri</span><span></span></div>
+          <div class="hmscroll"><div class="hmmon" id="at-hmmon" aria-hidden="true"></div><div id="at-heatmap" class="heatmap"></div></div>
+        </div>
         <div class="csub" id="at-compare" style="margin-top:13px"></div>
       </div>
       <div class="card panel">
@@ -2329,7 +2486,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="csub" style="margin-bottom:14px">Sign in with your work email to join your team's shared account pool — see every pooled
         Claude account's 5-hour / weekly load and monthly extra-usage spend in one place. Only <b>usage numbers</b> are shared,
         never sessions, projects, or conversation content. Your team is your email <b>domain</b>.</div>
-      <label class="chk" style="display:block;margin-bottom:12px"><input type="checkbox" id="tm-consent"> I understand my Claude account email, extra-usage € and token counts are stored in a central EU database (not end-to-end encrypted) and are visible to teammates on my email domain.</label>
+      <label class="chk" style="display:block;margin-bottom:12px"><input type="checkbox" id="tm-consent"> I understand my Claude account email, extra-usage spend and token counts are stored in a central EU database (not end-to-end encrypted) and are visible to teammates on my email domain.</label>
       <div class="setrow"><span class="setlbl">Email</span>
         <input type="email" id="tm-email" class="tminput" placeholder="you@yourcompany.com" spellcheck="false" autocomplete="email">
         <button class="sbtn" id="tm-sendcode">Send code</button></div>
@@ -2346,6 +2503,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     <div class="card panel" id="tm-me" hidden>
       <div class="ptitle"><span>Signed in</span><span class="legend" id="tm-mstate"></span></div>
       <div class="csub" id="tm-minfo"></div>
+      <div class="err show" id="tm-devlock" hidden style="margin:12px 0 0">This pool login is now in use on another device, so this computer has
+        stopped sharing usage. <button class="signin" id="tm-claim">Use it on this device</button></div>
       <div class="setacts" style="margin-top:12px"><button class="sbtn" id="tm-logout">Sign out</button></div>
     </div>
 
@@ -2366,13 +2525,14 @@ DASHBOARD_HTML = r"""<!doctype html>
         <div id="tm-members"><div class="csub">loading…</div></div>
       </div>
       <div class="card panel">
-        <div class="ptitle"><span>Monthly ledger · extra usage €</span>
-          <span class="stabs"><button class="stab" id="tm-prevm" title="previous month">‹</button><span class="stab on" id="tm-month"></span><button class="stab" id="tm-nextm" title="next month">›</button></span></div>
-        <div id="tm-ledger"><div class="csub">loading…</div></div>
+        <div class="ptitle"><span>Monthly ledger · extra usage</span>
+          <span class="stabs"><button class="stab" id="tm-prevm" title="previous month" aria-label="Previous month">‹</button><span class="stab on" id="tm-month" aria-live="polite"></span><button class="stab" id="tm-nextm" title="next month" aria-label="Next month">›</button></span></div>
+        <div id="tm-ledger" class="tmtablewrap"><div class="csub">loading…</div></div>
         <div class="setacts" style="margin-top:12px"><button class="sbtn" id="tm-csv">Export CSV</button></div>
-        <div class="csub" style="margin-top:10px">Month spend = day-over-day increases of each member's credit meter (robust to the
-          mid-month billing-cycle reset; the first tracked month starts counting at its first sample). <b>frozen</b> = the 23:59
-          month-end row is in. Rows marked <b>push</b> came from the member's last report of the day instead of the cron.</div>
+        <div class="csub" style="margin-top:10px">Month spend adds up each day's increase in an account's extra-usage meter, so
+          the mid-month billing reset doesn't break the total (an account's first tracked month starts from its first reading).
+          <b>closed</b> = the end-of-month total has been saved. <b>live</b> = the latest reading from a teammate's tracker.
+          <b>days</b> = days with a reading.</div>
       </div>
     </div>
   </div>
@@ -2439,8 +2599,9 @@ DASHBOARD_HTML = r"""<!doctype html>
 
   <footer>
     <button class="linkbtn" id="btn-checkupd">Check for updates</button>
-    <span id="updres"></span><br>
-    Live usage from Claude Code's statusline data · read-only · no endpoint polling
+    <span id="updres" aria-live="polite"></span><br>
+    Usage from Claude Code's statusline (occasional Anthropic API fallback) · read-only ·
+    also contacts the Anthropic status page and GitHub/PyPI for updates; the phone relay and team pool only if you turn them on
   </footer>
 </div>
 
@@ -2449,7 +2610,11 @@ const $=id=>document.getElementById(id);
 let WIN={};   // key -> {resets_at, color}
 let HEROKEY=null, SECKEY=null, HOME_TEAM_TS=0;   // Home hero windows + team-mini fetch throttle
 let LASTH=null;   // last history payload, for resize reflow
-function esc(s){ return (s||"").replace(/[&<>]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+function esc(s){ return (s||"").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+// Resolved value of a CSS colour token — for SVG attributes, which don't take var().
+function tok(name){ try{ return getComputedStyle(document.documentElement).getPropertyValue(name).trim()||"#888"; }catch(e){ return "#888"; } }
+// Usage band -> colour token (thresholds mirror USAGE_BANDS in Python).
+function bandColor(p){ return p==null?"var(--empty)":p>=100?"var(--max)":p>=90?"var(--hot)":p>=80?"var(--high)":p>=60?"var(--warn)":"var(--ok)"; }
 async function doSignin(email, terminal){
   const b=$("signin"), st=$("signin-status");
   if(typeof email!=="string"){ const inp=$("signin-email"); email=inp?inp.value.trim():""; }
@@ -2467,7 +2632,14 @@ async function doRefresh(){
   try{ await fetch("/api/refresh",{method:"POST"}); }catch(e){}
   setTimeout(refresh,500);   // give the poll loop a beat, then pull the fresh snapshot
 }
+// Updating closes + restarts the app, so ask first (in-page; native confirm() is unreliable in pywebview).
+function askUpdate(){
+  const v=(LASTD.update||{}).available, box=$("updconfirm");
+  $("updconfirm-txt").textContent=(v?"Install v"+v+" now?":"Install the update now?")+" The tracker will close and restart.";
+  box.hidden=false; $("updgo").focus();
+}
 async function doUpdate(){
+  $("updconfirm").hidden=true;
   const c=$("updcta"); if(c){ c.disabled=true; c.textContent="Updating…"; }
   const r=$("updres"); if(r)r.textContent="updating — the app will restart…";
   try{ await fetch("/api/update",{method:"POST"}); }catch(e){}
@@ -2476,10 +2648,10 @@ async function doCheckUpdate(){
   const r=$("updres"); if(r)r.textContent="checking…";
   try{
     const d=await (await fetch("/api/check-update",{method:"POST"})).json();
-    if(d.update){ r.innerHTML="v"+d.latest+" available — <button class='linkbtn' onclick='doUpdate()'>update now</button>"; }
+    if(d.update){ r.innerHTML="v"+esc(d.latest)+" available — <button class='linkbtn' onclick='askUpdate()'>update now</button>"; }
     else if(d.latest){ r.textContent="up to date (v"+d.current+")"; }
-    else{ r.textContent="couldn't reach GitHub"; }
-  }catch(e){ if(r)r.textContent="couldn't reach GitHub"; }
+    else{ r.textContent="couldn't check for updates (offline?)"; }
+  }catch(e){ if(r)r.textContent="couldn't check for updates"; }
 }
 function fdur(s){
   if(s==null)return"—";
@@ -2499,18 +2671,12 @@ function fabs(ms){
 }
 function tickCountdowns(){
   const now=Date.now();
-  for(const k in WIN){
-    const w=WIN[k]; const el=$("cd-"+k); if(!el)continue;
-    if(!w.resets_at){el.textContent="—";continue;}
-    el.textContent="resets in "+fdur((w.resets_at-now)/1000);
-  }
-  // Home hero + secondary countdowns (redesign)
+  // Home hero + secondary countdowns
   [["hero-cd",HEROKEY],["hero2-cd",SECKEY]].forEach(([id,k])=>{
     const el=$(id); if(!el||!k||!WIN[k])return;
     el.textContent=WIN[k].resets_at?("resets in "+fdur((WIN[k].resets_at-now)/1000)):"—";
   });
 }
-function bcol(p){ return p==null?"var(--faint)":(p>=80?"var(--hot)":(p>=60?"var(--warn)":"var(--ok)")); }
 function burnText(w){
   if(!w)return"";
   if(w.eta_seconds!=null&&w.eta_seconds>=0&&w.rate_per_hour>0)
@@ -2548,7 +2714,7 @@ function renderHome(d){
   const c=d.context||{}, cp=(c.used_percentage!=null?c.used_percentage:null);
   $("home-ctx").innerHTML = cp==null
     ? "<div class='hsub'>no active session</div>"
-    : "<div class='cval' style='color:"+bcol(cp)+"'>"+Math.round(cp)+"%</div><div class='bar'><i style='width:"+Math.min(100,cp)+"%;background:"+bcol(cp)+"'></i></div>"+
+    : "<div class='cval' style='color:"+bandColor(cp)+"'>"+Math.round(cp)+"%</div><div class='bar'><i style='width:"+Math.min(100,cp)+"%;background:"+bandColor(cp)+"'></i></div>"+
       (c.total_input_tokens?"<div class='hsub'>"+fmtTok(c.total_input_tokens)+" tokens</div>":"");
   // Status
   const sv=statusView(d), st=$("home-status");
@@ -2558,22 +2724,28 @@ function renderHome(d){
   // Team mini
   fillHomeTeam();
   const t=(d.team)||{};
-  if(t.in_team&&t.role==="admin"&&Date.now()-HOME_TEAM_TS>60000){ HOME_TEAM_TS=Date.now(); loadTeamOverview(); }
+  if(t.in_team&&Date.now()-HOME_TEAM_TS>60000){ HOME_TEAM_TS=Date.now(); loadTeamOverview(); }
 }
 function fillHomeTeam(){
   const box=$("home-team"); if(!box)return;
   const t=(LASTD&&LASTD.team)||{};
   if(!t.in_team){ box.innerHTML="<div class='hsub'>Not in a team — set one up in the Team tab.</div>"; return; }
-  if(t.role!=="admin"){ box.innerHTML="<div class='cval'>Member</div><div class='hsub'>of "+esc(t.name||"your team")+"</div>"; return; }
-  const k=(TMOV&&TMOV.kpis)||null;
-  if(!k){ box.innerHTML="<div class='hsub'>Open the Team tab for spend &amp; limits.</div>"; return; }
+  const who=(t.role==="admin"?"Admin":"Member")+" of "+esc(t.team||"your team");
+  const k=(TMOV&&!TMOV.error&&TMOV.kpis)||null;
+  if(!k){ box.innerHTML="<div class='cval'>"+(t.role==="admin"?"Admin":"Member")+"</div><div class='hsub'>of "+esc(t.team||"your team")+
+    (TMOV&&TMOV.error==="unreachable"?" · team data unavailable":" · open the Team tab for spend &amp; limits")+"</div>"; return; }
   const near=k.near||[];
-  box.innerHTML="<div class='cval'>"+tmMoney(k.org_spend,tmCur(TMOV))+"</div>"+
+  box.innerHTML="<div class='cval'>"+tmOrgSpend(k)+"</div>"+
     "<div class='hsub'>"+(k.account_count||0)+" accounts"+
-    (near.length?" · <span style='color:var(--hot)'>"+near.length+" near limit</span>":" · all clear")+"</div>";
+    (near.length?" · <span style='color:var(--hot)'>"+near.length+" near limit</span>":" · all clear")+"</div>"+
+    "<div class='hsub'>"+who+"</div>";
 }
+// "spanned a duration" label for the sparkline, from the samples it actually plots.
+function fspan(s){ if(s<5400)return Math.max(1,Math.round(s/60))+" min"; if(s<172800)return Math.round(s/3600)+" h"; return Math.round(s/86400)+" days"; }
 function renderSpark(h){
   const svg=$("spark"); svg.innerHTML="";
+  const lab=$("spark-lab");
+  if(lab) lab.textContent=(h&&h.t&&h.t.length>1)?("Usage · last "+fspan(h.t[h.t.length-1]-h.t[0])):"Usage · recent";
   const ns="http://www.w3.org/2000/svg";
   const W=svg.clientWidth||520,H=118,top=10,base=H-16;
   svg.setAttribute("viewBox","0 0 "+W+" "+H);
@@ -2582,7 +2754,7 @@ function renderSpark(h){
     l.setAttribute("x1",x1);l.setAttribute("y1",y1);l.setAttribute("x2",x2);l.setAttribute("y2",y2);
     l.setAttribute("stroke",stroke);svg.appendChild(l);}
   function text(x,y,t,anchor){const e=document.createElementNS(ns,"text");
-    e.setAttribute("x",x);e.setAttribute("y",y);e.setAttribute("fill","#6c6b66");e.setAttribute("font-family","ui-monospace,Consolas,monospace");e.setAttribute("font-size","9");
+    e.setAttribute("x",x);e.setAttribute("y",y);e.setAttribute("fill",tok("--faint"));e.setAttribute("font-family","ui-monospace,Consolas,monospace");e.setAttribute("font-size","9");
     if(anchor)e.setAttribute("text-anchor",anchor);e.textContent=t;svg.appendChild(e);}
   [0,50,100].forEach(p=>{line(26,yv(p),W,yv(p),"rgba(255,255,255,.05)");text(22,yv(p)+3,p,"end");});
   if(!h||!h.t||h.t.length<2){
@@ -2590,7 +2762,7 @@ function renderSpark(h){
   }
   const t0=h.t[0],t1=h.t[h.t.length-1],span=Math.max(1,t1-t0);
   const x=t=>30+((t-t0)/span)*(W-34);
-  [["#d97757",h.five_hour],["#7f93b0",h.seven_day]].forEach(c=>{
+  [[tok("--accent"),h.five_hour],[tok("--accent2"),h.seven_day]].forEach(c=>{
     const arr=c[1]; let d="", prev=null;
     for(let i=0;i<h.t.length;i++){
       // start a new segment across a window reset (a sharp drop) so we never draw a vertical cliff
@@ -2607,7 +2779,7 @@ function renderExtra(e){
   if(!e||!e.enabled){box.innerHTML="<div class='csub'>No overage credits enabled.</div>";return;}
   const cur=e.currency||"";
   const head=(e.used!=null&&e.limit!=null)?(cur+" "+e.used.toFixed(2)+" <span style='color:var(--dim);font-size:13px;font-weight:400'>of "+cur+" "+e.limit.toFixed(2)+"</span>"):(e.pct.toFixed(1)+"% used");
-  const col=e.pct>=80?"#d4694f":"#5e9e72";
+  const col=bandColor(e.pct);
   box.innerHTML="<div class='credits'><div class='cval'>"+head+"</div>"+
     "<div class='bar'><i style='width:"+Math.min(100,e.pct)+"%;background:"+col+"'></i></div>"+
     "<div class='csub' style='margin-top:8px'>"+e.pct.toFixed(0)+"% of monthly overage cap</div></div>";
@@ -2624,19 +2796,18 @@ function renderScoped(wins){
   });
 }
 function fmtTok(n){ n=n||0; if(n>=1e6)return (n/1e6).toFixed(n>=1e7?0:1)+"M"; if(n>=1e3)return Math.round(n/1e3)+"k"; return ""+n; }
-function bandColor(p){ if(p>=80)return"#d4694f"; if(p>=60)return"#cda24e"; return"#5e9e72"; }
 let SESS=[], SMODE="context";
 function renderSessions(list){
   if(list) SESS=list;
   const box=$("sessions"), sub=$("sesssub");
   if(!SESS.length){ box.innerHTML="<div class='sempty'>no Claude sessions in the last 5h</div>"; sub.textContent=""; return; }
   const act=SESS.filter(s=>s.active).length;
-  sub.innerHTML = act ? ("<span style='color:#5e9e72'>"+act+" active</span>") : "";
+  sub.innerHTML = act ? ("<span style='color:var(--ok)'>"+act+" active</span>") : "";
   const maxTok=Math.max.apply(null, SESS.map(s=>s.tokens).concat([1]));
   box.innerHTML=SESS.map(s=>{
     const nm=(s.name||"?").replace(/[<>&]/g,""); let w, val, col;
     if(SMODE==="context"){ const p=s.context_pct||0; w=Math.max(3,Math.min(100,p)); val=Math.round(p)+"%"; col=bandColor(p); }
-    else { w=Math.max(3, s.tokens/maxTok*100); val=fmtTok(s.tokens); col="#7f93b0"; }
+    else { w=Math.max(3, s.tokens/maxTok*100); val=fmtTok(s.tokens); col="var(--accent2)"; }
     return "<div class='srow'><span class='sdot "+(s.active?"on":"")+"'></span>"+
       "<span class='sname' title='"+nm+"'>"+nm+"</span>"+
       "<div class='sbar'><i style='width:"+w+"%;background:"+col+"'></i></div>"+
@@ -2660,13 +2831,25 @@ function modelRow(x){
     "<span class='mio'>"+fmtTokFull(x.in)+" in · "+fmtTokFull(x.out)+" out</span>"+
     "<span class='mshare'>"+(x.share!=null?x.share.toFixed(1):"0")+"%</span></div>";
 }
+const MONTHS=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 function renderHeatmap(hm){
-  const box=$("at-heatmap"); if(!box)return; box.innerHTML="";
+  const box=$("at-heatmap"), mon=$("at-hmmon"); if(!box)return; box.innerHTML=""; if(mon)mon.innerHTML="";
   if(!hm||!hm.days)return;
   hm.days.forEach(c=>{ const el=document.createElement("div");
     el.className="hm"+(c.lvl?(" l"+c.lvl):"");
-    el.title=c.d+(c.tok?(" · "+fmtTokFull(c.tok)+" tokens"):"");
+    el.title=c.d+(c.tok?(" · "+fmtTokFull(c.tok)+" tokens"):" · no activity");
     box.appendChild(el); });
+  if(!mon)return;
+  // One label slot per week column (days start on a Sunday); name a month in the column
+  // holding its 1st, skipping a label that would collide with the previous one.
+  let html="", last=-9;
+  for(let i=0;i<hm.days.length;i+=7){
+    const col=i/7, wk=hm.days.slice(i,i+7), first=wk.find(c=>c.d.slice(8)==="01");
+    let lbl="";
+    if((first||col===0) && col-last>=3){ const m=+(first||wk[0]).d.slice(5,7); lbl=MONTHS[m-1]; last=col; }
+    html+="<span>"+lbl+"</span>";
+  }
+  mon.innerHTML=html;
 }
 function renderSeries(bins){
   const svg=$("at-series"); if(!svg)return; svg.innerHTML="";
@@ -2677,6 +2860,7 @@ function renderSeries(bins){
   const max=Math.max.apply(null,bins.map(b=>b.total).concat([1]));
   const n=bins.length, step=(W-8)/n, bw=Math.max(2,step-3);
   const bl=document.createElementNS(ns,"line");bl.setAttribute("x1",4);bl.setAttribute("y1",base);bl.setAttribute("x2",W-4);bl.setAttribute("y2",base);bl.setAttribute("stroke","rgba(255,255,255,.10)");svg.appendChild(bl);
+  const faint=tok("--faint");
   bins.forEach((b,i)=>{ let y=base; const x=4+i*step;
     (b.segs||[]).forEach(s=>{ const h=(s.tok/max)*(base-top); if(h<=0)return;
       const r=document.createElementNS(ns,"rect");
@@ -2686,7 +2870,7 @@ function renderSeries(bins){
       const t=document.createElementNS(ns,"title");t.textContent=b.label+" · "+s.name+" · "+fmtTokFull(s.tok);r.appendChild(t);
       svg.appendChild(r); y-=h; });
   });
-  const lbl=(x,txt,anc)=>{const e=document.createElementNS(ns,"text");e.setAttribute("x",x);e.setAttribute("y",H-5);e.setAttribute("fill","#6c6b66");e.setAttribute("font-family","ui-monospace,Consolas,monospace");e.setAttribute("font-size","9");if(anc)e.setAttribute("text-anchor",anc);e.textContent=txt;svg.appendChild(e);};
+  const lbl=(x,txt,anc)=>{const e=document.createElementNS(ns,"text");e.setAttribute("x",x);e.setAttribute("y",H-5);e.setAttribute("fill",faint);e.setAttribute("font-family","ui-monospace,Consolas,monospace");e.setAttribute("font-size","9");if(anc)e.setAttribute("text-anchor",anc);e.textContent=txt;svg.appendChild(e);};
   lbl(4,bins[0].label,"start"); if(n>1)lbl(W-4,bins[n-1].label,"end");
 }
 let LASTD={};
@@ -2694,6 +2878,7 @@ const BARFIELDS=[["dir","Directory"],["acct","Account"],["ctx","Context %"],["5h
 async function postCfg(patch){ try{ await fetch("/api/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)}); }catch(e){} }
 async function postOverlay(id){ try{ await fetch("/api/overlay",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id})}); }catch(e){} }
 async function postRemote(action){ try{ await fetch("/api/remote",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action})}); }catch(e){} }
+let PAIR_ASKED=0;
 function renderRemote(){
   const r=LASTD.remote||{}; const avail=r.available!==false;
   const un=$("rm-unavail"); if(un) un.hidden=avail;
@@ -2701,15 +2886,18 @@ function renderRemote(){
   if(document.activeElement!==$("rm-url")) $("rm-url").value=r.relay_url||"";
   const paired=!!(r.enabled && r.relay_url && avail);
   $("rm-pairwrap").hidden=!paired;
-  if(paired && $("rm-qr").dataset.url!==r.relay_url){ $("rm-qr").dataset.url=r.relay_url; $("rm-qr").src="/api/pair-qr?ts="+Date.now(); }
+  // GET /api/pair-qr never creates the identity; ask for one explicitly (once per 10s) if needed.
+  if(paired && !r.paired && Date.now()-PAIR_ASKED>10000){ PAIR_ASKED=Date.now(); postRemote("pair").then(()=>setTimeout(refresh,300)); }
+  if(paired && r.paired && $("rm-qr").dataset.url!==r.relay_url){ $("rm-qr").dataset.url=r.relay_url; $("rm-qr").src="/api/pair-qr?ts="+Date.now(); }
   const st=$("rm-state");
   if(st) st.textContent = !avail ? "unavailable" : (r.enabled ? (r.last_sync_ok===true?"synced":(r.last_sync_ok===false?"sync error":"on")) : "off");
 }
+let OVL_HOLD=0;   // after a click, keep the optimistic label until the tray republishes
+function setOverlayBtn(el,alive){ if(!el)return; el.textContent=alive?"Hide":"Show"; el.classList.toggle("on",!!alive); el.setAttribute("aria-pressed",alive?"true":"false"); }
 function syncOverlayLabels(){
+  if(Date.now()<OVL_HOLD)return;
   const a=LASTD.overlays_alive||{};
-  const b=$("set-toggle-bar"), w=$("set-toggle-widget");
-  if(b){ b.textContent=a.bar?"Hide":"Show"; b.classList.toggle("on",!!a.bar); }
-  if(w){ w.textContent=a.widget?"Hide":"Show"; w.classList.toggle("on",!!a.widget); }
+  setOverlayBtn($("set-toggle-bar"),a.bar); setOverlayBtn($("set-toggle-widget"),a.widget);
 }
 function renderSettings(){
   const ui=LASTD.ui||{};
@@ -2731,7 +2919,7 @@ function renderSettings(){
 }
 const COMP_RANK={operational:0,under_maintenance:1,degraded_performance:2,partial_outage:3,major_outage:4};
 const IND_SEV={none:0,minor:2,major:4,critical:4};
-function sevColor(sev){ return sev<=0?"#5e9e72":(sev>=4?"#c94f38":"#cda24e"); }
+function sevColor(sev){ return sev<=0?"var(--ok)":(sev>=4?"var(--max)":"var(--warn)"); }
 function sevWord(sev){ return sev<=0?"Ok":(sev>=4?"Down":"Errors"); }
 function prettyStatus(s){ return (s||"").replace(/_/g," ").replace(/^./,c=>c.toUpperCase()); }
 function statusView(d){          // -> {color, word: Ok|Errors|Down, text, url}
@@ -2778,7 +2966,7 @@ function renderAlltime(a){
   $("at-compare").textContent=p.compare?("You've burned ~"+p.compare.x.toLocaleString()+"× more tokens than "+p.compare.name+"."):"";
   renderHeatmap(AT.heatmap);
   const pj=AT.projects||[], pmax=Math.max.apply(null,pj.map(x=>x.tokens).concat([1]));
-  $("at-projects").innerHTML=pj.map(x=>atBar(x.name,x.tokens,pmax,"#7f93b0")).join("")||"<div class='sempty'>no data yet</div>";
+  $("at-projects").innerHTML=pj.map(x=>atBar(x.name,x.tokens,pmax,"var(--accent2)")).join("")||"<div class='sempty'>no data yet</div>";
   $("at-projmore").textContent=(AT.project_count>pj.length)?("top "+pj.length+" of "+AT.project_count):"all-time";
   $("at-models").innerHTML=(p.models||[]).map(modelRow).join("")||"<div class='sempty'>no data yet</div>";
   if(ATVIEW==="models" && !$("tab-history").hidden) renderSeries(p.series);
@@ -2808,20 +2996,22 @@ async function refresh(){
         $("signin").onclick=function(){ doSignin(undefined,false); };
         var _t=$("signin-term"); if(_t) _t.onclick=function(e){ e.preventDefault(); doSignin(undefined,true); };
       }else{
-        err.textContent="⚠ "+(d.error||"waiting for data")+" — retrying…";
+        err.innerHTML="<span>⚠ "+esc(d.error||"waiting for data")+" — retrying automatically.</span>"+
+          "<button class='signin' id='err-retry'>Retry now</button>";
+        $("err-retry").onclick=doRefresh;
       }
     }else{ err.className="err"; }
     const acc=d.account||{};
     $("tier").textContent = acc.org || d.subscription || "plan";
     $("tier").title = acc.email || "";
     const vp=$("vpill"), v=d.verdict;
-    if(v && v.text){ vp.style.display=""; vp.textContent=v.text; vp.style.color=v.color; vp.style.borderColor=v.color+"66"; vp.style.background=v.color+"1f"; }
+    if(v && v.text){ vp.style.display=""; vp.textContent=v.text; vp.style.color=v.color; vp.style.borderColor=v.color+"66"; vp.style.background=v.color+"1f"; }   // server hex + alpha
     else { vp.style.display="none"; }
     if(d.ok){
-      $("livedot").style.background="#5e9e72"; $("livetxt").textContent="live";
+      $("livedot").style.background="var(--ok)"; $("livetxt").textContent="live";
       $("updated").textContent="updated "+new Date(d.updated_at*1000).toLocaleTimeString();
     }else{
-      $("livedot").style.background="#cda24e"; $("livetxt").textContent=wins.length?"stale":"offline";
+      $("livedot").style.background="var(--warn)"; $("livetxt").textContent=wins.length?"stale":"offline";
       $("updated").textContent=wins.length?("paused · "+(d.error||"waiting for Claude Code activity")):(d.error||"—");
     }
     renderHome(d);
@@ -2836,33 +3026,38 @@ async function refresh(){
     if(sp){ if(sv){ sp.hidden=false; sp.href=sv.url||"#"; sp.title="Anthropic status — "+sv.text; sp.innerHTML="<i style='background:"+sv.color+"'></i>"+esc(sv.word); } else { sp.hidden=true; } }
     if(!$("tab-settings").hidden)renderStatusPage();
     renderRemote();
+    syncOverlayLabels();
     renderTeamState(d);
     tickCountdowns();
-  }catch(e){ $("err").className="err show"; $("err").textContent="⚠ cannot reach the tracker service."; }
+  }catch(e){ const err=$("err"); err.className="err show";
+    err.innerHTML="<span>⚠ cannot reach the tracker service — is the tray app running?</span><button class='signin' id='err-retry'>Retry</button>";
+    $("err-retry").onclick=refresh; }
 }
 $("btn-refresh").onclick=doRefresh;
 $("btn-checkupd").onclick=doCheckUpdate;
-$("updcta").onclick=doUpdate;
+$("updcta").onclick=askUpdate;
+$("updgo").onclick=doUpdate;
+$("updno").onclick=function(){ $("updconfirm").hidden=true; };
 setInterval(tickCountdowns,1000);
 setInterval(refresh,5000);
 refresh();
 let _rz; window.addEventListener("resize",()=>{clearTimeout(_rz);_rz=setTimeout(()=>{renderSpark(LASTH); if(!$("tab-history").hidden)renderAlltime();},120);});
+// Toggle group: mark `b` on (class + aria-pressed) and its siblings off.
+function pressOne(sel,b){ document.querySelectorAll(sel).forEach(x=>{ x.classList.toggle("on",x===b); x.setAttribute("aria-pressed",x===b?"true":"false"); }); }
 document.querySelectorAll("#sesscard .stab").forEach(b=>b.addEventListener("click",()=>{
-  document.querySelectorAll("#sesscard .stab").forEach(x=>x.classList.remove("on"));
-  b.classList.add("on"); SMODE=b.dataset.m; renderSessions();
+  pressOne("#sesscard .stab",b); SMODE=b.dataset.m; renderSessions();
 }));
 document.querySelectorAll("#at-view .stab").forEach(b=>b.addEventListener("click",()=>{
-  document.querySelectorAll("#at-view .stab").forEach(x=>x.classList.remove("on")); b.classList.add("on");
+  pressOne("#at-view .stab",b);
   ATVIEW=b.dataset.v; $("at-overview").hidden=(ATVIEW!=="overview"); $("at-models-view").hidden=(ATVIEW!=="models");
   renderAlltime();
 }));
 document.querySelectorAll("#at-period .stab").forEach(b=>b.addEventListener("click",()=>{
-  document.querySelectorAll("#at-period .stab").forEach(x=>x.classList.remove("on")); b.classList.add("on");
+  pressOne("#at-period .stab",b);
   ATPERIOD=b.dataset.p; renderAlltime();
 }));
 document.querySelectorAll(".navbar button").forEach(b=>b.addEventListener("click",()=>{
-  document.querySelectorAll(".navbar button").forEach(x=>x.classList.remove("on"));
-  b.classList.add("on");
+  document.querySelectorAll(".navbar button").forEach(x=>{ x.classList.toggle("on",x===b); x.setAttribute("aria-selected",x===b?"true":"false"); });
   const t=b.dataset.t;
   $("tab-home").hidden=(t!=="home"); $("tab-history").hidden=(t!=="history");
   $("tab-team").hidden=(t!=="team"); $("tab-settings").hidden=(t!=="settings");
@@ -2871,8 +3066,8 @@ document.querySelectorAll(".navbar button").forEach(b=>b.addEventListener("click
   if(t==="settings")renderSettings();
   if(t==="team")renderTeamPage();
 }));
-$("set-toggle-bar").onclick=function(){ const sh=this.textContent==="Hide"; this.textContent=sh?"Show":"Hide"; this.classList.toggle("on",!sh); postOverlay("bar"); };
-$("set-toggle-widget").onclick=function(){ const sh=this.textContent==="Hide"; this.textContent=sh?"Show":"Hide"; this.classList.toggle("on",!sh); postOverlay("widget"); };
+$("set-toggle-bar").onclick=function(){ setOverlayBtn(this,this.textContent!=="Hide"); OVL_HOLD=Date.now()+3000; postOverlay("bar").then(()=>setTimeout(refresh,400)); };
+$("set-toggle-widget").onclick=function(){ setOverlayBtn(this,this.textContent!=="Hide"); OVL_HOLD=Date.now()+3000; postOverlay("widget").then(()=>setTimeout(refresh,400)); };
 $("set-bar-start").onchange=function(){ postCfg({show_bar_on_start:this.checked}); };
 $("set-widget-start").onchange=function(){ postCfg({show_widget_on_start:this.checked}); };
 $("set-refresh").onclick=doRefresh; $("set-check").onclick=doCheckUpdate; $("set-login").onclick=function(){ doSignin("",false); };
@@ -2887,7 +3082,19 @@ $("rm-transcript").onchange=function(){ postCfg({remote_transcript:this.checked}
 /* ---- team tab ---- */
 let TMMONTH=null, TMLED=null, TMOV=null, WHOAMI=null;
 function tmMoney(v,cur){ return v==null?"—":((cur?cur+" ":"")+Number(v).toFixed(2)); }
-function tmMonthNow(){ const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0"); }
+// Org spend KPI: one total when the pool bills in one currency; otherwise per currency (never summed).
+function tmOrgSpend(k){
+  const by=(k&&k.org_spend_by_currency)||{}, keys=Object.keys(by);
+  if(keys.length>1) return keys.map(c=>tmMoney(by[c],c||"?")).join(" + ");
+  return k&&k.org_spend!=null?tmMoney(k.org_spend,k.org_currency||keys[0]||""):"—";
+}
+// The current month on the TEAM's clock (team_tz), matching the ledger's dates.
+function tmMonthNow(){
+  const tz=((LASTD||{}).team||{}).tz;
+  try{ if(tz){ const p=new Intl.DateTimeFormat("en-CA",{timeZone:tz,year:"numeric",month:"2-digit"}).formatToParts(new Date());
+    const y=p.find(x=>x.type==="year").value, m=p.find(x=>x.type==="month").value; return y+"-"+m; } }catch(e){}
+  const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0");
+}
 function tmShiftMonth(m,dir){ let y=+m.slice(0,4),mo=+m.slice(5,7)+dir; if(mo<1){mo=12;y--;} if(mo>12){mo=1;y++;} return y+"-"+String(mo).padStart(2,"0"); }
 function renderTeamState(){
   const w=WHOAMI||{};
@@ -2898,11 +3105,13 @@ function renderTeamState(){
   if(!w.signed_in)return;
   $("tm-mstate").textContent=w.is_admin?"admin":"member";
   $("tm-minfo").innerHTML="Signed in as <b>"+esc(w.email||"")+"</b> · team <b>"+esc(w.team||"")+"</b>";
+  $("tm-devlock").hidden=(((LASTD||{}).team||{}).device_ok!==false);
 }
+const TM_UNREACH="Can't reach the team database right now — this is a connection problem, not an empty pool. It retries automatically.";
 function tmTok(n){ if(n==null)return "—"; if(n>=1e9)return (n/1e9).toFixed(1)+"B"; if(n>=1e6)return (n/1e6).toFixed(1)+"M"; if(n>=1e3)return (n/1e3).toFixed(1)+"k"; return String(n); }
 function tmWin(label,p,reset){
   const pct=(p==null)?"—":Math.round(p)+"%";
-  const c=p==null?"#3a352f":(p>=80?"#d4694f":(p>=60?"#cda24e":"#5e9e72"));
+  const c=bandColor(p);
   const cap=label+" · "+pct+(reset?" · "+reset:"");
   return "<div class='tmwin'><div class='wcap'><span>"+cap+"</span></div>"+
          "<div class='bar'><i style='width:"+(p==null?0:Math.min(100,p))+"%;background:"+c+"'></i></div></div>";
@@ -2911,18 +3120,19 @@ function tmReset(iso){ if(!iso)return ""; const d=new Date(iso); if(isNaN(d))ret
   const now=new Date(); return d.toDateString()===now.toDateString()
     ? d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})
     : d.toLocaleDateString([],{weekday:"short"}); }
-function tmCur(d){ for(const mm of (d.accounts||[])){ const c=((mm.account||{}).extra||{}).currency; if(c)return c; } return ""; }
 async function loadTeamOverview(){
   const box=$("tm-members");
   try{
     const d=await (await fetch("/api/team/overview",{cache:"no-store"})).json();
     TMOV=d;
     fillHomeTeam();   // keep the Home team-mini in sync with the freshest overview
-    if(d.error){ box.innerHTML="<div class='csub'>"+esc(d.error)+"</div>"; return; }
-    $("tm-asof").textContent="today "+esc(d.today||"")+" · "+esc(d.tz||"");
+    if(d.error){ box.innerHTML="<div class='csub'>"+(d.error==="unreachable"?TM_UNREACH:esc(d.error))+"</div>"; return; }
+    $("tm-asof").textContent="today "+(d.today||"")+" · "+(d.tz||"");
     const k=d.kpis||{};
-    $("tm-kpi-spend").textContent=(k.org_spend!=null)?tmMoney(k.org_spend,tmCur(d)):"—";
-    $("tm-kpi-spend-sub").textContent="across "+(k.account_count||0)+" account"+((k.account_count||0)===1?"":"s")+" since the 1st";
+    const mixed=Object.keys(k.org_spend_by_currency||{}).length>1;
+    $("tm-kpi-spend").textContent=tmOrgSpend(k);
+    $("tm-kpi-spend-sub").textContent="across "+(k.account_count||0)+" account"+((k.account_count||0)===1?"":"s")+" since the 1st"+
+      (mixed?" · mixed currencies, not summed":"");
     const near=k.near||[];
     $("tm-kpi-near").textContent=near.length;
     $("tm-kpi-near-sub").textContent=near.slice(0,3).map(n=>n.name+" "+n.window).join(" · ")||"all clear";
@@ -2937,7 +3147,7 @@ async function loadTeamOverview(){
       const r=m.account||{}, e=r.extra||{}, lu=m.last_used||{};
       const at=lu.ts||r.ts;
       const seen=at?new Date(at*1000).toLocaleString([],{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):"no data";
-      const tag="last used "+esc(seen)+(lu.device?" · "+esc(lu.device):"")+(lu.by?" · by "+esc(lu.by):"")+((m.escrow||{}).present?" · escrow ✓":"");
+      const tag="last used "+esc(seen)+(lu.device?" · "+esc(lu.device):"")+(lu.by?" · by "+esc(lu.by):"");
       const devs=(m.devices||[]).map(dv=>"<span class='tmdev'>"+esc(dv.device||dv.did||"device")+" <b>"+tmTok(dv.tok_month)+"</b></span>").join("");
       const sum=(m.devices||[]).length>1?"<span class='csub' style='align-self:center'>"+tmTok(m.month_tokens)+" this month</span>":"";
       return "<div class='tmrow'><div class='tmtop'>"+
@@ -2948,35 +3158,40 @@ async function loadTeamOverview(){
         "<br><span class='csub'>since the 1st"+(e.enabled&&e.pct!=null?" · "+Math.round(e.pct)+"% of cap":"")+"</span></div>"+
         "</div>"+(devs?"<div class='tmdevs'>"+devs+sum+"</div>":"")+"</div>";
     }).join("");
-  }catch(e){ box.innerHTML="<div class='csub'>relay unreachable</div>"; }
+  }catch(e){ box.innerHTML="<div class='csub'>Can't reach the tracker service.</div>"; }
 }
+// Days with a reading for account m — the ONE definition the table and the CSV share.
+function tmDays(days,dates,m){ return dates.filter(dt=>!!(days[dt]||{})[m]).length; }
+function tmState(fin,lr){ return fin?"closed":(lr&&lr.src==="cron"?"end of day":(lr&&lr.src?"live":"—")); }
 async function loadTeamLedger(){
   const box=$("tm-ledger");
-  if(!TMMONTH)TMMONTH=tmMonthNow();
+  const cur=tmMonthNow();
+  if(!TMMONTH||TMMONTH>cur)TMMONTH=cur;
   $("tm-month").textContent=TMMONTH;
+  $("tm-nextm").disabled=(TMMONTH>=cur);   // no future months
   try{
     const d=await (await fetch("/api/team/ledger?month="+TMMONTH,{cache:"no-store"})).json();
     TMLED=d;
-    if(d.error){ box.innerHTML="<div class='csub'>"+esc(d.error)+"</div>"; return; }
+    if(d.error){ box.innerHTML="<div class='csub'>"+(d.error==="unreachable"?TM_UNREACH:esc(d.error))+"</div>"; return; }
     const names=d.accounts||{}, spend=d.computed_spend||{}, finals=d.finals||{}, days=d.days||{}, monthTok=d.month_tokens||{};
     const dates=Object.keys(days).sort();
     const mids=Object.keys(names); Object.keys(spend).forEach(m=>{ if(mids.indexOf(m)<0)mids.push(m); });
     if(!mids.length){ box.innerHTML="<div class='csub'>No data for "+esc(TMMONTH)+" yet.</div>"; return; }
     const lastRow=m=>{ for(let i=dates.length-1;i>=0;i--){ const a=tmAcct((days[dates[i]]||{})[m]); if(a)return a; } return finals[m]||null; };
-    let html="<table class='tmtable'><tr><th>account</th><th class='r'>€ month</th><th class='r'>tokens</th><th class='r'>meter</th><th class='r'>cap</th><th class='r'>days</th><th>state</th></tr>";
+    let html="<table class='tmtable'><tr><th>account</th><th class='r'>month spend</th><th class='r'>tokens</th><th class='r'>meter</th><th class='r'>cap</th><th class='r'>days</th><th>state</th></tr>";
     mids.sort((a,b)=>(spend[b]||0)-(spend[a]||0)).forEach(m=>{
       const fin=finals[m], lr=fin||lastRow(m)||{}, e=lr.extra||{};
-      const nDays=dates.filter(dt=>{ const a=tmAcct((days[dt]||{})[m]); return a&&((a.extra||{}).used!=null); }).length;
+      const nDays=tmDays(days,dates,m);
       html+="<tr><td>"+esc(names[m]||m.slice(0,8))+"</td>"+
         "<td class='r'><b>"+tmMoney(spend[m],e.currency)+"</b></td>"+
         "<td class='r'>"+tmTok(monthTok[m])+"</td>"+
         "<td class='r'>"+tmMoney(e.used,e.currency)+"</td>"+
         "<td class='r'>"+tmMoney(e.limit,e.currency)+"</td>"+
         "<td class='r'>"+nDays+"</td>"+
-        "<td>"+(fin?"frozen":esc(lr.src||"—"))+"</td></tr>";
+        "<td>"+tmState(fin,lr)+"</td></tr>";
     });
     box.innerHTML=html+"</table>";
-  }catch(e){ box.innerHTML="<div class='csub'>relay unreachable</div>"; }
+  }catch(e){ box.innerHTML="<div class='csub'>Can't reach the tracker service.</div>"; }
 }
 // The account-authoritative row among a member's device rows for one day: cron's
 // `account` if present, else the newest push. Mirrors the relay + Python.
@@ -2993,7 +3208,7 @@ function tmCsv(){
     const lr=finals[m]||lastRow(m)||{}, e=lr.extra||{};
     csv+='"'+String(names[m]||m).replace(/"/g,'""')+'",'+TMLED.month+","+(spend[m]!=null?spend[m]:"")+","+(e.currency||"")+","+
       (monthTok[m]!=null?monthTok[m]:"")+","+
-      (e.used!=null?e.used:"")+","+(e.limit!=null?e.limit:"")+","+dates.filter(dt=>!!(days[dt]||{})[m]).length+","+(finals[m]?"yes":"no")+"\r\n";
+      (e.used!=null?e.used:"")+","+(e.limit!=null?e.limit:"")+","+tmDays(days,dates,m)+","+(finals[m]?"yes":"no")+"\r\n";
   });
   const a=document.createElement("a");
   a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
@@ -3003,9 +3218,8 @@ async function tmPost(body){
   try{ return await (await fetch("/api/team",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json(); }
   catch(e){ return {ok:false,error:"tracker unreachable"}; }
 }
-// Pool accounts are read-only cards (they auto-discover as teammates log in); there is no
-// per-card remove. Reporter enrolment stays in "add member" (join codes); the relay's
-// /member DELETE endpoint remains for revoking a reporter out-of-band.
+// Pool accounts are read-only cards (they auto-discover as teammates sign in to Claude with
+// the tracker running); there is no per-card remove — membership is the email domain (RLS).
 async function renderTeamPage(){
   try{ WHOAMI=await (await fetch("/api/team/whoami",{cache:"no-store"})).json(); }
   catch(e){ WHOAMI={signed_in:false}; }
@@ -3031,6 +3245,11 @@ $("tm-logout").onclick=async function(){
   await tmPost({action:"logout"}); renderTeamPage(); setTimeout(refresh,400);
 };
 $("tm-reload").onclick=loadTeamOverview;
+$("tm-claim").onclick=async function(){
+  this.disabled=true; const r=await tmPost({action:"claim-device"}); this.disabled=false;
+  if(!r.ok){ this.textContent="Couldn't switch — try again"; }
+  setTimeout(refresh,400);
+};
 $("tm-minttoken").onclick=async function(){
   const msg=$("tm-copytoken-msg");
   const r=await tmPost({action:"connector-token"});
@@ -3039,7 +3258,7 @@ $("tm-minttoken").onclick=async function(){
   catch(e){ msg.style.userSelect="all"; msg.textContent=r.token; }
 };
 $("tm-prevm").onclick=function(){ TMMONTH=tmShiftMonth(TMMONTH||tmMonthNow(),-1); loadTeamLedger(); };
-$("tm-nextm").onclick=function(){ TMMONTH=tmShiftMonth(TMMONTH||tmMonthNow(),1); loadTeamLedger(); };
+$("tm-nextm").onclick=function(){ const n=tmShiftMonth(TMMONTH||tmMonthNow(),1); if(n>tmMonthNow())return; TMMONTH=n; loadTeamLedger(); };
 $("tm-csv").onclick=tmCsv;
 setInterval(function(){ if(!$("tab-team").hidden&&WHOAMI&&WHOAMI.signed_in)loadTeamOverview(); },10000);
 </script>
@@ -3056,7 +3275,8 @@ WIDGET_HTML = r"""<!doctype html>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   html,body{height:100%}
-  :root{--ink:#e7e6e3;--dim:#9b9a95;--faint:#6c6b66;--accent:#d97757;
+  :root{--ink:#e7e6e3;--dim:#9b9a95;--faint:#8a8984;--accent:#d97757;   /* faint >= 4.5:1 on the widget bg */
+    --ok:#5e9e72;--warn:#cda24e;--high:#e2893f;--hot:#dd5f42;--max:#c8372d;   /* = dashboard / USAGE_BANDS */
     --mono:ui-monospace,"Cascadia Mono","Cascadia Code","SF Mono",Consolas,monospace;
     --sans:ui-sans-serif,"Segoe UI",system-ui,-apple-system,sans-serif}
   body{font:12px/1.4 var(--sans);color:var(--ink);
@@ -3074,10 +3294,11 @@ WIDGET_HTML = r"""<!doctype html>
     background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='6' viewBox='0 0 9 6' fill='none' stroke='%239b9a95' stroke-width='1.25' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1.5 4.5 4.5 8 1.5'/%3E%3C/svg%3E");
     background-repeat:no-repeat;background-position:right 6px center;background-size:9px 6px}
   select.tier:hover{background-color:rgba(255,255,255,.06);color:var(--accent)}
-  select.tier:focus{outline:none;background-color:rgba(255,255,255,.06)}
+  select.tier:focus{background-color:rgba(255,255,255,.06)}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:1px}
   select.tier option{background:#1d1d20;color:var(--ink);font-weight:500}
   .top .verdict{margin-left:auto;font:700 11px/1 var(--sans);padding-right:6px;white-space:nowrap}
-  .top .x{cursor:pointer;color:var(--faint);font-size:15px;line-height:1;padding:0 3px}
+  .top .x{cursor:pointer;color:var(--faint);font-size:15px;line-height:1;padding:0 3px;background:none;border:0;border-radius:4px}
   .top .x:hover{color:var(--ink)}
   .sdot2{width:7px;height:7px;border-radius:50%;flex:none;display:inline-block}
   .wstat{display:inline-flex;align-items:center;gap:4px;font:600 10px/1 var(--mono);white-space:nowrap}
@@ -3093,7 +3314,11 @@ WIDGET_HTML = r"""<!doctype html>
     font:600 11px/1 var(--sans);padding:8px;border-radius:7px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .btn:hover{color:var(--ink);border-color:rgba(255,255,255,.22)}
   .btn:active{transform:translateY(1px)} .btn:disabled{opacity:.7;cursor:default}
+  .btn.ib{flex:0 0 auto;min-width:32px;padding:8px 9px;font-size:12px}
   .err{color:#e9b3a6;font:11px/1 var(--mono);padding:6px 2px}
+  /* last fetch failed: keep the numbers but make it obvious they're old */
+  body.stale #body .bar>i,body.stale #body .pc{opacity:.45;filter:saturate(.4)}
+  body.stale #bar .f b{opacity:.5}
   /* ---- minimal "bar" kind (FPS-overlay style) ---- */
   body.kind-bar{flex-direction:row;align-items:center;gap:0;padding:5px 11px;
     background:#0e0e10;border:1px solid rgba(255,255,255,.10);border-radius:9px}
@@ -3105,15 +3330,15 @@ WIDGET_HTML = r"""<!doctype html>
   #bar .f b{font-weight:700;font-variant-numeric:tabular-nums}
   #bar .dir{color:var(--ink);font-weight:700;max-width:42%;overflow:hidden;text-overflow:ellipsis}
   #bar .acts2{margin-left:auto;display:flex;gap:8px;opacity:0;transition:opacity .15s}
-  body.kind-bar:hover #bar .acts2{opacity:1}
-  #bar .ic{cursor:pointer;color:var(--faint);font-size:13px;line-height:1}
+  body.kind-bar:hover #bar .acts2,#bar .acts2:focus-within{opacity:1}
+  #bar .ic{cursor:pointer;color:var(--faint);font-size:13px;line-height:1;background:none;border:0;padding:0 2px;font-family:inherit;border-radius:3px}
   #bar .ic:hover{color:var(--ink)}
 </style>
 </head>
 <body>
   <div class="top">
     <span class="dot" id="dot"></span><span class="ttl" id="acct">Claude usage</span>
-    <select class="tier" id="tier" title="Track a session"></select><span class="verdict" id="verdict"></span><span class="wstat" id="wstatus" title="Anthropic status" style="display:none"></span><span class="x" onclick="closeWidget()" title="Hide">×</span>
+    <select class="tier" id="tier" title="Track a session" aria-label="Session to track"></select><span class="verdict" id="verdict" role="status"></span><span class="wstat" id="wstatus" title="Anthropic status" style="display:none"></span><button class="x" onclick="closeWidget()" title="Hide" aria-label="Hide widget">×</button>
   </div>
   <div id="body">
     <div class="row"><span class="lab">5h</span><div class="bar"><i id="b5"></i></div><span class="pc" id="pc5">–</span><span class="cd" id="cd5"></span></div>
@@ -3122,7 +3347,7 @@ WIDGET_HTML = r"""<!doctype html>
   </div>
   <div class="acts">
     <button class="btn" id="w-refresh" onclick="refreshNow()">Refresh</button>
-    <button class="btn" id="w-check" onclick="checkUpd()">Check for updates</button>
+    <button class="btn ib" id="w-check" onclick="checkUpd()" title="Check for updates" aria-label="Check for updates">⇡</button>
   </div>
   <div id="bar"></div>
 <script>
@@ -3131,18 +3356,19 @@ let R={};
 let SEL=""; try{ SEL=localStorage.getItem("trackSel")||""; }catch(_){}
 const KIND=new URLSearchParams(location.search).get("kind")||"panel";
 document.body.classList.add("kind-"+KIND);
-function esc(s){ return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
-function bandColor(p){ if(p>=80)return"#d4694f"; if(p>=60)return"#cda24e"; return"#5e9e72"; }
+function esc(s){ return (s||"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+// Usage band -> colour token (thresholds mirror USAGE_BANDS in Python).
+function bandColor(p){ return p>=100?"var(--max)":p>=90?"var(--hot)":p>=80?"var(--high)":p>=60?"var(--warn)":"var(--ok)"; }
 function fmtTok(n){ n=n||0; if(n>=1e6)return (n/1e6).toFixed(1)+"M"; if(n>=1e3)return Math.round(n/1e3)+"k"; return ""+n; }
 function closeWidget(){ try{ window.pywebview.api.close(); }catch(e){ try{window.close();}catch(_){} } }
 async function refreshNow(){ const b=$("w-refresh"); if(b){b.disabled=true;b.textContent="Refreshing…";}
   try{ await fetch("/api/refresh",{method:"POST"}); }catch(e){}
   setTimeout(()=>{ refresh(); if(b){b.disabled=false;b.textContent="Refresh";} },700); }
-async function checkUpd(){ const b=$("w-check"); if(!b)return; b.disabled=true; b.textContent="Checking…";
+async function checkUpd(){ const b=$("w-check"); if(!b)return; b.disabled=true; b.textContent="…";
   try{ const d=await (await fetch("/api/check-update",{method:"POST"})).json();
     b.textContent=d.update?("v"+d.latest+" available"):(d.latest?"Up to date":"Check failed");
   }catch(e){ b.textContent="Check failed"; }
-  setTimeout(()=>{ b.disabled=false; b.textContent="Check for updates"; },3500); }
+  setTimeout(()=>{ b.disabled=false; b.textContent="⇡"; },3500); }
 function sdur(s){ if(s==null)return""; s=Math.max(0,Math.floor(s));
   const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
   if(d>0)return"↻ "+d+"d "+h+"h"; if(h>0)return"↻ "+h+"h "+String(m).padStart(2,"0")+"m";
@@ -3171,7 +3397,7 @@ function bfld(label,pct){ return pct==null?"":"<span class='f'>"+label+" <b styl
 function refreshNow2(){ fetch("/api/refresh",{method:"POST"}).catch(()=>{}); setTimeout(refresh,500); }
 const COMP_RANK={operational:0,under_maintenance:1,degraded_performance:2,partial_outage:3,major_outage:4};
 const IND_SEV={none:0,minor:2,major:4,critical:4};
-function sevColor(sev){ return sev<=0?"#5e9e72":(sev>=4?"#c94f38":"#cda24e"); }
+function sevColor(sev){ return sev<=0?"var(--ok)":(sev>=4?"var(--max)":"var(--warn)"); }
 function sevWord(sev){ return sev<=0?"Ok":(sev>=4?"Down":"Errors"); }
 function statusView(d){          // -> {color, word: Ok|Errors|Down}
   const s=d.status; if(!s)return null;
@@ -3197,19 +3423,23 @@ function renderBar(d){           // minimal one-line HUD (configurable fields, i
     if(f==="status"){ const sv=statusView(d); return sv?"<span class='f' title='Anthropic status' style='color:"+sv.color+"'><span class='sdot2' style='background:"+sv.color+"'></span>"+sv.word+"</span>":""; }
     return "";
   };
-  let html=fields.map(part).join("");
-  html+="<span class='acts2'><span class='ic' onclick='refreshNow2()' title='Refresh'>↻</span>"+
-        "<span class='ic' onclick='closeWidget()' title='Hide'>×</span></span>";
+  let html=(d.ok?"":"<span class='f' title='"+esc("Not live: "+(d.error||"last update failed"))+"' style='color:var(--warn)'>⚠</span>")+
+           fields.map(part).join("");
+  html+="<span class='acts2'><button class='ic' onclick='refreshNow2()' title='Refresh' aria-label='Refresh'>↻</button>"+
+        "<button class='ic' onclick='closeWidget()' title='Hide' aria-label='Hide bar'>×</button></span>";
   $("bar").innerHTML=html;
 }
+function setStale(on,why){ document.body.classList.toggle("stale",!!on); document.body.title=on?("Not live — "+(why||"last update failed")):""; }
 async function refresh(){ try{
   const d=await (await fetch("/api/usage",{cache:"no-store"})).json();
   const wins=d.windows||[];
+  setStale(!d.ok && wins.length, d.error);
   if(KIND==="bar"){ renderBar(d); tick(); return; }
-  if(!d.ok && !wins.length){ $("dot").style.background="#d4694f"; $("verdict").textContent=(d.error||"unavailable"); $("verdict").style.color="#d4694f"; return; }
-  $("dot").style.background=d.ok?"#5e9e72":"#cda24e";
+  if(!d.ok && !wins.length){ $("dot").style.background="var(--hot)"; $("verdict").textContent=(d.error||"unavailable"); $("verdict").style.color="var(--hot)"; return; }
+  $("dot").style.background=d.ok?"var(--ok)":"var(--warn)";
   const v=d.verdict;
-  if(v && v.text){ $("verdict").textContent=v.text; $("verdict").style.color=v.color; if(d.ok)$("dot").style.background=v.color; }
+  if(!d.ok){ $("verdict").textContent="stale"; $("verdict").style.color="var(--warn)"; $("verdict").title=d.error||""; }
+  else if(v && v.text){ $("verdict").textContent=v.text; $("verdict").style.color=v.color; $("verdict").title=""; $("dot").style.background=v.color; }
   else { $("verdict").textContent=""; }
   const acc=d.account||{};
   $("acct").textContent = acc.org || acc.name || (acc.email||"").split("@")[0] || "Claude";
@@ -3228,7 +3458,7 @@ async function refresh(){ try{
   if(ws){ if(sv){ ws.style.display="inline-flex"; ws.style.color=sv.color;
       ws.innerHTML="<span class='sdot2' style='background:"+sv.color+"'></span>"+sv.word; } else ws.style.display="none"; }
   tick();
-}catch(e){ if(KIND!=="bar"){ $("dot").style.background="#cda24e"; } } }
+}catch(e){ setStale(true,"tracker not reachable"); if(KIND!=="bar"){ $("dot").style.background="var(--warn)"; } } }
 // Resize is handled natively by the OS (WS_THICKFRAME) — no JS resize math (DPI-safe).
 $("tier").addEventListener("change",function(){ SEL=this.value; try{localStorage.setItem("trackSel",SEL);}catch(_){} refresh(); });
 // Don't let pywebview's easy_drag move the window when interacting with a control
@@ -3268,8 +3498,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except Exception:
             return None
 
+    def _local_ok(self) -> bool:
+        """Loopback peer AND a loopback Origin/Host (see _origin_ok)."""
+        return self.client_address[0] in ("127.0.0.1", "::1") and self._origin_ok()
+
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+        # Reads are sensitive too (/api/pair-qr carries the E2EE key; /api/usage and the team
+        # endpoints carry account data), so every GET gets the same loopback Origin/Host guard
+        # as POST — a DNS-rebinding page can't read them. The dashboard and overlays load from
+        # http://127.0.0.1:<port>/ (loopback Host, same-origin Referer) and pass unchanged.
+        if not self._local_ok():
+            self._send(403, "text/plain", b"forbidden")
+            return
         if path in ("/", "/index.html"):
             self._send(200, "text/html; charset=utf-8", DASHBOARD_HTML.encode("utf-8"))
         elif path == "/widget":
@@ -3279,7 +3520,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 snap = STORE.get("snapshot", {})
             self._send(200, "application/json", json.dumps(snap).encode("utf-8"))
         elif path == "/api/pair-qr":
-            png = remote_pair_qr_png(load_config())
+            # Read-only: never mints an identity (that's POST /api/remote {action:"pair"}).
+            png = remote_pair_qr_png(load_config(), create=False)
             if png:
                 self._send(200, "image/png", png)
             else:
@@ -3292,8 +3534,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not supabase_pool.signed_in():
                 self._send(200, "application/json", b'{"error":"not_signed_in"}')
             else:
-                merged = supabase_team_overview()
-                out = merged if merged else {"error": "supabase unreachable"}
+                try:
+                    merged = supabase_team_overview()
+                    out = merged if merged else {"error": "not_signed_in"}
+                except Exception as exc:      # PoolError: unreachable / HTTP error — not "empty"
+                    out = {"error": "unreachable", "detail": str(exc)}
                 self._send(200, "application/json", json.dumps(out).encode("utf-8"))
         elif path == "/api/team/ledger":
             from urllib.parse import parse_qs, urlsplit
@@ -3303,10 +3548,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             elif not (len(month) == 7 and month[:4].isdigit() and month[4] == "-" and month[5:].isdigit()):
                 self._send(200, "application/json", b'{"error":"bad_month"}')
             else:
-                led = supabase_pool.read_ledger(month)
-                led["computed_spend"] = team_ledger_computed(led, supabase_pool.read_ledger(_prev_month(month)))
-                led["month_tokens"] = {acct: member_month_tokens(led, acct)
-                                       for acct in (led.get("accounts") or {})}
+                try:
+                    led = supabase_pool.read_ledger(month)
+                    led["computed_spend"] = team_ledger_computed(
+                        led, supabase_pool.read_ledger(_prev_month(month)))
+                    led["month_tokens"] = {acct: member_month_tokens(led, acct)
+                                           for acct in (led.get("accounts") or {})}
+                except Exception as exc:
+                    led = {"error": "unreachable", "detail": str(exc)}
                 self._send(200, "application/json", json.dumps(led).encode("utf-8"))
         elif path == "/favicon.ico":
             self._send(204, "image/x-icon", b"")
@@ -3333,7 +3582,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         # These endpoints are state-changing (config, relay, update, sign-in). The socket is bound
         # to 127.0.0.1, but a web page the user visits could still POST here (the body is parsed
         # regardless of Content-Type), so also require a loopback Origin/Host — see _origin_ok.
-        if self.client_address[0] not in ("127.0.0.1", "::1") or not self._origin_ok():
+        if not self._local_ok():
             self._send(403, "text/plain", b"forbidden")
             return
         if path == "/api/login":
@@ -3379,7 +3628,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif path == "/api/remote":
             action = (self._read_json() or {}).get("action", "")
             fn = CONTROL.get("remote_action")
-            if fn and action in ("rotate", "unpair", "sync"):
+            if fn and action in ("pair", "rotate", "unpair", "sync"):
                 try:
                     fn(action)
                 except Exception:
@@ -3420,8 +3669,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 ok, _res = supabase_pool.sign_in_verify_code(email, code)
                 if not ok:
                     return {"ok": False, "error": "invalid or expired code"}
-                if username:
-                    supabase_pool.set_username(username)
+                # Signing in here = using the pool login here: claim the device-lock either way.
+                if not (username and supabase_pool.set_username(username)):
+                    supabase_pool.claim_device()
                 self._team_changed()
                 return {"ok": True, "team": supabase_pool.team(), "is_admin": supabase_pool.is_admin()}
             elif action == "set-username":
@@ -3434,6 +3684,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 supabase_pool.sign_out()
                 self._team_changed()
                 return {"ok": True}
+            elif action == "claim-device":
+                ok = supabase_pool.claim_device()
+                self._team_changed()
+                return {"ok": True} if ok else {"ok": False, "error": "could not claim this device"}
             elif action == "connector-token":
                 if not supabase_pool.is_admin():
                     return {"ok": False, "error": "admin only"}
@@ -3591,7 +3845,7 @@ def run_window(port: int) -> int:
         ensure_app_icon()
         set_app_user_model_id()
         webview.create_window(APP_NAME, url, width=820, height=640,
-                              min_size=(300, 360), background_color="#070a10")
+                              min_size=(300, 360), background_color="#100e0c")   # = the page's --bg
         threading.Thread(target=_apply_window_icon, daemon=True).start()
         webview.start(icon=str(ICO_PATH))
     except Exception as exc:
@@ -3800,10 +4054,10 @@ def _make_shortcuts(target, args, locations) -> None:
     subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], check=True)
 
 
-def _remove_shortcuts() -> None:
+def _remove_shortcuts(locations=("Desktop", "Programs", "Startup")) -> None:
+    folders = "@(" + ",".join(f"[Environment]::GetFolderPath('{loc}')" for loc in locations) + ")"
     ps = (
-        "foreach($d in @([Environment]::GetFolderPath('Desktop'),"
-        "[Environment]::GetFolderPath('Programs'),[Environment]::GetFolderPath('Startup'))){"
+        f"foreach($d in {folders}){{"
         f"$p=Join-Path $d '{_ps_q(APP_NAME)}.lnk'; if(Test-Path $p){{Remove-Item $p -Force; \"removed $p\"}}}}"
     )
     subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps])
@@ -3850,6 +4104,10 @@ def do_install() -> None:
 def do_uninstall() -> None:
     _remove_shortcuts()
     print("Removed Desktop / Start Menu / Startup shortcuts.")
+    if remove_session_hook():
+        print("Removed the session-waiting hook from ~/.claude/settings.json (if it was there).")
+    else:
+        print("Could not update ~/.claude/settings.json — remove the '--session-hook' Stop hook by hand.")
 
 
 def install_autostart() -> None:   # non-interactive: Startup shortcut only
@@ -3859,8 +4117,9 @@ def install_autostart() -> None:   # non-interactive: Startup shortcut only
     print("Autostart installed (Startup shortcut).")
 
 
-def uninstall_autostart() -> None:
-    do_uninstall()
+def uninstall_autostart() -> None:   # Startup shortcut only — Desktop / Start Menu stay
+    _remove_shortcuts(["Startup"])
+    print("Autostart removed (Startup shortcut).")
 
 
 # ---------------------------------------------------------------------------
@@ -3877,7 +4136,6 @@ class TrayApp:
         self.port = int(cfg.get("dashboard_port", 8787))
         self.widget_proc = None
         self.bar_proc = None
-        self._config_epoch = 0
         self._update_available = None
         self._update_url = None
         self._verdict = ""
@@ -3887,7 +4145,7 @@ class TrayApp:
         self._wake = threading.Event()
         self._started_notified = False
         self._remote = RemoteSync()       # owns relay sync/command/push + their shared state
-        self._team = TeamSync()           # owns the opt-in team report/escrow pushes
+        self._team = TeamSync()           # owns the opt-in team pool push + device-lock check
         self._session_waiting_last = {}   # session_id -> last-notified ts (rate-limit)
 
     def build_menu(self):
@@ -3937,7 +4195,7 @@ class TrayApp:
         CONTROL["toggle_overlay"] = self._toggle_overlay
         CONTROL["remote_action"] = self._remote_action
         CONTROL["session_waiting"] = self._on_session_waiting
-        CONTROL["team_changed"] = lambda: (self._team.reset_throttle(), self._wake.set())  # report right after join/create
+        CONTROL["team_changed"] = lambda: (self._team.session_changed(), self._wake.set())  # report right after sign-in/claim
         global REMOTE_PUSH
         REMOTE_PUSH = lambda title, msg: self._remote.push(self.cfg, title, msg)  # mirror toasts to the phone
         threading.Thread(target=self._poll_loop, daemon=True).start()
@@ -4004,10 +4262,11 @@ class TrayApp:
                 self.icon.update_menu()
         except Exception:
             pass
+        self._wake.set()   # republish overlays_alive now so the Settings Show/Hide labels follow
 
     def _set_config(self, patch: dict):
         """Single config writer: merge an allowlisted patch into the live cfg, persist
-        once, and bump the epoch so overlays know to re-read."""
+        once, and wake the poll loop so the next snapshot (ui/remote) reflects it."""
         if not isinstance(patch, dict):
             return
         with CONFIG_LOCK:
@@ -4018,7 +4277,8 @@ class TrayApp:
                 save_json(CONFIG_PATH, self.cfg)
             except Exception as exc:
                 log(f"config save failed: {exc}")
-            self._config_epoch += 1
+        if patch.get("remote_enabled") is True and remote_available():
+            load_remote_identity(create=True)   # enabling remote = explicit pairing intent
         self._wake.set()   # re-poll now so the snapshot (remote/ui) reflects the change quickly
         if "notify_session_waiting" in patch:   # toggle installs/removes the Claude Code idle hook
             target = install_session_hook if patch["notify_session_waiting"] else remove_session_hook
@@ -4044,10 +4304,14 @@ class TrayApp:
         notify("Claude is waiting", f"{name} · finished — your turn to respond")
 
     def _remote_action(self, action: str) -> None:
-        """Driven by POST /api/remote: rotate the key, unpair, or force a sync."""
-        if action == "rotate":
+        """Driven by POST /api/remote: create the pairing identity, rotate the key, unpair,
+        or force a sync."""
+        if action == "pair":
+            load_remote_identity(create=True)
+            self._wake.set()
+        elif action == "rotate":
             rotate_remote_identity()
-            self._config_epoch += 1
+            self._wake.set()
         elif action == "unpair":
             unpair_remote()
             self._set_config({"remote_enabled": False})
@@ -4160,9 +4424,9 @@ class TrayApp:
         self._wake.set()
 
     def _check_update_now(self) -> dict:
-        """Query GitHub for the latest release now; update state if newer. Returns
+        """Query the update source (check_latest) now; update state if newer. Returns
         {current, latest, url, update}."""
-        latest, dl = check_github_latest()
+        latest, dl = check_latest()
         res = {"current": __version__, "latest": latest, "url": dl, "update": False}
         if latest and _vtuple(latest) > _vtuple(__version__):
             self._update_available, self._update_url = latest, dl
@@ -4179,7 +4443,7 @@ class TrayApp:
         elif res["latest"]:
             notify(APP_NAME, f"You're on the latest version (v{__version__}).")
         else:
-            notify(APP_NAME, "Couldn't reach GitHub to check for updates.")
+            notify(APP_NAME, "Couldn't check for updates (offline?).")
         try:
             if self.icon:
                 self.icon.update_menu()      # surface the Update item if one appeared
@@ -4226,13 +4490,16 @@ class TrayApp:
         except Exception as exc:
             log(f"visual update failed: {exc}")
 
-    def _refresh_team_overview(self):
-        """Admin: fetch + compact the pool overview for the phone-embedded snapshot.
-        Runs off the poll thread; failures leave the last good value in place."""
+    def _refresh_team_overview(self, role=None):
+        """Fetch + compact the pool overview for the phone-embedded snapshot (any signed-in
+        teammate — RLS already scopes reads to the team). Runs off the poll thread; failures
+        leave the last good value in place."""
         try:
             merged = supabase_team_overview()
             if merged:
-                self._team_overview = team_overview_compact(merged)
+                self._team_overview = team_overview_compact(merged, role)
+        except supabase_pool.PoolError as exc:
+            log(f"team overview embed: {exc}")
         except Exception:
             log("team overview embed error:\n" + traceback.format_exc())
 
@@ -4254,18 +4521,17 @@ class TrayApp:
         self._update_available = getattr(self, "_update_available", None)
         self._update_url = getattr(self, "_update_url", None)
         self._status = getattr(self, "_status", None)
-        self._team_overview = getattr(self, "_team_overview", None)   # compact team KPIs embedded for the admin's phone
+        self._team_overview = getattr(self, "_team_overview", None)   # compact team KPIs embedded for the phone
         status_iv = int(self.cfg.get("status_interval_seconds", 300))
         sessions_iv = int(self.cfg.get("sessions_interval_seconds", 45))
         sessions_top = int(self.cfg.get("sessions_top_n", 8))
         alltime_iv = int(self.cfg.get("alltime_interval_seconds", 600))
         alltime_top = int(self.cfg.get("alltime_top_n", 8))
-        alltime_days = int(self.cfg.get("alltime_days", 30))
         last_api = 0.0
         last_sessions = 0.0
         last_alltime = 0.0
         last_team_ov = 0.0
-        team_ov_iv = 30   # how often the admin refetches the team overview to embed for the phone
+        team_ov_iv = 30   # how often a teammate refetches the team overview to embed for the phone
         last_update = 0.0
         last_status = 0.0
         warned_token = False
@@ -4280,7 +4546,7 @@ class TrayApp:
                     last_sessions = now
                 if self.cfg.get("update_check", True) and (now - last_update >= 86400):
                     last_update = now
-                    latest, dl = check_github_latest()
+                    latest, dl = check_latest()
                     if latest and _vtuple(latest) > _vtuple(__version__):
                         self._update_available, self._update_url = latest, dl
                         if not getattr(self, "_update_notified", False):
@@ -4353,7 +4619,6 @@ class TrayApp:
                               ("bar_fields",
                                "show_widget_on_start", "show_bar_on_start", "status_components",
                                "notify_session_waiting", "remote_transcript")}
-                snap["config_epoch"] = self._config_epoch
                 snap["overlays_alive"] = {"widget": self._widget_alive(), "bar": self._bar_alive()}
                 snap["remote"] = {"enabled": bool(self.cfg.get("remote_enabled")),
                                   "relay_url": self.cfg.get("remote_relay_url", ""),
@@ -4368,9 +4633,11 @@ class TrayApp:
                                 "team": supabase_pool.team() if team_signed_in else None,
                                 "report_seconds": int(self.cfg.get("team_report_seconds", 10)),
                                 "tz": self.cfg.get("team_tz", "Europe/Athens"),
-                                "last_ok": self._team.last_ok}
-                # Admin only: the compact pool overview the phone renders (E2EE via the snapshot).
-                snap["team_overview"] = self._team_overview if is_team_admin else None
+                                "last_ok": self._team.last_ok,
+                                "device_ok": self._team.device_ok if team_signed_in else None}
+                # Any signed-in teammate (members see the pool too since v0.3): the compact pool
+                # overview the phone renders (E2EE via the snapshot); it carries the viewer's role.
+                snap["team_overview"] = self._team_overview if team_signed_in else None
                 self._verdict = (snap.get("verdict") or {}).get("text", "")
                 with STORE_LOCK:
                     STORE["snapshot"] = snap
@@ -4386,19 +4653,19 @@ class TrayApp:
                     if self._team.due(now, tiv):
                         threading.Thread(target=self._team.sync,
                                          args=(snap, self.cfg, self._alltime_cache), daemon=True).start()
-                # Admin + phone paired: refresh the compact team overview embedded for the phone.
-                # Off-thread + throttled so the relay round-trips never block the poll loop.
-                if (RemoteSync.enabled(self.cfg) and is_team_admin
+                # Signed in + phone paired: refresh the compact team overview embedded for the phone.
+                # Off-thread + throttled so the Supabase round-trips never block the poll loop.
+                if (RemoteSync.enabled(self.cfg) and team_signed_in
                         and now - last_team_ov >= team_ov_iv):
                     last_team_ov = now
-                    threading.Thread(target=self._refresh_team_overview, daemon=True).start()
+                    threading.Thread(target=self._refresh_team_overview,
+                                     args=(snap["team"]["role"],), daemon=True).start()
                 # Fold newly-written session bytes into lifetime totals. Runs after
                 # the live snapshot is published so the first (full-history) backfill
                 # never delays first paint; the result lands in the next snapshot.
                 if now - last_alltime >= alltime_iv:
                     try:
-                        self._alltime = scan_all_time(self._alltime_cache, now,
-                                                      top_n=alltime_top, days=alltime_days)
+                        self._alltime = scan_all_time(self._alltime_cache, now, top_n=alltime_top)
                         save_json(ALLTIME_PATH, self._alltime_cache)
                     except Exception:
                         log("all-time scan error:\n" + traceback.format_exc())
@@ -4479,14 +4746,35 @@ def _session_hook_command() -> str:
     return f'"{_pythonw()}" "{Path(__file__).resolve()}" --session-hook'
 
 
-def _save_claude_settings(data: dict) -> None:
+def _load_claude_settings():
+    """(settings_dict, ok). A missing file is ({}, True). A file that exists but isn't valid
+    JSON (or isn't an object) is (None, False): we must NOT rewrite it — doing so would replace
+    the user's whole Claude Code config with just our hook."""
+    if not CLAUDE_SETTINGS.exists():
+        return {}, True
     try:
-        if CLAUDE_SETTINGS.exists():
-            CLAUDE_SETTINGS.with_name(CLAUDE_SETTINGS.name + ".cut-bak").write_text(
-                CLAUDE_SETTINGS.read_text(encoding="utf-8"), encoding="utf-8")
+        data = json.loads(CLAUDE_SETTINGS.read_text(encoding="utf-8"))
+    except Exception as exc:
+        log(f"~/.claude/settings.json is not valid JSON ({exc}); leaving it untouched")
+        return None, False
+    if not isinstance(data, dict):
+        log("~/.claude/settings.json is not a JSON object; leaving it untouched")
+        return None, False
+    return data, True
+
+
+def _save_claude_settings(data: dict) -> bool:
+    try:
+        bak = CLAUDE_SETTINGS.with_name(CLAUDE_SETTINGS.name + ".cut-bak")
+        if CLAUDE_SETTINGS.exists() and not bak.exists():
+            # One backup of the ORIGINAL file, taken before our first edit — later saves must
+            # not overwrite it with an already-modified copy.
+            bak.write_text(CLAUDE_SETTINGS.read_text(encoding="utf-8"), encoding="utf-8")
         save_json(CLAUDE_SETTINGS, data)   # atomic tmp+replace
+        return True
     except Exception as exc:
         log(f"write claude settings failed: {exc}")
+        return False
 
 
 def _strip_session_hook(groups) -> list:
@@ -4507,12 +4795,16 @@ def install_session_hook() -> bool:
     Stop fires the moment Claude finishes a turn (i.e. it's now awaiting you), so you get
     pinged every time. (The old Notification[idle_prompt] hook only fired after Claude Code's
     own ~60s idle debounce, which is why pings were missed — we migrate off it here.)
-    Idempotent; backs the file up first. Returns True on success."""
+    Idempotent; backs the original file up once. Refuses (returns False) when the existing
+    settings file can't be parsed. Returns True on success."""
     try:
-        data = load_json(CLAUDE_SETTINGS, {})
-        if not isinstance(data, dict):
-            data = {}
+        data, ok = _load_claude_settings()
+        if not ok:
+            return False
         hooks = data.setdefault("hooks", {})
+        if not isinstance(hooks, dict):
+            log("~/.claude/settings.json has a non-object 'hooks'; leaving it untouched")
+            return False
         cmd = _session_hook_command()
         # migrate: remove any prior Notification[idle_prompt] hook of ours
         if isinstance(hooks.get("Notification"), list):
@@ -4528,10 +4820,10 @@ def install_session_hook() -> bool:
             for h in (g.get("hooks") or []) if isinstance(g, dict) else []:
                 if isinstance(h, dict) and "--session-hook" in str(h.get("command", "")):
                     h["command"] = cmd
-                    _save_claude_settings(data)
-                    return True
+                    return _save_claude_settings(data)
         groups.append({"hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
-        _save_claude_settings(data)
+        if not _save_claude_settings(data):
+            return False
         log("installed session-waiting (Stop) hook")
         return True
     except Exception as exc:
@@ -4539,16 +4831,18 @@ def install_session_hook() -> bool:
         return False
 
 
-def remove_session_hook() -> None:
+def remove_session_hook() -> bool:
     """Strip our hook out of ~/.claude/settings.json — from the Stop event and the legacy
-    Notification event — leaving any other hooks intact."""
+    Notification event — leaving any other hooks intact. Writes only when something changed;
+    never touches a file it can't parse. Returns True when the hook is (now) absent."""
     try:
-        data = load_json(CLAUDE_SETTINGS, None)
-        if not isinstance(data, dict):
-            return
+        data, ok = _load_claude_settings()
+        if not ok:
+            return False
         hooks = data.get("hooks")
         if not isinstance(hooks, dict):
-            return
+            return True                       # nothing of ours to remove
+        before = json.dumps(hooks, sort_keys=True)
         for event in ("Stop", "Notification"):
             if isinstance(hooks.get(event), list):
                 cleaned = _strip_session_hook(hooks[event])
@@ -4556,12 +4850,17 @@ def remove_session_hook() -> None:
                     hooks[event] = cleaned
                 else:
                     hooks.pop(event, None)
+        if json.dumps(hooks, sort_keys=True) == before:
+            return True
         if not hooks:
             data.pop("hooks", None)
-        _save_claude_settings(data)
+        if not _save_claude_settings(data):
+            return False
         log("removed session-waiting hook")
+        return True
     except Exception as exc:
         log(f"remove session hook failed: {exc}")
+        return False
 
 
 def main() -> int:
@@ -4579,7 +4878,10 @@ def main() -> int:
     ap.add_argument("--bar", action="store_true", help="open the minimal one-line HUD bar overlay")
     ap.add_argument("--port", type=int, default=None, help="dashboard port (with --window/--widget/--bar)")
     ap.add_argument("--install", action="store_true", help="interactive setup (shortcuts + autostart)")
-    ap.add_argument("--uninstall", action="store_true", help="remove shortcuts")
+    ap.add_argument("--uninstall", action="store_true",
+                    help="remove shortcuts and the Claude Code session-waiting hook")
+    ap.add_argument("--remove-hook", action="store_true",
+                    help="remove only the session-waiting hook from ~/.claude/settings.json (used by the uninstaller)")
     ap.add_argument("--install-autostart", action="store_true", help="add the Startup shortcut only")
     ap.add_argument("--uninstall-autostart", action="store_true")
     ap.add_argument("--version", action="store_true")
@@ -4598,6 +4900,8 @@ def main() -> int:
     if args.uninstall:
         do_uninstall()
         return 0
+    if args.remove_hook:
+        return 0 if remove_session_hook() else 1
     if args.install_autostart:
         install_autostart()
         return 0

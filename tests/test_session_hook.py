@@ -103,3 +103,52 @@ def test_run_session_hook_no_port_is_noop(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "PORT_PATH", tmp_path / "absent")
     monkeypatch.setattr(sys, "stdin", io.StringIO("{}"))
     assert m.run_session_hook() == 0          # no server, no crash
+
+
+def test_install_refuses_unparseable_settings(tmp_path, monkeypatch):
+    settings = tmp_path / "settings.json"
+    monkeypatch.setattr(m, "CLAUDE_SETTINGS", settings)
+    broken = '{"model": "opus", "hooks": {'                          # truncated / hand-edited JSON
+    settings.write_text(broken, encoding="utf-8")
+    assert m.install_session_hook() is False
+    assert settings.read_text(encoding="utf-8") == broken           # untouched — not clobbered
+    assert m.remove_session_hook() is False
+    assert settings.read_text(encoding="utf-8") == broken
+    settings.write_text("[1, 2]", encoding="utf-8")                  # valid JSON, wrong shape
+    assert m.install_session_hook() is False
+    assert settings.read_text(encoding="utf-8") == "[1, 2]"
+
+
+def test_backup_keeps_the_original(tmp_path, monkeypatch):
+    settings = tmp_path / "settings.json"
+    bak = tmp_path / "settings.json.cut-bak"
+    monkeypatch.setattr(m, "CLAUDE_SETTINGS", settings)
+    original = json.dumps({"model": "opus"})
+    settings.write_text(original, encoding="utf-8")
+    m.install_session_hook()
+    m.install_session_hook()                                         # second save
+    m.remove_session_hook()
+    assert bak.read_text(encoding="utf-8") == original               # still the pre-edit file
+
+
+def test_uninstall_paths_remove_hook_and_only_startup(tmp_path, monkeypatch):
+    settings = tmp_path / "settings.json"
+    monkeypatch.setattr(m, "CLAUDE_SETTINGS", settings)
+    removed = []
+    monkeypatch.setattr(m, "_remove_shortcuts", lambda *a: removed.append(list(a[0]) if a else "all"))
+    m.install_session_hook()
+    m.do_uninstall()
+    assert removed == ["all"]
+    assert "hooks" not in json.loads(settings.read_text(encoding="utf-8"))    # hook gone
+    removed.clear()
+    m.uninstall_autostart()
+    assert removed == [["Startup"]]                                  # desktop / start menu untouched
+
+
+def test_remove_hook_cli_flag(tmp_path, monkeypatch):
+    settings = tmp_path / "settings.json"
+    monkeypatch.setattr(m, "CLAUDE_SETTINGS", settings)
+    m.install_session_hook()
+    monkeypatch.setattr(sys, "argv", ["claude_usage_tracker.py", "--remove-hook"])
+    assert m.main() == 0
+    assert "hooks" not in json.loads(settings.read_text(encoding="utf-8"))
