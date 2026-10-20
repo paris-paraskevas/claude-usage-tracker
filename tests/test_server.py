@@ -9,6 +9,8 @@ import urllib.request
 
 import pytest
 
+import ctu
+
 from conftest import feed
 
 from ctu import paths, server
@@ -198,7 +200,7 @@ def test_sse_heartbeat_and_client_disconnect(api, monkeypatch):
 
 def test_settings_get_and_patch(api):
     st, s = jcall(api, "/api/v2/settings")
-    assert st == 200 and s["overlay"]["shown"] is True and s["about"]["version"] == "0.4.0"
+    assert st == 200 and s["overlay"]["shown"] is True and s["about"]["version"] == ctu.__version__
     assert set(s) == {"alerts", "quiet_hours", "phone_push", "status_components", "status_components_available",
                       "overlay", "remote", "team", "data", "about"}
     assert s["data"] == {"refresh_s": 300, "session_hook": False, "statusline_installed": False}
@@ -208,7 +210,7 @@ def test_settings_get_and_patch(api):
                         "about": {"version": "ignored", "update_check": False}})
     assert st == 200 and r["quiet_hours"] == {"enabled": True, "start": "23:00", "end": "08:00"}
     assert r["overlay"]["opacity"] == 70 and r["overlay"]["shown"] is True and r["remote"]["transcript"] is True
-    assert r["team"]["tz"] == "UTC" and r["data"]["refresh_s"] == 120 and r["about"] == {"version": "0.4.0",
+    assert r["team"]["tz"] == "UTC" and r["data"]["refresh_s"] == 120 and r["about"] == {"version": ctu.__version__,
                                                                                           "update_check": False}
     saved = json.loads(paths.CONFIG_PATH.read_text(encoding="utf-8"))
     assert saved["quiet_hours"]["start"] == "23:00" and saved["overlay"]["opacity"] == 70

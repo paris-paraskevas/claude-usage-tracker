@@ -27,7 +27,7 @@ something to act on.
   <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/overlay.png" alt="Overlay at rest" width="420"><br>
   <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/overlay-expanded.png" alt="Overlay expanded" width="300">
   <img src="https://raw.githubusercontent.com/paris-paraskevas/claude-usage-tracker/main/docs/flyout.png" alt="Tray flyout" width="300"><br>
-  <em>The <strong>overlay</strong> (one line at rest, expands on hover) and the <strong>tray flyout</strong> (sample data)</em>
+  <em>The <strong>overlay</strong> (one line at rest, expands when clicked) and the <strong>tray flyout</strong> (sample data)</em>
 </p>
 
 ## What it answers
@@ -53,7 +53,7 @@ something to act on.
   **flyout**; right-click opens the menu.
 - **Overlay** — replaces the old mini widget and HUD bar. One always-on-top line
   (`▲ 5h 64% limit ~16:26 │ 7d 41% │ ctx 73% │ 1 waiting`) that never steals focus, expands
-  in place on hover or click, can be pinned, snaps to screen edges and hides during
+  in place when you click it, can be pinned, snaps to screen edges and hides during
   full-screen apps and presentations. Fields, opacity and click-through are in Settings › Overlay & tray.
 - **Dashboard** — **Now** (verdict, runway chart, limits, active session, waiting sessions,
   extra usage) · **Sessions** · **Team pool** · **History** (usage over time, totals,

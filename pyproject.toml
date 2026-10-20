@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-usage-tracker"
-version = "0.4.0"
+version = "0.4.1"
 description = "Windows tray app, overlay and dashboard for Claude plan limits (5-hour & weekly), with pace forecasts"
 readme = "README.md"
 requires-python = ">=3.11"

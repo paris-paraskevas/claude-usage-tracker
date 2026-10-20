@@ -29,7 +29,7 @@ Lifetime stats are secondary and live in History.
 | Tray icon | ambient | used % of the binding limit; corner badge for watch / will-hit; clock when limited; dimmed when stale |
 | Tray flyout (left-click) | glance | verdict line, 5-hour + weekly bars, Dashboard / Overlay / Mute 1 h |
 | Tray menu (right-click) | command | Open dashboard (default, bold), Show overlay ✓, Mute alerts ›, Refresh now, Settings, Quit |
-| Overlay (replaces mini widget + HUD bar) | peripheral | one line at rest; expands in place on hover/click; pin; optional click-through |
+| Overlay (replaces mini widget + HUD bar) | peripheral | one line at rest; expands in place on click (hover only highlights); pin; optional click-through |
 | Dashboard | deliberate | Now · Sessions · Team pool · History, Settings behind the gear |
 | Notifications | interrupt | only when actionable, once per episode |
 | Android widget | glance away | 2×1, 2×2, 4×2 (see §9) |
@@ -210,7 +210,7 @@ Native Windows 11 feel; the identity lives in the data visuals.
   click-through (`WS_EX_LAYERED | WS_EX_TRANSPARENT`). At rest 30 px tall:
   `▲ 5h 64% limit ~16:26 │ 7d 41% │ ctx 73% │ 1 waiting` (fields configurable; fixed-width
   numeric slots). States: ok, will-hit, stale (greyed, "as of hh:mm"), limited (solid, "back at
-  16:40 (in 14 m)"). Expands in place to a 340 px panel on hover/click; pin keeps it open. Snaps to
+  16:40 (in 14 m)"). Expands in place to a 340 px panel on click (owner's call: hover only highlights); pin keeps it open. Snaps to
   edges; hides when a full-screen app or presentation is active.
 - **Tray icon**: drawn at the exact small-icon size for the current DPI (16/20/24/32), in taskbar
   colours from `SystemUsesLightTheme`. Default style (owner's choice after the first test build):
