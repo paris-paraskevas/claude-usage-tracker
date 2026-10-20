@@ -2,13 +2,11 @@
 (PyNaCl) isn't installed, so the core test job stays dependency-light."""
 import base64
 import json
-import sys
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import claude_usage_tracker as m  # noqa: E402
+from ctu import paths
+from ctu import remote as m
 
 pytestmark = pytest.mark.skipif(not m.remote_available(),
                                 reason="PyNaCl (the 'remote' extra) not installed")
@@ -16,7 +14,7 @@ pytestmark = pytest.mark.skipif(not m.remote_available(),
 
 @pytest.fixture
 def tmp_identity(tmp_path, monkeypatch):
-    monkeypatch.setattr(m, "REMOTE_PATH", tmp_path / "remote.json")
+    monkeypatch.setattr(paths, "REMOTE_PATH", tmp_path / "remote.json")
     monkeypatch.setattr(m, "_remote_id_cache", None)
     yield
 
@@ -83,3 +81,13 @@ def test_unpair_forgets_identity(tmp_identity):
     m.load_remote_identity(create=True)
     m.unpair_remote()
     assert m.load_remote_identity(create=False) is None
+
+
+def test_pair_action_returns_svg_qr_and_enables_sync(make_engine):
+    e = make_engine()
+    code, r = e.action("remote_pair", {})
+    assert code == 200 and r["ok"] and r["qr_svg"].startswith("<svg") and r["qr"] == "/api/v2/remote/qr"
+    assert e.cfg["remote_enabled"] is True and e.snapshot()["app"]["remote"]["paired"] is True
+    assert m.remote_pair_qr_png(e.cfg, create=False)[:4] == b"\x89PNG"
+    code, r = e.action("remote_unpair", {})
+    assert r["ok"] and e.cfg["remote_enabled"] is False and e.snapshot()["app"]["remote"]["paired"] is False

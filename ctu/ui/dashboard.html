@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Claude Usage</title>
+<link rel="stylesheet" href="/assets/tokens.css">
+<link rel="stylesheet" href="/assets/base.css">
+<link rel="stylesheet" href="/assets/dashboard.css">
+<script type="module" src="/assets/app.js"></script>
+</head>
+<body class="dash">
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="shell">
+  <nav class="rail" aria-label="Main">
+    <div class="rail-top">
+      <div class="brand" aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 16 16"><rect x="1.5" y="9" width="13" height="4" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="1.5" y="9" width="8" height="4" rx="2" fill="currentColor"/><path d="M3 6.5h10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+        <span class="brand-name">Claude Usage</span>
+      </div>
+      <ul class="nav-list" role="list">
+        <li><a class="nav-item" href="#/now" data-route="now" title="Now"><span class="nav-ic" data-icon="now"></span><span class="nav-label">Now</span></a></li>
+        <li><a class="nav-item" href="#/sessions" data-route="sessions" title="Sessions"><span class="nav-ic" data-icon="sessions"></span><span class="nav-label">Sessions</span><span class="nav-badge" id="nav-badge-sessions" hidden></span></a></li>
+        <li><a class="nav-item" href="#/team" data-route="team" title="Team pool"><span class="nav-ic" data-icon="team"></span><span class="nav-label">Team pool</span></a></li>
+        <li><a class="nav-item" href="#/history" data-route="history" title="History"><span class="nav-ic" data-icon="history"></span><span class="nav-label">History</span></a></li>
+      </ul>
+    </div>
+    <div class="rail-bottom">
+      <div class="account" id="account" hidden></div>
+      <a class="nav-item" href="#/settings" data-route="settings" title="Settings"><span class="nav-ic" data-icon="settings"></span><span class="nav-label">Settings</span></a>
+    </div>
+  </nav>
+  <main id="main" class="content" tabindex="-1">
+    <div id="conn-banner" class="conn-banner" role="status" hidden></div>
+    <div id="view" class="view"></div>
+  </main>
+</div>
+<div id="live" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+<div id="toasts" class="toasts"></div>
+<noscript><p style="padding:24px">The dashboard needs JavaScript.</p></noscript>
+</body>
+</html>

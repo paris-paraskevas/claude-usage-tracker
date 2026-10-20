@@ -1,0 +1,243 @@
+{
+  "schema": 2,
+  "rev": 1301,
+  "generated_at": 1792496880,
+  "source": {
+    "kind": "statusline",
+    "updated_at": 1792496874,
+    "age_s": 6,
+    "stale": false,
+    "auth": "ok",
+    "error": null
+  },
+  "account": {
+    "email": "paris@acme.dev",
+    "name": "Paris",
+    "org": "Acme Labs",
+    "plan": "max"
+  },
+  "decision": {
+    "level": "ok",
+    "binding": "five_hour",
+    "title": "On pace",
+    "detail": "5-hour 38% · refills 16:40.",
+    "resume_at": null,
+    "suggestion": null
+  },
+  "limits": [
+    {
+      "id": "five_hour",
+      "label": "5-hour",
+      "scope": "all",
+      "used_pct": 38.0,
+      "resets_at": 1792503600,
+      "window_s": 18000,
+      "elapsed_pct": 62.7,
+      "level": "ok",
+      "binding": true,
+      "pace": {
+        "rate_pct_h": 6.0,
+        "sustainable_pct_h": 33.2,
+        "projected_at_reset": 49.2,
+        "eta_100": null,
+        "confidence": "ok"
+      }
+    },
+    {
+      "id": "seven_day",
+      "label": "Weekly",
+      "scope": "all",
+      "used_pct": 41.0,
+      "resets_at": 1792648800,
+      "window_s": 604800,
+      "elapsed_pct": 74.9,
+      "level": "ok",
+      "binding": false,
+      "pace": {
+        "rate_pct_h": 0.25,
+        "sustainable_pct_h": 0.9,
+        "projected_at_reset": 57.6,
+        "eta_100": null,
+        "confidence": "ok"
+      }
+    },
+    {
+      "id": "seven_day_opus",
+      "label": "Weekly · Opus",
+      "scope": "opus",
+      "used_pct": 58.0,
+      "resets_at": 1792648800,
+      "window_s": 604800,
+      "elapsed_pct": 74.9,
+      "level": "ok",
+      "binding": false,
+      "pace": {
+        "rate_pct_h": null,
+        "sustainable_pct_h": 0.64,
+        "projected_at_reset": null,
+        "eta_100": null,
+        "confidence": "gathering"
+      }
+    },
+    {
+      "id": "seven_day_sonnet",
+      "label": "Weekly · Sonnet",
+      "scope": "sonnet",
+      "used_pct": 23.0,
+      "resets_at": 1792648800,
+      "window_s": 604800,
+      "elapsed_pct": 74.9,
+      "level": "ok",
+      "binding": false,
+      "pace": {
+        "rate_pct_h": null,
+        "sustainable_pct_h": 1.17,
+        "projected_at_reset": null,
+        "eta_100": null,
+        "confidence": "gathering"
+      }
+    }
+  ],
+  "overage": {
+    "enabled": true,
+    "used": 0.0,
+    "limit": 50.0,
+    "currency": "EUR",
+    "pct": 0.0
+  },
+  "sessions": [
+    {
+      "id": "s1",
+      "project": "claude-usage-tracker",
+      "cwd": "C:\\Dev\\claude-usage-tracker",
+      "state": "working",
+      "since": 1792496840,
+      "active": true,
+      "model": "claude-opus-5-5",
+      "context": {
+        "pct": 73.0,
+        "tokens": 146000,
+        "window": 200000
+      },
+      "tokens_5h": 1840000
+    },
+    {
+      "id": "s2",
+      "project": "acme-api",
+      "cwd": "C:\\Dev\\acme-api",
+      "state": "waiting",
+      "since": 1792496640,
+      "active": true,
+      "model": "claude-sonnet-5-5",
+      "context": {
+        "pct": 41.0,
+        "tokens": 82000,
+        "window": 200000
+      },
+      "tokens_5h": 920000
+    },
+    {
+      "id": "s3",
+      "project": "infra-terraform",
+      "cwd": "C:\\Dev\\infra",
+      "state": "waiting",
+      "since": 1792496160,
+      "active": false,
+      "model": "claude-sonnet-5-5",
+      "context": {
+        "pct": 19.0,
+        "tokens": 38000,
+        "window": 200000
+      },
+      "tokens_5h": 310000
+    },
+    {
+      "id": "s4",
+      "project": "docs-site",
+      "cwd": "C:\\Dev\\docs",
+      "state": "idle",
+      "since": 1792491480,
+      "active": false,
+      "model": "claude-haiku-4-5",
+      "context": {
+        "pct": 9.0,
+        "tokens": 18000,
+        "window": 200000
+      },
+      "tokens_5h": 95000
+    }
+  ],
+  "service": {
+    "indicator": "none",
+    "description": "All Systems Operational",
+    "url": "https://status.anthropic.com",
+    "affected": []
+  },
+  "team": {
+    "signed_in": true,
+    "email": "paris@acme.dev",
+    "role": "admin",
+    "team": "acme.dev",
+    "device_ok": true,
+    "pool": [
+      {
+        "email": "ops@acme.dev",
+        "name": "Ops",
+        "five_hour_pct": 18.0,
+        "five_hour_resets_at": 1792508700,
+        "seven_day_pct": 33.0,
+        "level": "ok",
+        "month_spend": 0.0,
+        "currency": "EUR",
+        "device": "OPS-LAPTOP",
+        "updated_at": 1792496820,
+        "is_me": false
+      },
+      {
+        "email": "paris@acme.dev",
+        "name": "Paris",
+        "five_hour_pct": 38.0,
+        "five_hour_resets_at": 1792503600,
+        "seven_day_pct": 41.0,
+        "level": "ok",
+        "month_spend": 0.0,
+        "currency": "EUR",
+        "device": "PARIS-DESK",
+        "updated_at": 1792496874,
+        "is_me": true
+      },
+      {
+        "email": "design@acme.dev",
+        "name": "Design",
+        "five_hour_pct": 91.0,
+        "five_hour_resets_at": 1792498800,
+        "seven_day_pct": 77.0,
+        "level": "watch",
+        "month_spend": 31.2,
+        "currency": "EUR",
+        "device": "STUDIO-MAC",
+        "updated_at": 1792496580,
+        "is_me": false
+      }
+    ]
+  },
+  "alerts": [],
+  "mute": {
+    "until": null,
+    "reason": null
+  },
+  "app": {
+    "version": "0.4.0",
+    "update": null,
+    "remote": {
+      "enabled": true,
+      "paired": true,
+      "relay_url": "https://claude-usage-relay.businessofzeus.workers.dev",
+      "last_sync": 1792496872
+    },
+    "overlay": {
+      "shown": true,
+      "pinned": false
+    }
+  }
+}

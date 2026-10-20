@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-usage-tracker"
-version = "0.3.0"
-description = "Windows tray widget + dashboard for Claude plan usage (5-hour & weekly limits)"
+version = "0.4.0"
+description = "Windows tray app, overlay and dashboard for Claude plan limits (5-hour & weekly), with pace forecasts"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -52,4 +52,11 @@ claude-usage-tracker = "claude_usage_tracker:main"
 claude-usage-tracker-gui = "claude_usage_tracker:main"
 
 [tool.setuptools]
-py-modules = ["claude_usage_tracker", "supabase_pool"]
+py-modules = ["claude_usage_tracker"]      # the entry shim; the code is the ctu package
+
+[tool.setuptools.packages.find]
+include = ["ctu", "ctu.*"]
+namespaces = false                         # ctu/ui is data, not a package
+
+[tool.setuptools.package-data]
+ctu = ["ui/**/*"]

@@ -1,10 +1,6 @@
-"""Team-mode unit tests — pure logic (report rows, ledger math, session control).
-The Supabase account pool replaced the old D1 join-code model; those tests were removed."""
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import claude_usage_tracker as m  # noqa: E402
+"""Team mode — pure logic (report rows, ledger maths, pool view, sync policy)."""
+import ctu.team as m
+from ctu import alltime, forecast
 
 
 # ---- report rows ------------------------------------------------------------
@@ -59,8 +55,8 @@ def test_month_spend_empty_and_junk():
 
 
 def test_prev_month():
-    assert m._prev_month("2026-07") == "2026-06"
-    assert m._prev_month("2026-01") == "2025-12"
+    assert m.prev_month("2026-07") == "2026-06"
+    assert m.prev_month("2026-01") == "2025-12"
 
 
 def _dev(used=None, ts=0, src="push", tok=None):
@@ -73,10 +69,10 @@ def _dev(used=None, ts=0, src="push", tok=None):
 
 
 def test_day_account_row_prefers_cron_then_newest():
-    assert m._day_account_row({"account": _dev(5, 10, "cron"), "d1": _dev(9, 99)})["extra"]["used"] == 5
-    assert m._day_account_row({"d1": _dev(1, 10), "d2": _dev(2, 20)})["extra"]["used"] == 2
-    assert m._day_account_row({}) is None
-    assert m._day_account_row(None) is None
+    assert m.day_account_row({"account": _dev(5, 10, "cron"), "d1": _dev(9, 99)})["extra"]["used"] == 5
+    assert m.day_account_row({"d1": _dev(1, 10), "d2": _dev(2, 20)})["extra"]["used"] == 2
+    assert m.day_account_row({}) is None
+    assert m.day_account_row(None) is None
 
 
 def test_ledger_computed_device_rows():
@@ -144,10 +140,10 @@ def test_device_month_tokens():
         "2026-07-01": {"in": 100, "out": 50, "cw": 10, "cr": 999, "msgs": 3},
         "2026-07-05": {"in": 1, "out": 2, "cw": 3, "cr": 0, "msgs": 1},
     }}
-    assert m.device_month_tokens(cache, "2026-07") == 166   # cr excluded, June excluded
-    assert m.device_month_tokens(cache, "2026-05") == 0
-    assert m.device_month_tokens({}, "2026-07") == 0
-    assert m.device_month_tokens(None, "2026-07") == 0
+    assert alltime.device_month_tokens(cache, "2026-07") == 166   # cr excluded, June excluded
+    assert alltime.device_month_tokens(cache, "2026-05") == 0
+    assert alltime.device_month_tokens({}, "2026-07") == 0
+    assert alltime.device_month_tokens(None, "2026-07") == 0
 
 
 def test_team_overview_compact():
@@ -172,23 +168,66 @@ def test_team_overview_compact():
     assert m.team_overview_compact(None) is None
 
 
-# ---- sync throttle + session-based enable -----------------------------------
+# ---- sync policy + session-based enable ------------------------------------
 
-def test_teamsync_due_throttle():
+def _signed_in(monkeypatch, pushed, matches=True):
+    monkeypatch.setattr(m.pool, "signed_in", lambda: True)
+    monkeypatch.setattr(m.pool, "device_matches", lambda: matches)
+    monkeypatch.setattr(m.pool, "push", lambda *a, **k: pushed.append(a) or True)
+    monkeypatch.setattr(m.pool, "device_id", lambda: "dev1")
+    monkeypatch.setattr(m.usage, "read_account", lambda: {"email": "a@x.com", "name": "A"})
+    monkeypatch.setattr(m.usage, "fetch_profile_org", lambda: None)
+
+
+def test_teamsync_pushes_on_change_plus_heartbeat(monkeypatch):
+    pushed = []
+    _signed_in(monkeypatch, pushed)
     ts = m.TeamSync()
-    assert ts.due(1000.0, 900)
-    assert not ts.due(1500.0, 900)
-    assert ts.due(1901.0, 900)
-    ts.reset_throttle()
-    assert ts.due(1902.0, 900)
+    snap = {"windows": [{"key": "five_hour", "pct": 10.0, "resets_at": None}], "extra": None}
+    cfg = {"team_tz": "UTC"}
+    assert ts.sync(snap, cfg, None, now=1000.0) and len(pushed) == 1
+    assert not ts.sync(snap, cfg, None, now=1010.0) and len(pushed) == 1         # unchanged: no push
+    snap2 = {"windows": [{"key": "five_hour", "pct": 11.0, "resets_at": None}], "extra": None}
+    assert ts.sync(snap2, cfg, None, now=1020.0) and len(pushed) == 2            # content changed
+    assert ts.sync(snap2, cfg, None, now=1020.0 + m.HEARTBEAT_S) and len(pushed) == 3   # heartbeat
+
+
+def test_teamsync_checks_device_every_5_min(monkeypatch):
+    pushed, calls = [], []
+    _signed_in(monkeypatch, pushed)
+    monkeypatch.setattr(m.pool, "device_matches", lambda: calls.append(1) or True)
+    ts = m.TeamSync()
+    snap = {"windows": [], "extra": None}
+    for t in (0.0, 30.0, 299.0):
+        ts.sync(snap, {}, None, now=1000.0 + t)
+    assert len(calls) == 1
+    ts.sync(snap, {}, None, now=1000.0 + m.DEVICE_CHECK_S)
+    assert len(calls) == 2
 
 
 def test_teamsync_enabled_tracks_session(monkeypatch):
-    monkeypatch.setattr(m.supabase_pool, "configured", lambda: True)
-    monkeypatch.setattr(m.supabase_pool, "has_session", lambda: False)
+    monkeypatch.setattr(m.pool, "configured", lambda: True)
+    monkeypatch.setattr(m.pool, "has_session", lambda: False)
     assert m.TeamSync.enabled({}) is False          # signed out -> disabled
-    monkeypatch.setattr(m.supabase_pool, "has_session", lambda: True)
+    monkeypatch.setattr(m.pool, "has_session", lambda: True)
     assert m.TeamSync.enabled({}) is True           # signed in -> enabled
+
+
+def test_pool_view_orders_by_headroom_and_marks_me():
+    merged = {"accounts": [
+        {"acct": "busy@x.com", "name": "Busy", "account": {"fh_pct": 91.0, "sd_pct": 77.0, "ts": 5,
+                                                           "fh_resets_at": "2099-01-01T00:00:00Z"}},
+        {"acct": "me@x.com", "name": "Me", "account": {"fh_pct": 64.0, "sd_pct": 41.0, "ts": 6,
+                                                       "extra": {"currency": "EUR"}}, "month_spend": 12.4},
+        {"acct": "free@x.com", "name": "Free", "account": {"fh_pct": 18.0, "sd_pct": 33.0, "ts": 7},
+         "last_used": {"device": "OPS-LAPTOP"}},
+    ]}
+    rows = m.pool_view(merged, "ME@x.com", None, 1000.0)
+    assert [r["email"] for r in rows] == ["free@x.com", "me@x.com", "busy@x.com"]
+    assert rows[1]["is_me"] and rows[1]["currency"] == "EUR" and rows[1]["month_spend"] == 12.4
+    assert rows[0]["device"] == "OPS-LAPTOP" and rows[0]["level"] == "ok" and rows[2]["level"] == "watch"
+    assert rows[2]["five_hour_resets_at"] == 4070908800
+    assert forecast.suggestion(rows, 64.0, "will_hit", 1000.0)["email"] == "free@x.com"
 
 
 # ---- currencies, role, team clock --------------------------------------------

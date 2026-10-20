@@ -1,0 +1,51 @@
+{
+  "_doc": "Response of GET /api/v2/team/ledger?month=YYYY-MM. Engine computes everything; the UI only formats. current_month (team clock) caps the month picker. state: live | end_of_day | closed. totals: one entry per currency. On failure: {\"ok\": false, \"error\": \"unreachable\" | message}.",
+  "month": "2026-10",
+  "current_month": "2026-10",
+  "tz": "Europe/Athens",
+  "updated_at": 1792496820,
+  "rows": [
+    {
+      "email": "design@acme.dev",
+      "name": "Design",
+      "spend": 31.2,
+      "currency": "EUR",
+      "tokens": 48200000,
+      "meter_end": 31.2,
+      "cap": 100.0,
+      "days": 20,
+      "state": "live",
+      "is_me": false
+    },
+    {
+      "email": "paris@acme.dev",
+      "name": "Paris",
+      "spend": 12.4,
+      "currency": "EUR",
+      "tokens": 39800000,
+      "meter_end": 12.4,
+      "cap": 50.0,
+      "days": 19,
+      "state": "live",
+      "is_me": true
+    },
+    {
+      "email": "ops@acme.dev",
+      "name": "Ops",
+      "spend": 0.0,
+      "currency": "EUR",
+      "tokens": 9100000,
+      "meter_end": 0.0,
+      "cap": null,
+      "days": 11,
+      "state": "end_of_day",
+      "is_me": false
+    }
+  ],
+  "totals": [
+    {
+      "currency": "EUR",
+      "spend": 43.6
+    }
+  ]
+}

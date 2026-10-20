@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en" class="ov-html">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Claude Usage overlay</title>
+<link rel="stylesheet" href="/assets/tokens.css">
+<link rel="stylesheet" href="/assets/base.css">
+<link rel="stylesheet" href="/assets/overlay.css">
+<script type="module" src="/assets/overlay.js"></script>
+</head>
+<body class="ov-body">
+<div id="ov" class="ov">
+  <button type="button" id="strip" class="strip strip--loading pywebview-drag-region" aria-expanded="false" aria-controls="panel">
+    <span class="strip-in">Claude usage · connecting…</span>
+  </button>
+  <section id="panel" class="panel" aria-label="Claude usage details" hidden></section>
+</div>
+<div id="live" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>

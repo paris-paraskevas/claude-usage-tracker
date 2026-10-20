@@ -1,19 +1,9 @@
-"""Supabase-hybrid account pool — stdlib client (no supabase-py).
+"""Supabase account pool: a stdlib client (urllib) for GoTrue (/auth/v1) and PostgREST (/rest/v1).
 
-Talks to GoTrue (`/auth/v1/*`) and PostgREST (`/rest/v1/*`) with urllib only, so the process
-that holds the Claude OAuth token pulls in NO extra dependency tree (closes supply-chain
-risk #8). The session (access + refresh) is persisted in the OS keychain via `keyring`; the
-access token is refreshed ahead of expiry with ROTATING refresh tokens — an out-of-window
-reuse revokes the family, so we always store and use the latest one, and treat an
-unexpected refresh failure as a forced re-login.
-
-Design: docs/SUPABASE-MIGRATION.md  ·  Schema/RLS: supabase/migrations/0001_pool.sql
-Boundary verified live 2026-07-08 against project sxciunvkygtehhztfjjo: signup stamps
-app_metadata.team/role into the JWT; authenticated reads are RLS-scoped; the connector RPCs
-are service_role-only (403 to authenticated).
-
-Deps: `keyring` (session storage). Publishable key ships in the binary — safe by design
-(RLS is the guard; `anon` is granted nothing).
+The session lives in the OS keychain (keyring). Refresh tokens rotate and a reused one revokes
+the family, so refreshes are serialised and an unexpected refresh failure forces a re-login.
+RLS is the isolation boundary; the publishable key is safe to ship.
+Design: docs/SUPABASE-MIGRATION.md · schema/RLS: supabase/migrations/0001_pool.sql
 """
 from __future__ import annotations
 
@@ -40,10 +30,8 @@ _DEVICE_PATH = Path(os.path.expanduser("~")) / ".claude-usage-tracker" / "device
 _TIMEOUT = 10
 _REFRESH_SKEW = 120  # refresh this many seconds before the access token expires
 
-# The session is read on every 10s tick by several threads (push, overview, whoami). Keep the
-# last-known value in memory so each tick doesn't hit the OS keychain repeatedly, and serialise
-# refreshes: with ROTATING refresh tokens, two threads refreshing at once means one of them
-# reuses a spent token -> 400 -> family revoked -> the user is silently signed out.
+# Several threads read the session: cache it in memory (one keychain read) and serialise refreshes
+# (two concurrent refreshes would reuse a spent rotating token and revoke the family).
 _SESSION_LOCK = threading.RLock()
 _session_cache: dict = {"loaded": False, "sess": None}
 
@@ -281,8 +269,8 @@ def claim_device() -> bool:
 
 
 def device_matches() -> bool:
-    """Soft device-lock self-check (call each poll tick). NOT the isolation boundary — RLS is.
-    True when no profile yet or the claimed device is this one."""
+    """Soft device-lock self-check (the engine runs it every 5 min). NOT the isolation boundary —
+    RLS is. True when no profile yet or the claimed device is this one."""
     tok, u = access_token(), uid()
     if not tok or not u:
         return True
@@ -292,7 +280,7 @@ def device_matches() -> bool:
     return resp[0].get("active_device_id") in (None, device_id())
 
 
-# --- push (~10s upsert) --------------------------------------------------------------------
+# --- push (on change + heartbeat) --------------------------------------------------------------------
 
 def push(row: dict, dev: dict, account: dict, local_date: str) -> bool:
     """Upsert the pooled account + today's usage row as the logged-in user (RLS-scoped).

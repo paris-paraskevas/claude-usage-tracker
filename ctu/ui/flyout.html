@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en" class="fly-html">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Claude Usage</title>
+<link rel="stylesheet" href="/assets/tokens.css">
+<link rel="stylesheet" href="/assets/base.css">
+<link rel="stylesheet" href="/assets/flyout.css">
+<script type="module" src="/assets/flyout.js"></script>
+</head>
+<body class="fly-body">
+<main id="fly" class="fly" aria-label="Claude usage summary">
+  <div class="fly-verdict" id="fly-verdict">
+    <span class="skel" style="width:16px;height:16px"></span>
+    <div class="fly-v-text"><div class="fly-title">Loading…</div></div>
+  </div>
+  <div id="fly-limits" class="fly-limits"></div>
+  <div id="fly-mute" class="fly-mute" hidden></div>
+  <div class="fly-btns">
+    <button type="button" class="fbtn" data-act="dashboard"><span data-icon="dashboard"></span><span>Dashboard</span></button>
+    <button type="button" class="fbtn" data-act="overlay" aria-pressed="false"><span data-icon="overlay"></span><span>Overlay</span></button>
+    <button type="button" class="fbtn" data-act="mute" aria-pressed="false"><span data-icon="bell-off"></span><span class="fbtn-label">Mute 1 h</span></button>
+  </div>
+  <div id="fly-err" class="fly-err" role="alert" hidden></div>
+</main>
+<div id="live" class="sr-only" aria-live="polite"></div>
+</body>
+</html>

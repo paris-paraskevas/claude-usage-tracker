@@ -1,15 +1,13 @@
 """supabase_pool: serialised token refresh, in-memory session cache, error propagation."""
 import json
-import sys
 import threading
 import time
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import supabase_pool as sp  # noqa: E402
-import claude_usage_tracker as m  # noqa: E402
+import ctu.team as team
+from ctu import usage
+from ctu.team import pool as sp
 
 
 class FakeKeyring:
@@ -94,15 +92,16 @@ def test_push_sends_hostname_as_device(pool, monkeypatch):
 
 def test_teamsync_pauses_when_device_claimed_elsewhere(monkeypatch):
     pushed = []
-    monkeypatch.setattr(m.supabase_pool, "signed_in", lambda: True)
-    monkeypatch.setattr(m.supabase_pool, "device_matches", lambda: False)
-    monkeypatch.setattr(m.supabase_pool, "push", lambda *a, **k: pushed.append(a) or True)
-    monkeypatch.setattr(m.supabase_pool, "device_id", lambda: "dev1")
-    ts = m.TeamSync()
+    monkeypatch.setattr(sp, "signed_in", lambda: True)
+    monkeypatch.setattr(sp, "device_matches", lambda: False)
+    monkeypatch.setattr(sp, "push", lambda *a, **k: pushed.append(a) or True)
+    monkeypatch.setattr(sp, "device_id", lambda: "dev1")
+    ts = team.TeamSync()
     ts.sync({"windows": []}, {})
     assert ts.device_ok is False and not pushed
-    monkeypatch.setattr(m.supabase_pool, "device_matches", lambda: True)
-    monkeypatch.setattr(m, "read_account", lambda: {"email": "a@x.com", "name": "A"})
-    monkeypatch.setattr(m, "fetch_profile_org", lambda: None)
+    monkeypatch.setattr(sp, "device_matches", lambda: True)
+    monkeypatch.setattr(usage, "read_account", lambda: {"email": "a@x.com", "name": "A"})
+    monkeypatch.setattr(usage, "fetch_profile_org", lambda: None)
+    ts.session_changed()                                    # e.g. "use it here" -> re-check now
     ts.sync({"windows": []}, {"team_tz": "Europe/Athens"})
     assert ts.device_ok is True and len(pushed) == 1

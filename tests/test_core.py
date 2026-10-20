@@ -1,29 +1,29 @@
-"""Unit tests for the pure-logic core (no GUI / network)."""
+"""Pure-logic core: parsing, models, transcripts, update check, config hygiene."""
 import json
-import sys
-import time
+import os
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import claude_usage_tracker as m  # noqa: E402
+from ctu import alltime, claude_cli, config, logtail, paths, remote, sessions, update, usage, v1
 
 
 def test_coerce_pct():
-    assert m._coerce_pct(80) == 80
-    assert m._coerce_pct(0.5) == 0.5          # already 0-100, not a fraction
-    assert m._coerce_pct(150) == 100          # clamped
-    assert m._coerce_pct(-5) == 0
-    assert m._coerce_pct(True) is None        # bool rejected
-    assert m._coerce_pct("x") is None
+    assert usage._coerce_pct(80) == 80
+    assert usage._coerce_pct(0.5) == 0.5          # already 0-100, not a fraction
+    assert usage._coerce_pct(150) == 100          # clamped
+    assert usage._coerce_pct(-5) == 0
+    assert usage._coerce_pct(True) is None        # bool rejected
+    assert usage._coerce_pct("x") is None
 
 
 def test_parse_reset():
-    assert m._parse_reset(None) is None
-    dt = m._parse_reset("2026-06-26T12:00:00Z")
-    assert dt is not None and dt.tzinfo is not None
-    assert m._parse_reset(1782490000) is not None     # epoch seconds
+    assert usage.parse_reset(None) is None
+    assert usage.parse_reset("2026-06-26T12:00:00Z") == 1782475200
+    assert usage.parse_reset("2026-06-26T12:00:00.400+00:00") == 1782475200
+    assert usage.parse_reset(1782490000) == 1782490000          # epoch seconds
+    assert usage.parse_reset(1782490000123) == 1782490000       # epoch ms
+    assert usage.parse_reset("garbage") is None
 
 
 def test_parse_windows():
@@ -33,8 +33,8 @@ def test_parse_windows():
         "seven_day_opus": None,
         "seven_day_sonnet": {"utilization": 0.0, "resets_at": None},
     }
-    w = m.parse_windows(data)
-    assert round(w["five_hour"]["pct"]) == 80
+    w = usage.parse_windows(data)
+    assert round(w["five_hour"]["pct"]) == 80 and w["five_hour"]["resets_at"] == 1782475200
     assert round(w["seven_day"]["pct"]) == 40
     assert "seven_day_opus" not in w                  # null skipped
     assert "seven_day_sonnet" not in w                # 0% + no reset skipped
@@ -44,82 +44,45 @@ def test_parse_extra():
     data = {"spend": {"enabled": True, "percent": 15,
                       "used": {"amount_minor": 771, "exponent": 2, "currency": "EUR"},
                       "limit": {"amount_minor": 5000, "exponent": 2, "currency": "EUR"}}}
-    e = m.parse_extra(data)
+    e = usage.parse_extra(data)
     assert e["enabled"] and e["currency"] == "EUR"
     assert abs(e["used"] - 7.71) < 1e-6 and abs(e["limit"] - 50.0) < 1e-6
     assert e["pct"] == 15
-    assert m.parse_extra({}) is None
+    assert usage.parse_extra({}) is None
 
 
-def test_project():
-    now = 1_000_000
-    ts = [now - 1800 + i * 300 for i in range(7)]
-    rising = [10, 15, 20, 25, 30, 35, 40]
-    rate, eta = m.project(ts, rising, 40, None, now)
-    assert rate and rate > 0 and eta and eta > 0
-    rate2, eta2 = m.project(ts, [40] * 7, 40, None, now)
-    assert eta2 is None                               # flat -> no ETA
-
-
-def test_bucket_of():
-    assert m.bucket_of(80, 20) == 80
-    assert m.bucket_of(99, 20) == 80
-    assert m.bucket_of(100, 20) == 100
-    assert m.bucket_of(19, 20) == 0
-
-
-def test_compute_verdict():
-    assert m.compute_verdict([{"key": "five_hour", "pct": 10}])["level"] == "ok"
-    assert m.compute_verdict([{"key": "five_hour", "pct": 85}])["level"] == "caution"
-    assert m.compute_verdict([{"key": "seven_day", "pct": 97}])["level"] == "stop"
-    assert m.compute_verdict([{"key": "five_hour", "pct": 10, "eta_seconds": 3000}])["level"] == "caution"
-    v = m.compute_verdict([{"key": "five_hour", "pct": 100}])
-    assert v["level"] == "over" and v["text"] == "At limit"          # 100% is no longer "Near limit"
-    assert m.compute_verdict([{"key": "five_hour", "pct": 100},
-                              {"key": "seven_day", "pct": 30}])["level"] == "over"
-
-
-def test_check_danger(monkeypatch):
-    from datetime import datetime, timezone
-    fired = []
-    monkeypatch.setattr(m, "notify", lambda *a, **k: fired.append(a[0]))
-    reset = datetime(2026, 6, 27, 23, 59, tzinfo=timezone.utc)
-    state, cfg = {}, {"danger_alerts": True}
-
-    def win(pct):
-        return {"five_hour": {"pct": pct, "resets_at": reset}}
-
-    m.check_danger(win(90), state, cfg);  assert not fired          # below the zone -> silent
-    m.check_danger(win(95), state, cfg);  assert len(fired) == 1    # crossing into 95
-    m.check_danger(win(95), state, cfg);  assert len(fired) == 1    # same percent -> no repeat
-    m.check_danger(win(94), state, cfg);  assert len(fired) == 1    # dropping -> no fire
-    m.check_danger(win(98), state, cfg);  assert len(fired) == 2    # new high -> one fire (no backfill spam)
-    m.check_danger(win(100), state, cfg); assert len(fired) == 3 and "100%" in fired[-1]
-    m.check_danger(win(99), {}, {"danger_alerts": False})           # disabled -> silent (fresh state)
-    assert len(fired) == 3
+def test_read_token_and_plan_follow_the_file(data_dir):
+    assert usage.read_token() == (None, usage.TokenState.MISSING)
+    paths.CREDS_PATH.write_text(json.dumps({"claudeAiOauth": {"accessToken": "t", "expiresAt": 1,
+                                                              "subscriptionType": "pro"}}), encoding="utf-8")
+    assert usage.read_token() == ("t", usage.TokenState.EXPIRED)
+    assert usage.read_plan() == "pro"
+    paths.CREDS_PATH.write_text(json.dumps({"claudeAiOauth": {"accessToken": "t2", "expiresAt": 9e15,
+                                                              "subscriptionType": "max"}}), encoding="utf-8")
+    os.utime(paths.CREDS_PATH, (1, 1))                 # a different mtime -> re-read
+    assert usage.read_token() == ("t2", usage.TokenState.OK) and usage.read_plan() == "max"
 
 
 def test_vtuple():
-    assert m._vtuple("0.1.10") > m._vtuple("0.1.9")
-    assert m._vtuple("0.2.0") > m._vtuple("0.1.99")
+    assert update.vtuple("0.1.10") > update.vtuple("0.1.9")
+    assert update.vtuple("0.2.0") > update.vtuple("0.1.99")
 
 
-def test_scan_sessions(tmp_path, monkeypatch):
-    proj = tmp_path / "C--Dev-foo"
-    proj.mkdir()
-    rows_in = []
-    for i in range(3):
-        rows_in.append(json.dumps({
-            "timestamp": f"2026-06-26T12:00:0{i}.000Z",
-            "cwd": r"C:\Dev\foo",
-            "message": {"model": "claude-opus-4-8", "usage": {
-                "input_tokens": 1000, "output_tokens": 500,
-                "cache_creation_input_tokens": 200, "cache_read_input_tokens": 300000}},
-        }))
+def test_scan_sessions(data_dir):
+    proj = paths.PROJECTS_DIR / "C--Dev-foo"
+    proj.mkdir(parents=True)
+    rows_in = [json.dumps({
+        "timestamp": f"2026-06-26T12:00:0{i}.000Z", "cwd": r"C:\Dev\foo",
+        "message": {"model": "claude-opus-4-8", "usage": {
+            "input_tokens": 1000, "output_tokens": 500,
+            "cache_creation_input_tokens": 200, "cache_read_input_tokens": 300000}},
+    }) for i in range(3)]
     (proj / "sess.jsonl").write_text("\n".join(rows_in), encoding="utf-8")
-    monkeypatch.setattr(m, "PROJECTS_DIR", tmp_path)
-
-    rows = m.scan_sessions({}, time.time(), window_s=10 ** 9)
+    tr = sessions.SessionTracker(window_s=10 ** 9)
+    import time
+    now = time.time()
+    logtail.LogTailer([tr]).poll(now)
+    rows = sessions.v1_rows(tr.build(now), now)
     assert len(rows) == 1
     r = rows[0]
     assert r["name"] == "foo"
@@ -129,30 +92,20 @@ def test_scan_sessions(tmp_path, monkeypatch):
 
 
 def test_pretty_model():
-    assert m.pretty_model("claude-opus-4-8") == "Opus 4.8"
-    assert m.pretty_model("claude-fable-5") == "Fable 5"
-    assert m.pretty_model("claude-opus-5-5") == "Opus 5.5"
-    assert m.pretty_model("claude-sonnet-5-5") == "Sonnet 5.5"
-    assert m.pretty_model("claude-fable-5-1") == "Fable 5.1"
-    assert m.pretty_model("claude-sonnet-4-6") == "Sonnet 4.6"
-    assert m.pretty_model("claude-haiku-4-5-20251001") == "Haiku 4.5"   # date suffix dropped
-    assert m.pretty_model("<synthetic>") == "Other"
-    assert m.pretty_model(None) == "Other"
+    assert alltime.pretty_model("claude-opus-4-8") == "Opus 4.8"
+    assert alltime.pretty_model("claude-fable-5") == "Fable 5"
+    assert alltime.pretty_model("claude-opus-5-5") == "Opus 5.5"
+    assert alltime.pretty_model("claude-sonnet-5-5") == "Sonnet 5.5"
+    assert alltime.pretty_model("claude-fable-5-1") == "Fable 5.1"
+    assert alltime.pretty_model("claude-sonnet-4-6") == "Sonnet 4.6"
+    assert alltime.pretty_model("claude-haiku-4-5-20251001") == "Haiku 4.5"   # date suffix dropped
+    assert alltime.pretty_model("<synthetic>") == "Other"
+    assert alltime.pretty_model(None) == "Other"
 
 
-def test_make_icon_image_small_pct():
-    # Regression: tiny non-zero pct (just after a window reset) used to invert the
-    # fill rectangle -> Pillow "y1 must be greater than or equal to y0" -> icon froze.
-    pytest.importorskip("PIL")   # GUI dep; CI's logic-core job runs without Pillow
-    for pct in (0.0, 0.3, 0.5, 1, 2, 3, 3.9, 4, 50, 99.9, 100):
-        img = m.make_icon_image({"five_hour": {"pct": pct}, "seven_day": {"pct": pct}})
-        assert img.size == (64, 64) and img.mode == "RGBA"
-    assert m.make_icon_image({}, error=True).size == (64, 64)
-
-
-def test_read_transcript(tmp_path, monkeypatch):
-    proj = tmp_path / "C--Dev-foo"
-    proj.mkdir()
+def test_read_transcript(data_dir):
+    proj = paths.PROJECTS_DIR / "C--Dev-foo"
+    proj.mkdir(parents=True)
     lines = [
         json.dumps({"timestamp": "2026-06-26T12:00:00Z", "cwd": r"C:\Dev\foo",
                     "message": {"role": "user", "content": "hello claude"}}),
@@ -163,18 +116,16 @@ def test_read_transcript(tmp_path, monkeypatch):
                     "message": {"role": "user", "content": [{"type": "tool_result", "content": "x"}]}}),
     ]
     (proj / "s.jsonl").write_text("\n".join(lines), encoding="utf-8")
-    monkeypatch.setattr(m, "PROJECTS_DIR", tmp_path)
-
-    t = m.read_transcripts(limit=1)[0]
+    t = remote.read_transcripts(limit=1)[0]
     assert t["name"] == "foo"
     assert [x["role"] for x in t["messages"]] == ["user", "assistant"]   # tool_result-only msg skipped
     assert t["messages"][0]["text"] == "hello claude"
     assert "hi there" in t["messages"][1]["text"] and "[ran Read]" in t["messages"][1]["text"]
 
 
-def test_scan_all_time(tmp_path, monkeypatch):
-    proj = tmp_path / "C--Dev-foo"
-    proj.mkdir()
+def test_scan_all_time(data_dir):
+    proj = paths.PROJECTS_DIR / "C--Dev-foo"
+    proj.mkdir(parents=True)
     lines = []
     for i in range(2):                                   # 2 Opus messages, session s1
         lines.append(json.dumps({
@@ -189,14 +140,11 @@ def test_scan_all_time(tmp_path, monkeypatch):
             "cache_creation_input_tokens": 5, "cache_read_input_tokens": 1000}}}))
     f = proj / "sess.jsonl"
     f.write_text("\n".join(lines), encoding="utf-8")
-    monkeypatch.setattr(m, "PROJECTS_DIR", tmp_path)
-
-    # Pin "now" to the data's own day so the period windows deterministically cover it.
     import datetime as _dt
     now = _dt.datetime(2026, 6, 26, 18, 0, 0).timestamp()
 
     cache = {}
-    a = m.scan_all_time(cache, now)
+    a = alltime.scan_all_time(cache, now)
     allp = a["periods"]["all"]
     assert allp["tokens"] == (100 + 50 + 10) * 2 + (200 + 30 + 5)   # cache reads excluded
     assert a["total"]["cr"] == 9000 * 2 + 1000                      # tracked separately
@@ -209,33 +157,30 @@ def test_scan_all_time(tmp_path, monkeypatch):
     assert a["streak_current"] >= 1 and a["streak_longest"] >= 1
     assert a["heatmap"]["days"]                                     # non-empty grid
 
-    # Incremental: a new-session line is folded in once (no re-read, no double count).
-    with open(f, "a", encoding="utf-8") as fh:
+    with open(f, "a", encoding="utf-8") as fh:                      # incremental: folded once
         fh.write("\n" + json.dumps({
             "timestamp": "2026-06-26T14:00:00.000Z", "cwd": r"C:\Dev\foo", "sessionId": "s2",
             "message": {"model": "claude-opus-4-8", "usage": {
                 "input_tokens": 1, "output_tokens": 1,
                 "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}}))
-    a2 = m.scan_all_time(cache, now)
+    a2 = alltime.scan_all_time(cache, now)
     assert a2["total"]["msgs"] == 4
     assert a2["periods"]["all"]["tokens"] == (100 + 50 + 10) * 2 + (200 + 30 + 5) + 2
-    assert a2["periods"]["all"]["sessions"] == 2                    # two distinct sessions
-
-    # A second scan with no changes is a no-op (totals stable).
-    a3 = m.scan_all_time(cache, now)
+    assert a2["periods"]["all"]["sessions"] == 2
+    a3 = alltime.scan_all_time(cache, now)                          # unchanged file: no-op
     assert a3["periods"]["all"]["tokens"] == a2["periods"]["all"]["tokens"]
     assert a3["total"]["msgs"] == 4
+    v = alltime.view(cache, now, "7d")
+    assert v["range"] == "7d" and len(v["series"]) == 7 and v["tokens"] == a2["periods"]["7"]["tokens"]
+    assert v["peak_hour"] in range(24) and v["projects_scope"] == "all" and v["compare"] is None
+    c = alltime.compact(cache, now)
+    assert set(c["periods"]["all"]) >= {"tokens", "messages", "sessions", "fav_model"}
 
 
-def test_read_transcripts_lists_recent_conversations(tmp_path, monkeypatch):
-    """Bug 1 (phone "can't pick which session to chat in"): the desktop must mirror the
-    recent conversations newest-first, each with its cwd, so the phone can pick one."""
-    import os
-    monkeypatch.setattr(m, "PROJECTS_DIR", tmp_path)
-
+def test_read_transcripts_lists_recent_conversations(data_dir):
     def write(proj, cwd, msgs, mtime):
-        d = tmp_path / proj
-        d.mkdir()
+        d = paths.PROJECTS_DIR / proj
+        d.mkdir(parents=True)
         f = d / "session.jsonl"
         lines = [{"cwd": cwd, "timestamp": "2026-06-30T10:00:00.000Z",
                   "message": {"role": r, "content": c}} for (r, c) in msgs]
@@ -243,86 +188,98 @@ def test_read_transcripts_lists_recent_conversations(tmp_path, monkeypatch):
         os.utime(f, (mtime, mtime))
 
     write("a", r"C:\Dev\projA", [("user", "hello A"), ("assistant", "hi A")], 1000)
-    write("b", r"C:\Dev\projB", [("user", "hello B")], 2000)   # more recently active
-
-    ts = m.read_transcripts(limit=6)
+    write("b", r"C:\Dev\projB", [("user", "hello B")], 2000)
+    ts = remote.read_transcripts(limit=6)
     assert [t["name"] for t in ts] == ["projB", "projA"]        # newest first
     assert ts[0]["cwd"] == r"C:\Dev\projB"
     assert ts[0]["messages"][0]["text"] == "hello B"
 
 
 def test_project_name():
-    """The shared basename helper now feeds 6 call sites — lock its edge cases."""
-    assert m.project_name(r"C:\Dev\foo", "fb") == "foo"          # Windows path
-    assert m.project_name("/home/u/bar", "fb") == "bar"          # POSIX path
-    assert m.project_name("C:\\Dev\\foo\\", "fb") == "foo"       # trailing separator
-    assert m.project_name("", "fb") == "fb"                       # no cwd → fallback
-    assert m.project_name(None, "fb") == "fb"
-    assert m.project_name("/", "sess") == "sess"                  # empty basename → fallback
+    assert logtail.project_name(r"C:\Dev\foo", "fb") == "foo"
+    assert logtail.project_name("/home/u/bar", "fb") == "bar"
+    assert logtail.project_name("C:\\Dev\\foo\\", "fb") == "foo"
+    assert logtail.project_name("", "fb") == "fb"
+    assert logtail.project_name(None, "fb") == "fb"
+    assert logtail.project_name("/", "sess") == "sess"
 
 
 def test_safe_login_email_blocks_shell_injection():
-    """`email` reaches launch_login from the localhost endpoint; only a plain address survives,
-    so it can't inject shell metacharacters into the visible `cmd /k` path."""
-    assert m._safe_login_email("user@example.com") == "user@example.com"
-    assert m._safe_login_email('x" & calc.exe & "y@e.com') is None    # quotes + & → rejected
-    assert m._safe_login_email("a b@e.com") is None                   # space → rejected
-    assert m._safe_login_email("no-at-sign") is None
-    assert m._safe_login_email(None) is None
-    assert m._safe_login_email("") is None
+    assert claude_cli.safe_login_email("user@example.com") == "user@example.com"
+    assert claude_cli.safe_login_email('x" & calc.exe & "y@e.com') is None
+    assert claude_cli.safe_login_email("a b@e.com") is None
+    assert claude_cli.safe_login_email("no-at-sign") is None
+    assert claude_cli.safe_login_email(None) is None
+    assert claude_cli.safe_login_email("") is None
 
 
-def test_remote_sync_throttle():
-    """The RemoteSync coordinator's throttle decisions are unit-testable (they used to be
-    tangled into the poll loop). There is no in-flight guard — only the time throttle."""
-    rs = m.RemoteSync()
-    assert rs.due(100.0, 60) is True       # first call → due, arms the window at t=100
-    assert rs.due(130.0, 60) is False      # +30s, under the 60s interval
-    assert rs.due(170.0, 60) is True       # +70s from the armed window → due again
-    rs.reset_throttle()
-    assert rs.due(171.0, 60) is True       # manual "sync now" forces the next window
-    assert m.RemoteSync.enabled({}) is False   # not enabled without config/pynacl
+def test_remote_sync_pushes_on_change_plus_heartbeat():
+    rs = remote.RemoteSync()
+    snap = {"ok": True, "windows": [{"key": "five_hour", "pct": 40, "resets_at": 1, "level": "ok"}]}
+    assert rs.due(snap, 100.0, 10) is True             # never pushed
+    rs._last_hash, rs._last_push = remote.significant(snap), 100.0
+    assert rs.due(snap, 105.0, 10) is False            # inside the min gap
+    t = 100.0 + remote.HEARTBEAT_S - 5
+    assert rs.due(snap, t, 10) is False                # unchanged, before the heartbeat
+    drift = {**snap, "windows": [{**snap["windows"][0], "pace": {"sustainable_pct_h": 9.9}}]}
+    assert rs.due(drift, t, 10) is False               # pace drift alone isn't a change
+    changed = {**snap, "windows": [{**snap["windows"][0], "pct": 41}]}
+    assert rs.due(changed, t, 10) is True
+    assert remote.HEARTBEAT_S + 10 <= 60               # job cadence + heartbeat: the phone sees <= 60 s gaps
+    assert rs.due(snap, 100.0 + remote.HEARTBEAT_S, 10) is True
+    rs.force()
+    assert rs.due(snap, 101.0, 10) is True             # manual "sync now"
+    assert remote.RemoteSync.enabled({}) is False
 
 
-def test_read_transcripts_exposes_session_id(tmp_path, monkeypatch):
-    """Each mirrored conversation carries its session_id (the .jsonl stem) so the phone can
-    send it back to resume that exact session."""
-    monkeypatch.setattr(m, "PROJECTS_DIR", tmp_path)
-    d = tmp_path / "proj"; d.mkdir()
+def test_read_transcripts_exposes_session_id(data_dir):
+    d = paths.PROJECTS_DIR / "proj"
+    d.mkdir(parents=True)
     (d / "abc123.jsonl").write_text(
         json.dumps({"cwd": r"C:\Dev\foo", "timestamp": "2026-06-30T10:00:00.000Z",
                     "message": {"role": "user", "content": "hi"}}), encoding="utf-8")
-    ts = m.read_transcripts(limit=1)
+    ts = remote.read_transcripts(limit=1)
     assert ts and ts[0]["session_id"] == "abc123"
 
 
-def test_build_snapshot_rate_steady_vs_unknown(monkeypatch):
-    monkeypatch.setattr(m, "read_oauth", lambda: {})
-    monkeypatch.setattr(m, "read_account", lambda: None)
-    now = time.time()
-    r = m.FetchResult(True, windows={"five_hour": {"pct": 40.0, "resets_at": None}})
-    flat = {"t": [int(now - 1800 + i * 300) for i in range(7)], "five_hour": [40] * 7, "seven_day": [5] * 7}
-    w = m.build_snapshot(r, flat, {})["windows"][0]
-    assert w["rate_per_hour"] == 0                                 # flat -> 0 ("steady"), not None
-    w = m.build_snapshot(r, {"t": [], "five_hour": [], "seven_day": []}, {})["windows"][0]
-    assert w["rate_per_hour"] is None                              # no samples -> "gathering rate…"
-
-
 def test_usage_bands_are_distinct():
-    cols = [m.usage_style(p)[0] for p in (10, 65, 85, 95, 100)]
-    assert len(set(cols)) == 5                                     # 80/90/100 no longer near-identical
+    cols = [v1.usage_style(p)[0] for p in (10, 65, 85, 95, 100)]
+    assert len(set(cols)) == 5
+
+
+def test_v1_verdict_maps_decision_levels():
+    assert v1.verdict({"level": "ok", "title": "On pace"}) == {"level": "ok", "color": "#5e9e72", "text": "On pace"}
+    assert v1.verdict({"level": "watch", "title": "x"})["level"] == "caution"
+    assert v1.verdict({"level": "will_hit", "title": "x"})["level"] == "stop"
+    assert v1.verdict({"level": "limited", "title": "5-hour limit reached"})["level"] == "over"
 
 
 def test_check_latest_uses_pypi_for_pip_installs(monkeypatch):
-    monkeypatch.setattr(m, "check_github_latest", lambda: ("9.9.9", "https://x/Setup.exe"))
-    monkeypatch.setattr(m, "check_pypi_latest", lambda: "0.3.0")
-    monkeypatch.setattr(m, "_is_installed_pkg", lambda: True)
-    assert m.check_latest() == ("0.3.0", None)                     # pip upgrades from PyPI
-    monkeypatch.setattr(m, "_is_installed_pkg", lambda: False)
-    assert m.check_latest() == ("9.9.9", "https://x/Setup.exe")
+    monkeypatch.setattr(update, "check_github_latest", lambda: ("9.9.9", "https://x/Setup.exe"))
+    monkeypatch.setattr(update, "check_pypi_latest", lambda: "0.3.0")
+    monkeypatch.setattr(update, "is_installed_pkg", lambda: True)
+    assert update.check_latest() == ("0.3.0", None)
+    monkeypatch.setattr(update, "is_installed_pkg", lambda: False)
+    assert update.check_latest() == ("9.9.9", "https://x/Setup.exe")
 
 
 def test_config_has_no_dead_keys():
-    for k in ("team_share_token", "alltime_days"):
-        assert k not in m.DEFAULT_CONFIG and k not in m.CONFIG_ALLOW
-    assert not hasattr(m, "remote_decrypt")
+    for k in ("team_share_token", "alltime_days", "threshold_step", "danger_alerts", "widget_width",
+              "bar_fields", "open_as_window", "show_widget_on_start", "history_cap"):
+        assert k not in config.DEFAULTS and k not in config.SCHEMA
+    assert not hasattr(remote, "remote_decrypt")
+
+
+def test_version_bumped():
+    import ctu
+    import claude_usage_tracker as shim
+    assert ctu.__version__ == shim.__version__ == "0.4.0"
+    toml = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'version = "0.4.0"' in toml
+
+
+@pytest.mark.parametrize("argv", [["--version"]])
+def test_shim_main(argv, capsys):
+    import claude_usage_tracker as shim
+    assert shim.main(argv) == 0
+    assert "0.4.0" in capsys.readouterr().out

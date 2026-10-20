@@ -1,5 +1,5 @@
-"""Remove Claude Usage Tracker shortcuts (Desktop, Start Menu, Startup) and its
-optional Claude Code "session waiting" Stop hook from ~/.claude/settings.json.
+"""Remove Claude Usage Tracker shortcuts (Desktop, Start Menu, Startup) and its Claude Code
+integration (the session hooks and the statusLine command) from ~/.claude/settings.json.
 
     python uninstall.py
 
@@ -20,22 +20,22 @@ PS = (
 
 
 def remove_hook() -> bool:
-    """Strip our --session-hook entry from ~/.claude/settings.json (other hooks are kept;
-    an unparseable file is left untouched). Uses the app's own logic from this checkout."""
+    """Strip our --session-hook / --statusline entries from ~/.claude/settings.json (everything
+    else is kept; an unparseable file is left untouched). Uses the app's own logic."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     try:
-        import claude_usage_tracker as cut
+        from ctu.install import remove_claude_integration
     except Exception as exc:
-        print(f"Could not load the app to remove its Claude Code hook: {exc}")
+        print(f"Could not load the app to remove its Claude Code hooks: {exc}")
         return False
-    return cut.remove_session_hook()
+    return remove_claude_integration()
 
 
 if __name__ == "__main__":
     subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", PS])
     print("Shortcuts removed.")
     if remove_hook():
-        print("Session-waiting hook removed from ~/.claude/settings.json (if it was installed).")
+        print("Hooks and status line removed from ~/.claude/settings.json (if they were installed).")
     else:
-        print("Couldn't update ~/.claude/settings.json — remove the '--session-hook' Stop hook by hand.")
+        print("Couldn't update ~/.claude/settings.json — remove the '--session-hook' / '--statusline' entries by hand.")
     print("Stop a running instance from its tray icon (Quit).")
