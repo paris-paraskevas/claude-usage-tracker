@@ -23,12 +23,27 @@ object Prefs {
     /** A paired desktop: its [pairing] secrets + an optional display [label] (defaults to org). */
     data class Account(val pairing: Pairing, val label: String?)
 
-    private fun sp(ctx: Context): SharedPreferences {
-        val key = MasterKey.Builder(ctx)
+    private const val K_PUSH_TOKEN = "push_token"        // last FCM token we registered with the relay
+    private const val K_PUSH_SENT_AT = "push_token_sent"  // epoch ms of that registration
+
+    // Building the MasterKey + EncryptedSharedPreferences is expensive (Keystore round-trips,
+    // Tink keyset parse), and this is hit from the UI, the widget and workers — so build it once
+    // per process and reuse it. Double-checked locking keeps it thread-safe.
+    // NOTE: androidx.security-crypto is deprecated; we keep it (migrating stored pairings to a
+    // different scheme is out of scope) but no longer rebuild it on every call.
+    @Volatile private var cached: SharedPreferences? = null
+
+    private fun sp(ctx: Context): SharedPreferences =
+        cached ?: synchronized(this) {
+            cached ?: create(ctx.applicationContext).also { cached = it }
+        }
+
+    private fun create(app: Context): SharedPreferences {
+        val key = MasterKey.Builder(app)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
             .build()
         return EncryptedSharedPreferences.create(
-            ctx, FILE, key,
+            app, FILE, key,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
         )
@@ -120,8 +135,15 @@ object Prefs {
         }
     }
 
-    /** Forget every account. */
+    /** Forget every account (and the push-token bookkeeping that went with them). */
     fun clear(ctx: Context) {
         sp(ctx).edit().clear().apply()
     }
+
+    /** The FCM token last registered with the relay, and when (epoch ms; 0 = never). */
+    fun pushToken(ctx: Context): String? = sp(ctx).getString(K_PUSH_TOKEN, null)
+    fun pushTokenSentAt(ctx: Context): Long = sp(ctx).getLong(K_PUSH_SENT_AT, 0L)
+
+    fun setPushTokenSent(ctx: Context, token: String, atMs: Long) =
+        sp(ctx).edit().putString(K_PUSH_TOKEN, token).putLong(K_PUSH_SENT_AT, atMs).apply()
 }

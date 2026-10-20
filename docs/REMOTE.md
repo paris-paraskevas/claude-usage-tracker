@@ -4,9 +4,9 @@ This is the frozen contract shared by the three components of the optional remot
 feature: the **desktop** tracker (producer), a **relay** (Cloudflare Worker, dumb
 pipe), and the **Android app** (consumer). It is **off by default** and **opt-in**.
 
-> The same Worker also serves the optional **team mode** (`/v1/team/...`) with a
-> deliberately different trust model (plaintext numbers on the admin-owned relay)
-> — that contract lives in [TEAM.md](TEAM.md). Nothing below is affected by it.
+> Team mode no longer runs through the relay: since v0.3 the account pool lives in
+> Supabase (see [TEAM.md](TEAM.md)). The same Worker also hosts the claude.ai connector,
+> which reads the pool from Supabase. Nothing below is affected by either.
 
 > **Scope:** Android only for now — **no iOS support** (iOS Web/native push and the
 > store process are out of scope for v1). The relay and crypto are platform-neutral, so
@@ -121,14 +121,15 @@ keep the logic in one place and stay compatible with E2EE.)
 1. **Cloudflare:** `cd relay && npm i`, create a KV namespace **and** a D1 database
    (`npx wrangler d1 create claude-usage-team` → `npx wrangler d1 execute
    claude-usage-team --file=schema.sql`), set both IDs in `wrangler.toml`,
-   `npx wrangler deploy`. Note the Worker URL. (D1 backs the snapshot + team storage;
-   KV backs auth/tokens/commands.)
+   `npx wrangler deploy`. Note the Worker URL. (D1 backs the snapshots and the connector's
+   OAuth tables; KV backs the auth hashes and push tokens.)
 2. **Firebase (FCM):** create a project, add an Android app (package
    `com.claudeusage.tracker`), download `google-services.json` → `android/app/`. Create a
    service account, download its JSON, set the three `FCM_*` Worker secrets
    (`npx wrangler secret put ...`).
-3. **Desktop:** `pip install "claude-usage-tracker[remote]"` (adds `pynacl`, `qrcode`),
-   enable **Settings → Remote**, paste the Worker URL, scan the QR with the app.
+3. **Desktop:** the remote dependencies (`pynacl`, `qrcode`) ship by default. Enable
+   **Settings → Remote**, keep the default hosted relay or paste your own Worker URL, and
+   scan the QR with the app.
 4. **Android:** build `android/` (`./gradlew assembleDebug`), sideload the APK, scan the QR.
 
 See each subdir's README for specifics.

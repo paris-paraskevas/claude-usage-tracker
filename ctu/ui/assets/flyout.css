@@ -1,0 +1,56 @@
+/* Tray flyout: the whole window is the surface (≈300 × 216 px natural size). */
+
+html.fly-html, body.fly-body { margin: 0; height: 100%; background: var(--layer); overflow: hidden; }
+.fly {
+  box-sizing: border-box;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--stroke);
+  font-size: 13px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.fly-verdict { display: flex; gap: 8px; align-items: flex-start; }
+.fly-verdict .lvl-icon { margin-top: 2px; }
+.fly-v-text { min-width: 0; }
+.fly-title { font-weight: 600; font-size: 14px; line-height: 20px; }
+.fly-cap { font-size: 12px; line-height: 16px; color: var(--text-2); }
+.fly-limits { display: flex; flex-direction: column; gap: 10px; }
+.fly-limit { display: flex; flex-direction: column; gap: 6px; }
+.fly-row { display: flex; justify-content: space-between; }
+.fly-mute { display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 16px; color: var(--text-2); }
+.fly-btns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: auto; }
+.fbtn {
+  min-height: 52px;
+  border-radius: 6px;
+  border: 1px solid var(--stroke-control);
+  background: var(--card);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  cursor: pointer;
+  padding: 6px 4px;
+}
+.fbtn span[data-icon] { display: inline-flex; }
+.fbtn:hover { background: color-mix(in srgb, var(--card) 92%, var(--text)); }
+.fbtn:active { background: color-mix(in srgb, var(--card) 86%, var(--text)); }
+.fbtn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.fbtn[aria-pressed="true"]:hover { background: var(--accent-hover); }
+.fbtn:disabled { opacity: 0.6; cursor: progress; }
+.fly-err { font-size: 12px; line-height: 16px; color: var(--hit-text); }
+
+@media (forced-colors: active) {
+  .fly { border-color: CanvasText; }
+  .fbtn { border: 1px solid ButtonText; }
+  .fbtn[aria-pressed="true"] { forced-color-adjust: none; background: Highlight; color: HighlightText; border-color: Highlight; }
+}

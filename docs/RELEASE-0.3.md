@@ -1,5 +1,7 @@
 # Release v0.3.0 — team mode → Supabase account pool
 
+> Historical record. v0.4.0 rebuilt the desktop app: `supabase_pool.py` now lives at `ctu/team/pool.py`, and the UI described below was replaced — see `docs/RELEASE-0.4.md`. The open gates listed here (legal read, DPA, Supabase Pro, CAPTCHA, `worker_reader`) still apply.
+
 Team mode moves off the D1 relay + join codes to a **Supabase account pool** with
 **email-OTP sign-in (team = your email domain)**. Distribution decision: **hosted for
 everyone** — the app ships with the maintainer's Supabase URL + publishable key, so every

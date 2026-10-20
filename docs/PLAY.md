@@ -14,8 +14,6 @@ relay is multi-tenant and zero-knowledge; each user gets their own keys via the 
 - Relay: your Worker is live at `https://claude-usage-relay.businessofzeus.workers.dev`.
   Consider a **custom domain** (e.g. `relay.yourapp.com`) so a personal subdomain isn't
   baked into the public desktop app.
-- Desktop: set `remote_relay_url` default to your production relay so users don't deploy
-  anything (ask me to do this once you've picked the domain).
 - Firebase: one project provides FCM for all users (see step 4).
 
 ## 1. Generate YOUR upload key (replace the throwaway one)
@@ -42,9 +40,13 @@ your *upload* key — recoverable if lost, but treat it as a secret.
 
 ```
 cd android
-gradlew bundleRelease            # or the Gradle you already have
+./gradlew :app:bundleRelease     # Windows: gradlew.bat :app:bundleRelease
 # -> app/build/outputs/bundle/release/app-release.aab
 ```
+Needs JDK 17+ and the Android SDK (`local.properties` with `sdk.dir=…`, or `ANDROID_HOME`);
+the Gradle wrapper is in the repo. Bump `versionCode`/`versionName` in
+`android/app/build.gradle.kts` first (currently 16 / 0.3.0). Sanity checks before uploading:
+`./gradlew :app:assembleDebug :app:lintDebug`.
 
 ## 3. Play Console account (you, in a browser)
 
@@ -88,7 +90,7 @@ gradlew bundleRelease            # or the Gradle you already have
 ## Division of labor
 
 - **I can do:** build/sign the AAB, generate icon + screenshots + listing text + privacy
-  policy, set the desktop default relay URL, set relay FCM secrets, rebuild with Firebase.
+  policy, set relay FCM secrets, rebuild with Firebase.
 - **Only you can do:** Play Console account + identity verification, hosting the privacy
   policy URL, Firebase project + service-account key (browser, your Google account), filling
   the Data safety / content-rating forms, and clicking submit.

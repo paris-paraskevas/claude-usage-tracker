@@ -26,5 +26,5 @@ if __name__ == "__main__":
     print("Installing dependencies…")
     subprocess.run([str(PY), "-m", "pip", "install", "--disable-pip-version-check",
                     "-q", "-r", str(ROOT / "requirements.txt")], check=True)
-    # Generate the icon and run the interactive shortcut/autostart setup.
+    # Generate the icon and run the interactive shortcut/autostart setup (ctu.install).
     subprocess.run([str(PY), str(SCRIPT), "--install"])

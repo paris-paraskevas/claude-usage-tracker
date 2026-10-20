@@ -47,3 +47,27 @@ jobs:
           fi
           echo "$out" | grep -qE 'STATUS:|ERROR:' \
             || { echo "::error::run_once produced no recognizable output"; exit 1; }
+
+  node:
+    # Relay Worker + local MCP server. Zero-dependency tests (node:test, node:sqlite for a
+    # fake D1), so no npm install is needed.
+    name: Node tests (relay + mcp + desktop UI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Syntax check
+        run: |
+          node --check relay/src/index.js
+          node --check mcp/server.mjs
+      - name: Relay tests
+        working-directory: relay
+        run: npm test
+      - name: MCP tests
+        working-directory: mcp
+        run: npm test
+      - name: Desktop UI tests (formatting, runway chart)
+        working-directory: tests/ui
+        run: npm test

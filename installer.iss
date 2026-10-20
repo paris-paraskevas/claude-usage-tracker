@@ -54,5 +54,14 @@ Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: st
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName} now"; Flags: nowait postinstall
 
+[UninstallRun]
+; Remove our Claude Code integration (the session hooks and the statusLine command) from
+; ~/.claude/settings.json while the exe still exists — otherwise Claude Code would keep invoking a
+; deleted binary on every turn. Leaves every other hook/setting untouched and never rewrites an
+; unparseable settings file.
+; (Runs as the uninstalling user; an elevated all-users uninstall by a different admin account
+; can't reach the original user's profile — they can run `ClaudeUsageTracker.exe --remove-hook` first.)
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--remove-hook"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveClaudeIntegration"
+
 [Messages]
 FinishedLabel=Setup is done. To pin it to the taskbar, launch the app, then right-click its taskbar icon and choose "Pin to taskbar" (Windows doesn't allow apps to do this automatically).

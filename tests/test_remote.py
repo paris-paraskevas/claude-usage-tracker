@@ -2,13 +2,11 @@
 (PyNaCl) isn't installed, so the core test job stays dependency-light."""
 import base64
 import json
-import sys
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import claude_usage_tracker as m  # noqa: E402
+from ctu import paths
+from ctu import remote as m
 
 pytestmark = pytest.mark.skipif(not m.remote_available(),
                                 reason="PyNaCl (the 'remote' extra) not installed")
@@ -16,7 +14,7 @@ pytestmark = pytest.mark.skipif(not m.remote_available(),
 
 @pytest.fixture
 def tmp_identity(tmp_path, monkeypatch):
-    monkeypatch.setattr(m, "REMOTE_PATH", tmp_path / "remote.json")
+    monkeypatch.setattr(paths, "REMOTE_PATH", tmp_path / "remote.json")
     monkeypatch.setattr(m, "_remote_id_cache", None)
     yield
 
@@ -48,13 +46,12 @@ def test_two_blobs_use_distinct_nonces(tmp_identity):
     assert b1["nonce"] != b2["nonce"] and b1["ct"] != b2["ct"]    # random nonce per message
 
 
-def test_remote_command_decrypt_roundtrip(tmp_identity):
-    # The phone enqueues an E2EE command; the desktop decrypts it with the shared key.
+def test_pair_uri_without_create_never_mints(tmp_identity):
+    # GET /api/pair-qr path: a read must not create the pairing identity as a side effect.
+    assert m.remote_pair_uri({"remote_relay_url": "https://w.example.dev"}, create=False) is None
+    assert m.load_remote_identity(create=False) is None
     m.load_remote_identity(create=True)
-    blob = m.remote_encrypt({"type": "prompt", "text": "hello claude"})
-    assert m.remote_decrypt(blob) == {"type": "prompt", "text": "hello claude"}
-    assert m.remote_decrypt({"nonce": "AA", "ct": "AA"}) is None  # garbage -> None
-    assert m.remote_decrypt({}) is None
+    assert m.remote_pair_uri({"remote_relay_url": "https://w.example.dev"}, create=False)
 
 
 def test_pair_uri(tmp_identity):
@@ -84,3 +81,13 @@ def test_unpair_forgets_identity(tmp_identity):
     m.load_remote_identity(create=True)
     m.unpair_remote()
     assert m.load_remote_identity(create=False) is None
+
+
+def test_pair_action_returns_svg_qr_and_enables_sync(make_engine):
+    e = make_engine()
+    code, r = e.action("remote_pair", {})
+    assert code == 200 and r["ok"] and r["qr_svg"].startswith("<svg") and r["qr"] == "/api/v2/remote/qr"
+    assert e.cfg["remote_enabled"] is True and e.snapshot()["app"]["remote"]["paired"] is True
+    assert m.remote_pair_qr_png(e.cfg, create=False)[:4] == b"\x89PNG"
+    code, r = e.action("remote_unpair", {})
+    assert r["ok"] and e.cfg["remote_enabled"] is False and e.snapshot()["app"]["remote"]["paired"] is False

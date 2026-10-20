@@ -1,0 +1,57 @@
+{
+  "_doc": "GET /api/v2/settings returns this object; PATCH takes any subset with the same nesting (e.g. {\"alerts\": {\"will_hit\": false}}) and returns the full validated object. status_components_available is read-only (optional). opacity: integer 30-100. refresh_s: seconds. overlay.fields: enabled fields, in display order.",
+  "alerts": {
+    "will_hit": true,
+    "limited": true,
+    "refilled": true,
+    "context_high": true,
+    "overage_high": true,
+    "session_waiting": true,
+    "needs_approval": true,
+    "incident": false
+  },
+  "quiet_hours": {
+    "enabled": false,
+    "start": "22:00",
+    "end": "08:00"
+  },
+  "status_components": [
+    "claude.ai",
+    "Claude Code",
+    "Claude API (api.anthropic.com)"
+  ],
+  "status_components_available": [
+    "claude.ai",
+    "Claude Code",
+    "Claude API (api.anthropic.com)",
+    "Claude Console (platform.claude.com)"
+  ],
+  "overlay": {
+    "fields": [
+      "5h",
+      "7d",
+      "ctx",
+      "waiting",
+      "status"
+    ],
+    "click_through": false,
+    "opacity": 90,
+    "auto_hide_fullscreen": true
+  },
+  "remote": {
+    "enabled": true,
+    "relay_url": "https://claude-usage-relay.businessofzeus.workers.dev",
+    "transcript": false
+  },
+  "team": {
+    "tz": "Europe/Athens"
+  },
+  "data": {
+    "statusline_installed": true,
+    "refresh_s": 60
+  },
+  "about": {
+    "version": "0.4.0",
+    "update_check": true
+  }
+}

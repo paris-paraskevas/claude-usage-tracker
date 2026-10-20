@@ -1,105 +1,25 @@
--- Claude Usage Tracker relay — team-mode schema (Cloudflare D1 / SQLite).
--- Apply:  npx wrangler d1 execute claude-usage-team --file=schema.sql            (remote)
---         npx wrangler d1 execute claude-usage-team --local --file=schema.sql     (local dev)
--- Phone sync stays in KV (E2EE blobs); only team mode lives here. See docs/TEAM.md.
-
-CREATE TABLE IF NOT EXISTS teams (
-  tid        TEXT PRIMARY KEY,
-  admin_hash TEXT NOT NULL,                    -- sha256(admin readToken), trust-on-first-use
-  tz         TEXT NOT NULL DEFAULT 'Europe/Athens',
-  org        TEXT                              -- Claude org uuid; null = org binding off
-);
-
--- A person/device enrolled to REPORT (auth only). The admin mints the token; what a
--- reporter pushes is keyed by the Claude ACCOUNT it is logged into, not by the reporter.
--- `name` is the teammate's label, surfaced as "last used by" on each pooled account.
-CREATE TABLE IF NOT EXISTS members (
-  tid        TEXT NOT NULL,
-  mid        TEXT NOT NULL,
-  token_hash TEXT NOT NULL,                    -- sha256(member readToken)
-  name       TEXT,
-  PRIMARY KEY (tid, mid)
-);
-
--- The POOL: one row per shared Claude account, auto-discovered as reporters log into it
--- (org-verified against teams.org). acct = stable key (lowercased email).
-CREATE TABLE IF NOT EXISTS accounts (
-  tid   TEXT NOT NULL,
-  acct  TEXT NOT NULL,
-  email TEXT,
-  name  TEXT,                                  -- Claude display name
-  org   TEXT,                                  -- org uuid (must match teams.org)
-  PRIMARY KEY (tid, acct)
-);
-
--- One row per ACCOUNT per reporting DEVICE per LOCAL day. did='account' is the cron's row.
--- Re-keyed from member→account: a device that switches Claude logins writes a distinct row
--- per account, so the pool never collapses two accounts into one member.
-CREATE TABLE IF NOT EXISTS usage_rows (
-  tid            TEXT NOT NULL,
-  date           TEXT NOT NULL,                -- YYYY-MM-DD in the team's tz
-  acct           TEXT NOT NULL,                -- the pooled Claude account (lowercased email)
-  did            TEXT NOT NULL,
-  name           TEXT,                         -- account display name (denormalized)
-  by_name        TEXT,                         -- teammate who drove it (reporter) — "last used by"
-  fh_pct         REAL,
-  sd_pct         REAL,
-  fh_resets_at   TEXT,
-  sd_resets_at   TEXT,
-  extra_enabled  INTEGER,                      -- NULL = no extra block; else 0/1
-  extra_used     REAL,
-  extra_limit    REAL,
-  extra_currency TEXT,
-  extra_pct      REAL,
-  tok_month      INTEGER,
-  device         TEXT,                         -- reporting hostname; NULL for the cron 'account' row
-  src            TEXT,                         -- 'push' | 'cron'
-  ts             INTEGER,                      -- report time (epoch seconds)
-  wts            INTEGER,                      -- last write (epoch ms) — the per-device throttle
-  PRIMARY KEY (tid, date, acct, did)
-);
-CREATE INDEX IF NOT EXISTS idx_usage_tid_date ON usage_rows (tid, date);
-
--- Frozen month-end row per ACCOUNT (written by the 23:59 cron on the last local day). Never pruned.
-CREATE TABLE IF NOT EXISTS finals (
-  tid            TEXT NOT NULL,
-  month          TEXT NOT NULL,                -- YYYY-MM
-  acct           TEXT NOT NULL,
-  name           TEXT,
-  by_name        TEXT,
-  fh_pct         REAL,
-  sd_pct         REAL,
-  fh_resets_at   TEXT,
-  sd_resets_at   TEXT,
-  extra_enabled  INTEGER,
-  extra_used     REAL,
-  extra_limit    REAL,
-  extra_currency TEXT,
-  extra_pct      REAL,
-  tok_month      INTEGER,
-  ts             INTEGER,
-  PRIMARY KEY (tid, month, acct)
-);
-
--- Sealed OAuth token PER ACCOUNT so the cron can refresh each pooled account's usage even
--- when nobody is logged into it right now (keeps the pool near-live).
-CREATE TABLE IF NOT EXISTS escrow (
-  tid  TEXT NOT NULL,
-  acct TEXT NOT NULL,
-  iv   TEXT NOT NULL,                          -- AES-GCM nonce (b64url)
-  ct   TEXT NOT NULL,                          -- sealed access token (b64url)
-  exp  INTEGER NOT NULL,                       -- token expiry (epoch ms)
-  PRIMARY KEY (tid, acct)
-);
+-- Claude Usage Tracker relay — D1 (SQLite) schema for a FRESH database.
+-- Apply:  npx wrangler d1 execute claude-usage-team --remote --file=schema.sql   (remote)
+--         npx wrangler d1 execute claude-usage-team --local  --file=schema.sql   (local dev)
+-- Upgrading an existing database instead? Apply the files in migrations/ (see relay/README.md).
+--
+-- What lives where:
+--   D1 (this file) — phone-sync snapshot ciphertext + the claude.ai connector's OAuth state.
+--   KV             — per-account phone-sync auth hash and FCM push-token set.
+--   Supabase       — the team account pool itself (read by the connector via service_role RPCs).
+-- The old D1 team stack (teams/members/accounts/usage_rows/finals/escrow) is gone; see
+-- migrations/0002_drop_team_stack.sql.
 
 -- OAuth 2.1 provider (docs/MCP-REMOTE.md) for the claude.ai remote MCP connector.
--- Codes + tokens are stored as sha256 hashes (never raw). Consent authenticates the
--- team admin (they paste their admin token), binding the grant to a tid.
+-- Codes and tokens are stored only as sha256 hashes. Consent takes a connector token (minted by
+-- a team admin in the desktop app); `tid` is the team (email domain) it resolved to, and
+-- `ct_hash` is sha256(connector token) so every request can re-check it hasn't been revoked.
 CREATE TABLE IF NOT EXISTS oauth_clients (
   client_id     TEXT PRIMARY KEY,
-  redirect_uris TEXT NOT NULL,                 -- JSON array of exact-match redirect URIs
-  name          TEXT,
-  created       INTEGER
+  redirect_uris TEXT NOT NULL,                 -- JSON array of exact-match redirect URIs (≤5)
+  name          TEXT,                          -- client_name (≤64 chars), shown on the consent page
+  created       INTEGER,                       -- epoch ms
+  used          INTEGER                        -- epoch ms of the last grant/refresh; NULL = never used
 );
 CREATE TABLE IF NOT EXISTS oauth_codes (
   code_hash      TEXT PRIMARY KEY,             -- sha256(authorization code)
@@ -107,17 +27,33 @@ CREATE TABLE IF NOT EXISTS oauth_codes (
   redirect_uri   TEXT NOT NULL,
   code_challenge TEXT NOT NULL,                -- PKCE S256 challenge
   tid            TEXT NOT NULL,                -- team this grant authorizes
-  exp            INTEGER NOT NULL              -- short-lived (epoch ms)
+  exp            INTEGER NOT NULL,             -- short-lived (epoch ms)
+  ct_hash        TEXT                          -- sha256(connector token) the grant came from
 );
 CREATE TABLE IF NOT EXISTS oauth_tokens (
   token_hash TEXT PRIMARY KEY,                 -- sha256(access token)
   tid        TEXT NOT NULL,
-  exp        INTEGER NOT NULL                  -- epoch ms
+  exp        INTEGER NOT NULL,                 -- epoch ms
+  ct_hash    TEXT                              -- sha256(connector token); NULL rows are rejected
+);
+CREATE TABLE IF NOT EXISTS oauth_refresh (
+  token_hash TEXT PRIMARY KEY,                 -- sha256(refresh token); rotated on every use
+  client_id  TEXT NOT NULL,
+  tid        TEXT NOT NULL,
+  ct_hash    TEXT NOT NULL,
+  exp        INTEGER NOT NULL                  -- epoch ms (90 days from issue)
+);
+-- Dynamic Client Registration rate limit: registrations per (hashed) client IP per clock hour.
+CREATE TABLE IF NOT EXISTS oauth_reg_rl (
+  ip  TEXT NOT NULL,                           -- truncated sha256 of CF-Connecting-IP
+  win INTEGER NOT NULL,                        -- epoch hour
+  n   INTEGER NOT NULL,
+  PRIMARY KEY (ip, win)
 );
 
--- Phone-sync snapshots. Moved off KV so the desktop can push every ~10s without
+-- Phone-sync snapshots. In D1 (not KV) so the desktop can push every ~10s without
 -- blowing KV's 1,000-writes/day free cap (D1 allows 100k/day). Still E2EE: the row
--- holds only the opaque ciphertext blob; the auth-token hash stays in KV. The cron
+-- holds only the opaque ciphertext blob; the auth-token hash stays in KV. The daily cron
 -- prunes rows past `exp` (KV used to expire these automatically).
 CREATE TABLE IF NOT EXISTS snapshots (
   account_id TEXT PRIMARY KEY,

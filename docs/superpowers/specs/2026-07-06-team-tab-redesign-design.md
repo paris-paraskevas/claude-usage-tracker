@@ -1,5 +1,7 @@
 # Team tab v2 — roster with per-device tokens & calendar-month €
 
+> **Status (2026-10): superseded** by the account pool (#42) and the Supabase pool (v0.3.0). Historical record only; see `docs/TEAM.md`.
+
 Approved 2026-07-06 (visual mockup: `.superpowers/brainstorm/*/content/layout-v2.html`).
 Reshapes the Team tab built earlier the same day (docs/TEAM.md) **before first release** —
 no live deployments, so schema changes need no migration.

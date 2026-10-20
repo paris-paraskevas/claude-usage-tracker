@@ -1,51 +1,51 @@
 package com.claudeusage.tracker.ui
 
+import android.Manifest
+import android.content.Intent
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.repeatOnLifecycle
-import androidx.compose.foundation.Canvas
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ViewList
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Button
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -57,100 +57,63 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
-import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.glance.appwidget.updateAll
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.claudeusage.tracker.ExtraUsage
+import com.claudeusage.tracker.Notifications
 import com.claudeusage.tracker.Pairing
+import com.claudeusage.tracker.PoolAccount
 import com.claudeusage.tracker.Prefs
-import com.claudeusage.tracker.RelayClient
-import com.claudeusage.tracker.Msg
-import com.claudeusage.tracker.Sess
 import com.claudeusage.tracker.Snap
-import com.claudeusage.tracker.TeamMember
 import com.claudeusage.tracker.TeamOverview
 import com.claudeusage.tracker.Transcript
-import com.claudeusage.tracker.Win
-import com.claudeusage.tracker.widget.UsageWidget
 import com.claudeusage.tracker.widget.WidgetData
 import com.claudeusage.tracker.widget.updateLockNotification
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
-private val MONO = FontFamily.Monospace
+/** Pending destructive action awaiting confirmation: "remove:<accountId>" or "unpair". */
+private const val CONFIRM_UNPAIR = "unpair"
+private const val CONFIRM_REMOVE = "remove:"
 
 @Composable
-fun DashboardScreen(onUnpair: () -> Unit) {
+fun DashboardScreen(
+    onUnpaired: () -> Unit,
+    onPairedNew: () -> Unit,
+    vm: DashboardViewModel = viewModel(),
+) {
     val ctx = LocalContext.current
-    val scope = rememberCoroutineScope()
-
-    var accounts by remember { mutableStateOf(Prefs.all(ctx)) }
-    var activeId by remember { mutableStateOf(Prefs.activeId(ctx)) }
-    var snap by remember { mutableStateOf<Snap?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var tab by rememberSaveable { mutableStateOf("home") }
     var ctxSel by rememberSaveable { mutableStateOf<String?>(null) }   // which session drives the Context gauge
-    var chatSel by rememberSaveable { mutableStateOf<String?>(null) }  // which conversation the Chat tab shows
+    var chatSel by rememberSaveable { mutableStateOf<String?>(null) }  // which mirrored conversation is shown
+    var confirm by rememberSaveable { mutableStateOf<String?>(null) }
 
-    val reload: suspend () -> Unit = reload@{
-        val p = Prefs.active(ctx) ?: return@reload          // always the currently-active account
-        val reqId = p.accountId
-        try {
-            val js = RelayClient(p).fetchSnapshot()
-            // If the user switched accounts while this request was in flight, drop the result so
-            // the previous account's data can't bleed into the now-active one.
-            if (Prefs.activeId(ctx) != reqId) return@reload
-            if (js == null) {
-                error = null                                // not synced yet — show the waiting state
-            } else {
-                val parsed = Snap.parse(js)
-                snap = parsed; error = null
-                // learn this account's label from its org so the switcher reads nicely
-                val cur = Prefs.all(ctx).firstOrNull { it.pairing.accountId == p.accountId }
-                if (cur?.label.isNullOrBlank() && parsed.org.isNotBlank()) {
-                    Prefs.setLabel(ctx, p.accountId, parsed.org); accounts = Prefs.all(ctx)
-                }
-                WidgetData.saveSnap(ctx, js)                // keep the home-screen widget + lock-screen notif current
-                runCatching { UsageWidget().updateAll(ctx) }
-                updateLockNotification(ctx)
-            }
-        } catch (e: Exception) {
-            if (Prefs.activeId(ctx) != reqId) return@reload  // switched mid-flight — ignore this account's error
-            error = e.message ?: "Couldn't reach the relay"
-        }
-    }
+    LaunchedEffect(Unit) { vm.syncFromPrefs() }
 
     val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
         result.contents?.let { Pairing.parse(it.trim()) }?.let { p ->
-            Prefs.add(ctx, p); accounts = Prefs.all(ctx); activeId = p.accountId
-            snap = null; error = null
-            scope.launch { reload() }
-            registerFcmToken(ctx)                           // let the new desktop push this phone too
+            vm.added(p)
+            onPairedNew()
         }
     }
     val addAccount: () -> Unit = {
@@ -161,57 +124,166 @@ fun DashboardScreen(onUnpair: () -> Unit) {
                 .setPrompt("Scan the pairing QR from another desktop"),
         )
     }
-    val switchTo: (String) -> Unit = { id ->
-        if (id != activeId) {
-            Prefs.setActive(ctx, id); activeId = id; snap = null; error = null
-            scope.launch { reload() }
-        }
-    }
-    val removeAccount: (String) -> Unit = { id ->
-        Prefs.remove(ctx, id); accounts = Prefs.all(ctx); activeId = Prefs.activeId(ctx)
-        if (accounts.isEmpty()) onUnpair() else { snap = null; error = null; scope.launch { reload() } }
-    }
+    val askRemove: (String) -> Unit = { id -> confirm = CONFIRM_REMOVE + id }
 
-    // Poll fast until the first snapshot lands, then settle; the 1s ticker drives countdowns.
+    // Poll fast until the first live snapshot lands, then settle; the 1s ticker drives countdowns.
     // Both are gated to STARTED so they pause when the app is backgrounded (no battery/network
     // drain off-screen — the WorkManager job keeps the widget fresh meanwhile).
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(Unit) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            while (true) { reload(); delay(if (snap == null) 5_000L else 20_000L) }
+            while (true) {
+                vm.reload()
+                delay(if (vm.snap == null || vm.fromCache) 5_000L else 20_000L)
+            }
         }
     }
     LaunchedEffect(Unit) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            while (true) { delay(1_000); now = System.currentTimeMillis() }
+            while (true) { now = System.currentTimeMillis(); delay(1_000) }
         }
     }
 
-    val s = snap
+    ConfirmDialogs(
+        pending = confirm, accounts = vm.accounts,
+        onDismiss = { confirm = null },
+        onRemove = { id -> confirm = null; if (vm.remove(id)) onUnpaired() },
+        onUnpairAll = { confirm = null; vm.unpairAll(); onUnpaired() },
+    )
+
+    val s = vm.snap
     if (s == null) {
         Box(
             Modifier.fillMaxSize().background(Bg).windowInsetsPadding(WindowInsets.safeDrawing).padding(24.dp),
             contentAlignment = Alignment.Center,
         ) {
-            if (error == null) WaitingForSync()
-            else ErrorState(error!!) { scope.launch { reload() } }
+            val err = vm.error
+            if (err == null) WaitingForSync()
+            else ErrorState(err, onRetry = { vm.refresh() },
+                onRemove = vm.activeId?.let { id -> { askRemove(id) } })
         }
         return
     }
 
+    val hasTeam = s.teamOverview != null
+    val hasConversation = s.transcripts.isNotEmpty() || s.mirrorOn
+    val tabs = buildList {
+        add("home")
+        add(if (hasTeam) "team" else "sessions")
+        if (hasConversation) add("conversation")
+        add("history")
+        add("settings")
+    }
+    val current = if (tab in tabs) tab else "home"
+
     Scaffold(
         containerColor = Bg,
-        bottomBar = { BottomNav(s.teamOverview != null, tab) { tab = it } },
+        bottomBar = { BottomNav(tabs, current) { tab = it } },
     ) { inner ->
-        when (tab) {
-            "home" -> OverviewPage(s, now, inner, accounts, activeId, switchTo, addAccount,
-                ctxSel, onCtxSel = { ctxSel = it }) { scope.launch { reload() } }
-            "team" -> TeamPage(s, inner)
-            "sessions" -> SessionsPage(s, inner)
-            "chat" -> ChatPage(s, inner, chatSel, onChatSel = { chatSel = it })
-            "history" -> StatsPage(s, inner)
-            else -> SettingsPage(s, Prefs.active(ctx), now, inner, accounts, activeId,
-                switchTo, addAccount, removeAccount) { scope.launch { reload() } }
+        Column(Modifier.fillMaxSize().padding(inner).consumeWindowInsets(inner)) {
+            StatusBanners(s, vm.error, now, onRetry = { vm.refresh() })
+            Box(Modifier.weight(1f)) {
+                when (current) {
+                    "home" -> HomePage(s, now, vm.accounts, vm.activeId, vm::switchTo, addAccount,
+                        ctxSel, onCtxSel = { ctxSel = it }, onRefresh = { vm.refresh() })
+                    "team" -> TeamPage(s, now)
+                    "sessions" -> SessionsPage(s)
+                    "conversation" -> ConversationPage(s, chatSel, onChatSel = { chatSel = it })
+                    "history" -> HistoryPage(s)
+                    else -> SettingsPage(s, Prefs.active(ctx), now, vm.lastOkAt, vm.accounts, vm.activeId,
+                        addAccount, askRemove, onUnpairAll = { confirm = CONFIRM_UNPAIR }, onRefresh = { vm.refresh() })
+                }
+            }
+        }
+    }
+}
+
+// ---- banners + dialogs ----------------------------------------------------
+
+/** Non-blocking problems shown above every page while data is on screen: our own refresh
+ *  failing (with Retry), and the desktop reporting it can't read usage (login expired, etc.). */
+@Composable
+private fun StatusBanners(s: Snap, error: String?, now: Long, onRetry: () -> Unit) {
+    val desktopProblem: Pair<String, Boolean>? = when {
+        s.loginExpired ->
+            "Your desktop's Claude login has expired — run any Claude Code command on the desktop to refresh it." to true
+        !s.ok && s.error != null && s.error.contains("waiting for Claude Code", ignoreCase = true) -> null
+        !s.ok && s.error != null -> "Desktop couldn't read usage: ${s.error}" to false
+        else -> null
+    }
+    if (error == null && desktopProblem == null) return
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(top = 8.dp)) {
+        if (error != null) {
+            Banner(
+                text = (if (s.updatedAt > 0) "Couldn't refresh — showing data from ${ago(ageSeconds(s.updatedAt, now))}. "
+                else "Couldn't refresh — showing the last data. ") + error,
+                color = Warn, action = "Retry", onAction = onRetry,
+            )
+        }
+        desktopProblem?.let { (msg, severe) ->
+            if (error != null) Spacer(Modifier.height(6.dp))
+            Banner(text = msg, color = if (severe) Danger else Warn, action = null, onAction = null)
+        }
+    }
+}
+
+@Composable
+private fun Banner(text: String, color: Color, action: String?, onAction: (() -> Unit)?) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(color.copy(alpha = 0.14f))
+            .padding(start = 12.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.Warning, contentDescription = null, tint = color, modifier = Modifier.size(18.dp))
+        Text(text, color = Ink, style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.weight(1f).padding(horizontal = 10.dp, vertical = 6.dp))
+        if (action != null && onAction != null) {
+            TextButton(onClick = onAction, modifier = Modifier.heightIn(min = 48.dp)) { Text(action, color = Accent) }
+        }
+    }
+}
+
+@Composable
+private fun ConfirmDialogs(
+    pending: String?, accounts: List<Prefs.Account>,
+    onDismiss: () -> Unit, onRemove: (String) -> Unit, onUnpairAll: () -> Unit,
+) {
+    if (pending == null) return
+    when {
+        pending == CONFIRM_UNPAIR -> AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Unpair this phone?") },
+            text = {
+                Text("All ${accounts.size} desktops are removed from this phone and it stops receiving " +
+                    "their alerts. You can pair again any time by scanning a desktop's QR.")
+            },
+            confirmButton = { TextButton(onClick = onUnpairAll) { Text("Unpair", color = Danger) } },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        )
+        pending.startsWith(CONFIRM_REMOVE) -> {
+            val id = pending.removePrefix(CONFIRM_REMOVE)
+            val acc = accounts.firstOrNull { it.pairing.accountId == id }
+            if (acc == null) {                       // already gone (e.g. removed elsewhere)
+                LaunchedEffect(pending) { onDismiss() }
+                return
+            }
+            val name = acc.label?.ifBlank { null } ?: id.take(8)
+            val last = accounts.size <= 1
+            AlertDialog(
+                onDismissRequest = onDismiss,
+                title = { Text(if (last) "Unpair “$name”?" else "Remove “$name”?") },
+                text = {
+                    Text(
+                        (if (last) "This is the only paired desktop, so this phone will be unpaired. "
+                        else "This phone stops showing this desktop's usage. ") +
+                            "Its alerts stop too. You can pair again by scanning its QR."
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = { onRemove(id) }) { Text(if (last) "Unpair" else "Remove", color = Danger) }
+                },
+                dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+            )
         }
     }
 }
@@ -219,54 +291,120 @@ fun DashboardScreen(onUnpair: () -> Unit) {
 // ---- pages ----------------------------------------------------------------
 
 @Composable
-private fun OverviewPage(
-    s: Snap, now: Long, inner: PaddingValues,
+private fun HomePage(
+    s: Snap, now: Long,
     accounts: List<Prefs.Account>, activeId: String?, onSwitch: (String) -> Unit, onAddAccount: () -> Unit,
     ctxSel: String?, onCtxSel: (String?) -> Unit, onRefresh: () -> Unit,
 ) {
-    PageScroll(inner) {
+    PageScroll {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             AccountSwitcher(s, accounts, activeId, onSwitch, onAddAccount, Modifier.weight(1f))
-            s.statusWord?.let { StatusChip(it, hexColor(s.statusColor)) }
+            s.statusWord?.let { StatusChip(it, hexColor(s.statusColor, Dim)) }
             IconButton(onClick = onRefresh) { Icon(Icons.Filled.Refresh, "Refresh", tint = Dim) }
         }
-
-        s.verdictText?.takeIf { it.isNotBlank() }?.let {
-            Spacer(Modifier.height(16.dp)); VerdictBanner(it, hexColor(s.verdictColor))
+        SyncLine(s.updatedAt, now)
+        if (s.deviceOk == false) {
+            Text("This pooled account is also in use on another device.", color = Warn,
+                style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 2.dp))
         }
 
-        val five = s.wins.firstOrNull { it.key == "five_hour" }
-        val week = s.wins.firstOrNull { it.key == "seven_day" }
-
-        Spacer(Modifier.height(28.dp))
-        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-            GaugeStat(
-                label = "5-hour limit",
-                pct = five?.pct,
-                color = hexColor(five?.color, usageColor(five?.pct ?: 0.0)),
-                sub = five?.let { fmtCountdown(it.resetsAt, now) },
-                dim = 188.dp, big = true,
-            )
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val wide = maxWidth >= 600.dp
+            if (wide) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+                    Column(Modifier.weight(1f)) {
+                        Spacer(Modifier.height(20.dp))
+                        Gauges(s, now, ctxSel, onCtxSel, maxWidth / 2)
+                    }
+                    Column(Modifier.weight(1f)) {
+                        Spacer(Modifier.height(16.dp))
+                        HomeDetails(s, now)
+                    }
+                }
+            } else {
+                Column(Modifier.fillMaxWidth()) {
+                    s.verdictText?.let { Spacer(Modifier.height(16.dp)); VerdictBanner(it, hexColor(s.verdictColor, Dim)) }
+                    Spacer(Modifier.height(24.dp))
+                    Gauges(s, now, ctxSel, onCtxSel, maxWidth)
+                    HomeDetails(s, now, showVerdict = false)
+                }
+            }
         }
-        Spacer(Modifier.height(28.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+    }
+}
+
+/** Hero 5h gauge + weekly/context pair (stacked when they wouldn't fit side by side, e.g. at a
+ *  large font scale). */
+@Composable
+private fun Gauges(s: Snap, now: Long, ctxSel: String?, onCtxSel: (String?) -> Unit, avail: androidx.compose.ui.unit.Dp) {
+    val five = s.fiveHour
+    val week = s.sevenDay
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        GaugeStat(
+            label = "5-hour limit", pct = five?.pct,
+            color = hexColor(five?.color, usageColor(five?.pct ?: 0.0)),
+            sub = five?.let { fmtCountdown(it.resetsAt, now) },
+            detail = burnLine(five),
+            dim = gaugeSize(188.dp, avail), big = true,
+            spoken = spokenWindow("5-hour window", five?.pct, five?.resetsAt, now) +
+                (burnLine(five)?.let { ". Burn rate $it" } ?: ""),
+        )
+    }
+    Spacer(Modifier.height(24.dp))
+    val small = gaugeSize(128.dp)
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val weekly: @Composable () -> Unit = {
             GaugeStat("Weekly", week?.pct, hexColor(week?.color, usageColor(week?.pct ?: 0.0)),
-                week?.let { fmtCountdown(it.resetsAt, now) }, 128.dp, false)
-            ContextGauge(s, ctxSel, onCtxSel)
+                week?.let { fmtCountdown(it.resetsAt, now) }, burnLine(week), small, false,
+                spoken = spokenWindow("Weekly window", week?.pct, week?.resetsAt, now))
         }
-
-        s.extra?.let { Spacer(Modifier.height(20.dp)); ExtraCard(it) }
-
-        if (s.sessions.isNotEmpty()) {
-            Spacer(Modifier.height(20.dp))
-            SectionLabel("SESSIONS · LAST 5H")
-            Spacer(Modifier.height(10.dp))
-            s.sessions.take(2).forEach { SessionCard(it); Spacer(Modifier.height(10.dp)) }
+        val context: @Composable () -> Unit = { ContextGauge(s, ctxSel, onCtxSel, small) }
+        if (maxWidth >= small * 2 + 24.dp) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) { weekly(); context() }
+        } else {
+            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                weekly(); Spacer(Modifier.height(20.dp)); context()
+            }
         }
+    }
+}
 
+@Composable
+private fun HomeDetails(s: Snap, now: Long, showVerdict: Boolean = true) {
+    if (showVerdict) s.verdictText?.let { VerdictBanner(it, hexColor(s.verdictColor, Dim)); Spacer(Modifier.height(12.dp)) }
+    val scoped = s.scoped
+    if (scoped.isNotEmpty()) {
         Spacer(Modifier.height(16.dp))
-        Text(syncedAgo(s.updatedAt, now), color = Faint, fontSize = 11.sp, fontFamily = MONO,
-            modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
+        Card {
+            SectionLabel("WEEKLY · BY MODEL")
+            Spacer(Modifier.height(4.dp))
+            scoped.forEach { w ->
+                MiniWindowRow(w.label, w.pct, w.resetsAt?.let { fmtCountdown(it, now) })
+            }
+        }
+    }
+    s.extra?.let { Spacer(Modifier.height(16.dp)); ExtraCard(it) }
+    if (s.sessions.isNotEmpty()) {
+        Spacer(Modifier.height(20.dp))
+        SectionLabel("SESSIONS · LAST 5H")
+        Spacer(Modifier.height(10.dp))
+        s.sessions.take(2).forEach { SessionCard(it); Spacer(Modifier.height(10.dp)) }
+    }
+}
+
+/** "synced 12s ago" — turns amber with a warning icon and the word "stale" once the desktop
+ *  hasn't pushed for [STALE_AFTER_S]. */
+@Composable
+private fun SyncLine(updatedAt: Long, now: Long) {
+    val stale = ageSeconds(updatedAt, now) > STALE_AFTER_S
+    val color = if (stale) Warn else Faint
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp)) {
+        Icon(if (stale) Icons.Filled.Warning else Icons.Filled.Sync, contentDescription = null,
+            tint = color, modifier = Modifier.size(13.dp))
+        Text(
+            syncedAgo(updatedAt, now) + if (stale) " · stale — is the desktop app running?" else "",
+            color = color, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(start = 4.dp),
+        )
     }
 }
 
@@ -281,23 +419,30 @@ private fun AccountSwitcher(
         ?: s.org.ifBlank { null } ?: "Claude"
     val multi = accounts.size > 1
     Box(modifier) {
-        Column(Modifier.clip(RoundedCornerShape(8.dp)).clickable { open = true }) {
+        Column(
+            Modifier.clip(RoundedCornerShape(8.dp))
+                .clickable(onClickLabel = "Switch or add account", role = Role.Button) { open = true }
+                .padding(vertical = 2.dp)
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(name, color = Ink, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-                Text("  ▾", color = Faint, fontSize = 15.sp)
+                Text(name, color = Ink, style = MaterialTheme.typography.headlineSmall, maxLines = 1,
+                    modifier = Modifier.weight(1f, fill = false))
+                Icon(Icons.Filled.ArrowDropDown, contentDescription = null, tint = Faint)
             }
             Text(
                 if (multi) "${s.subscription.ifBlank { "plan" }} · ${accounts.size} accounts"
-                else s.subscription.ifBlank { "your plan" } + " plan",
-                color = Faint, fontSize = 12.sp, fontFamily = MONO,
+                else s.subscription.ifBlank { "your" } + " plan",
+                color = Faint, style = MaterialTheme.typography.labelMedium,
             )
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             accounts.forEach { acc ->
-                val lbl = acc.label?.ifBlank { null } ?: acc.pairing.accountId.take(8)
+                val id = acc.pairing.accountId
+                val lbl = acc.label?.ifBlank { null } ?: id.take(8)
+                val isActive = id == activeId
                 DropdownMenuItem(
-                    text = { Text(lbl, color = if (acc.pairing.accountId == activeId) Accent else Ink) },
-                    onClick = { open = false; onSwitch(acc.pairing.accountId) },
+                    text = { Text(if (isActive) "$lbl  (current)" else lbl, color = if (isActive) Accent else Ink) },
+                    onClick = { open = false; onSwitch(id) },
                 )
             }
             DropdownMenuItem(
@@ -308,66 +453,136 @@ private fun AccountSwitcher(
     }
 }
 
+/** Context gauge whose source session is user-selectable — tap to pick which Claude Code
+ *  session's context window the gauge tracks (defaults to the active one). */
 @Composable
-private fun SessionsPage(s: Snap, inner: PaddingValues) {
-    PageScroll(inner) {
+private fun ContextGauge(s: Snap, ctxSel: String?, onSel: (String?) -> Unit, dim: androidx.compose.ui.unit.Dp) {
+    var open by remember { mutableStateOf(false) }
+    val chosen = ctxSel?.let { sel -> s.sessions.firstOrNull { it.name == sel } }
+    val pct = chosen?.pct ?: s.ctxPct
+    val sub = chosen?.name ?: (s.ctxTokens?.let { "${Snap.fmtTokens(it)} tok" } ?: "active session")
+    val pickable = s.sessions.isNotEmpty()
+    val spoken = "Context window, " + (if (pct != null) "${pct.toInt()} percent full" else "no data") +
+        ", " + (chosen?.name?.let { "session $it" } ?: "active session")
+    Box {
+        Box(
+            Modifier.clip(RoundedCornerShape(12.dp))
+                .then(if (pickable) Modifier.clickable(onClickLabel = "Choose session", role = Role.Button) { open = true } else Modifier)
+        ) {
+            GaugeStat("Context", pct, bandColor(pct ?: 0.0), sub, null, dim, false, spoken = spoken,
+                dropdown = pickable)
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(
+                text = { Text("Active session", color = if (ctxSel == null) Accent else Ink) },
+                onClick = { onSel(null); open = false },
+            )
+            s.sessions.forEach { sess ->
+                DropdownMenuItem(
+                    text = {
+                        Text("${sess.name} · ${sess.pct.toInt()}%",
+                            color = if (ctxSel == sess.name) Accent else Ink)
+                    },
+                    onClick = { onSel(sess.name); open = false },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SessionsPage(s: Snap) {
+    PageScroll {
         PageTitle("Sessions", "last 5 hours")
         Spacer(Modifier.height(16.dp))
         if (s.sessions.isEmpty()) {
-            Text("No active Claude Code sessions in the last 5 hours.", color = Dim, fontSize = 14.sp)
+            Text("No active Claude Code sessions in the last 5 hours.", color = Dim, style = MaterialTheme.typography.bodyMedium)
         } else {
             s.sessions.forEach { SessionCard(it); Spacer(Modifier.height(12.dp)) }
         }
     }
 }
 
-/** Admin-only team overview, from the compact `team_overview` embedded in the snapshot. */
+/** Team pool overview (v0.3): every signed-in teammate — admin or member — sees the pooled
+ *  Claude accounts, from the compact `team_overview` embedded in the E2EE snapshot. */
 @Composable
-private fun TeamPage(s: Snap, inner: PaddingValues) {
+private fun TeamPage(s: Snap, now: Long) {
     val ov = s.teamOverview
-    PageScroll(inner) {
-        PageTitle("Team", ov?.tz?.ifBlank { null })
+    PageScroll {
+        val sub = ov?.let {
+            listOfNotNull(
+                "${it.accountCount} account" + if (it.accountCount == 1) "" else "s",
+                it.tz.ifBlank { null },
+                it.role?.let { r -> "you're ${if (r == "admin") "an admin" else "a $r"}" },
+            ).joinToString(" · ")
+        }
+        PageTitle("Team pool", sub)
         Spacer(Modifier.height(16.dp))
         if (ov == null) {
-            Text("Team data appears here when you're a team admin.", color = Dim, fontSize = 14.sp)
+            Text("Sign in to your team on the desktop (Team tab) to see the account pool here.",
+                color = Dim, style = MaterialTheme.typography.bodyMedium)
             return@PageScroll
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            StatTile("Org spend", ov.orgSpend?.let { fmtMoney(it, teamCur(ov)) } ?: "—", Modifier.weight(1f))
+            StatTile("Spend this month", orgSpendText(ov), Modifier.weight(1f))
             StatTile("Near limits", ov.near.size.toString(), Modifier.weight(1f))
         }
         if (ov.near.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))
-            Text(ov.near.joinToString(" · ") { "${it.name} ${it.window}" },
-                color = hexColor("#d4694f"), fontSize = 12.sp, fontFamily = MONO)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.Warning, contentDescription = null, tint = Danger, modifier = Modifier.size(14.dp))
+                Text(" Near limit: " + ov.near.joinToString(" · ") { "${it.name} ${it.window} ${it.pct.toInt()}%" },
+                    color = Danger, style = MaterialTheme.typography.labelMedium)
+            }
         }
         Spacer(Modifier.height(16.dp))
-        ov.members.forEach { TeamMemberRow(it); Spacer(Modifier.height(10.dp)) }
+        SectionLabel("ACCOUNTS")
+        Spacer(Modifier.height(8.dp))
+        ov.accounts.forEach { PoolAccountRow(it, now); Spacer(Modifier.height(10.dp)) }
+    }
+}
+
+/** Per-currency spend — never summed across currencies (`org_spend` is null when mixed). */
+private fun orgSpendText(ov: TeamOverview): String = when {
+    ov.spendByCurrency.size > 1 -> ov.spendByCurrency.entries.joinToString("\n") { (c, v) -> fmtMoney(v, c) }
+    ov.orgSpend != null -> fmtMoney(ov.orgSpend, ov.orgCurrency ?: ov.spendByCurrency.keys.firstOrNull()
+        ?: ov.accounts.firstOrNull { it.currency.isNotBlank() }?.currency ?: "")
+    ov.spendByCurrency.size == 1 -> ov.spendByCurrency.entries.first().let { (c, v) -> fmtMoney(v, c) }
+    else -> "—"
+}
+
+@Composable
+private fun PoolAccountRow(m: PoolAccount, now: Long) {
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(CardBg).padding(14.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Text(m.name, color = Ink, style = MaterialTheme.typography.titleSmall, maxLines = 1,
+                modifier = Modifier.weight(1f))
+            Column(horizontalAlignment = Alignment.End) {
+                Text(m.monthSpend?.let { fmtMoney(it, m.currency) } ?: "—",
+                    color = Ink, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, fontFamily = MONO)
+                m.monthTokens?.takeIf { it > 0 }?.let {
+                    Text("${Snap.fmtTokens(it)} tok this month", color = Faint, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth()) {
+            PoolWindow("5h", m.fhPct, m.fhResetsAt, now, Modifier.weight(1f))
+            Spacer(Modifier.width(12.dp))
+            PoolWindow("wk", m.sdPct, m.sdResetsAt, now, Modifier.weight(1f))
+        }
     }
 }
 
 @Composable
-private fun TeamMemberRow(m: TeamMember) {
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(CardBg).padding(14.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-            Text(m.name, color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1,
-                modifier = Modifier.weight(1f))
-            Text(m.monthSpend?.let { fmtMoney(it, m.currency) } ?: "—",
-                color = Ink, fontSize = 15.sp, fontWeight = FontWeight.Bold, fontFamily = MONO)
-        }
-        Spacer(Modifier.height(10.dp))
-        Row(Modifier.fillMaxWidth()) {
-            Column(Modifier.weight(1f)) {
-                Text("5h " + (m.fhPct?.let { "${it.toInt()}%" } ?: "—"), color = Faint, fontSize = 11.sp, fontFamily = MONO)
-                Spacer(Modifier.height(4.dp))
-                Bar(m.fhPct ?: 0.0, usageColor(m.fhPct ?: 0.0), Modifier.fillMaxWidth())
-            }
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text("wk " + (m.sdPct?.let { "${it.toInt()}%" } ?: "—"), color = Faint, fontSize = 11.sp, fontFamily = MONO)
-                Spacer(Modifier.height(4.dp))
-                Bar(m.sdPct ?: 0.0, usageColor(m.sdPct ?: 0.0), Modifier.fillMaxWidth())
-            }
+private fun PoolWindow(label: String, pct: Double?, resetsAt: Long?, now: Long, modifier: Modifier) {
+    Column(modifier) {
+        Text("$label " + (pct?.let { "${it.toInt()}%" } ?: "—"), color = Faint, style = MaterialTheme.typography.labelMedium)
+        Spacer(Modifier.height(4.dp))
+        Bar(pct ?: 0.0, usageColor(pct ?: 0.0), Modifier.fillMaxWidth())
+        if (resetsAt != null && resetsAt > now) {
+            Text(fmtCountdown(resetsAt, now), color = Faint, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(top = 3.dp))
         }
     }
 }
@@ -375,79 +590,30 @@ private fun TeamMemberRow(m: TeamMember) {
 private fun fmtMoney(v: Double, cur: String): String =
     (if (cur.isNotBlank()) "$cur " else "") + String.format("%.2f", v)
 
-private fun teamCur(ov: TeamOverview): String =
-    ov.members.firstOrNull { it.currency.isNotBlank() }?.currency ?: ""
-
+/** Read-only mirror of the desktop's recent Claude Code conversations (opt-in on the desktop:
+ *  Settings → Remote (phone) → mirror the active conversation). The phone never sends prompts. */
 @Composable
-private fun ChatPage(s: Snap, inner: PaddingValues, chatSel: String?, onChatSel: (String?) -> Unit) {
-    val ctx = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val pairing = remember(Prefs.activeId(ctx)) { Prefs.active(ctx) }   // re-read if the account switched
-    var draft by remember { mutableStateOf("") }
-    var sending by remember { mutableStateOf(false) }
-    var sent by remember { mutableStateOf(false) }
-
-    // The chosen conversation (defaults to the active/most-recent one).
+private fun ConversationPage(s: Snap, chatSel: String?, onChatSel: (String?) -> Unit) {
     val chosen = chatSel?.let { sel -> s.transcripts.firstOrNull { (it.cwd ?: it.name) == sel } }
         ?: s.transcripts.firstOrNull()
-
-    Column(Modifier.fillMaxSize().padding(inner).imePadding()) {
-        Column(
-            Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp).padding(top = 12.dp, bottom = 12.dp),
-        ) {
-            ConversationPicker(s.transcripts, chosen, onChatSel)
-            Spacer(Modifier.height(16.dp))
-            if (chosen == null || chosen.messages.isEmpty()) {
-                Text(
-                    "No conversation mirrored yet.\n\nOn the desktop: Settings → Remote (phone) → turn on " +
-                        "\"mirror the active conversation\" to see it here. To run prompts from here, also arm " +
-                        "\"run prompts sent from your phone\" (restricted to planning + read-only).",
-                    color = Dim, fontSize = 14.sp,
-                )
-            } else {
-                chosen.messages.forEach { MsgBubble(it); Spacer(Modifier.height(10.dp)) }
-            }
-            if (sent) {
-                Spacer(Modifier.height(6.dp))
-                Text("Sent — your desktop continues this conversation (read-only) and the reply appears here on the next sync.",
-                    color = Faint, fontSize = 11.sp, fontFamily = MONO)
-            }
-        }
-        Row(
-            Modifier.fillMaxWidth().background(Panel).padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            OutlinedTextField(
-                value = draft,
-                onValueChange = { draft = it; sent = false },
-                modifier = Modifier.weight(1f),
-                placeholder = {
-                    Text(chosen?.name?.let { "Send a prompt to $it…" } ?: "Send a prompt…", color = Faint)
-                },
-                maxLines = 4,
+    PageScroll {
+        ConversationPicker(s.transcripts, chosen, onChatSel)
+        Spacer(Modifier.height(16.dp))
+        if (chosen == null || chosen.messages.isEmpty()) {
+            Text(
+                "No conversation mirrored yet.\n\nOn the desktop: Settings → Remote (phone) → turn on " +
+                    "\"mirror the active conversation\" to read it here (end-to-end encrypted).",
+                color = Dim, style = MaterialTheme.typography.bodyMedium,
             )
-            Spacer(Modifier.width(8.dp))
-            Button(
-                onClick = {
-                    val txt = draft.trim()
-                    if (txt.isEmpty() || pairing == null) return@Button
-                    sending = true
-                    scope.launch {
-                        val ok = RelayClient(pairing).sendCommand(txt, chosen?.cwd, chosen?.sessionId)
-                        sending = false
-                        if (ok) { sent = true; draft = "" }
-                    }
-                },
-                enabled = !sending && draft.isNotBlank() && pairing != null,
-                shape = RoundedCornerShape(10.dp),
-            ) { Text(if (sending) "…" else "Send") }
+        } else {
+            chosen.messages.forEach { MsgBubble(it); Spacer(Modifier.height(10.dp)) }
+            Spacer(Modifier.height(6.dp))
+            Text("Read-only mirror · updates on each sync", color = Faint, style = MaterialTheme.typography.labelMedium)
         }
     }
 }
 
-/** Title for the Chat tab that doubles as a conversation picker: tap to choose which mirrored
- *  session to view and send prompts into (defaults to the active one). */
+/** Title that doubles as a conversation picker: tap to choose which mirrored session to read. */
 @Composable
 private fun ConversationPicker(transcripts: List<Transcript>, chosen: Transcript?, onSel: (String?) -> Unit) {
     var open by remember { mutableStateOf(false) }
@@ -456,15 +622,15 @@ private fun ConversationPicker(transcripts: List<Transcript>, chosen: Transcript
     Box {
         Column(
             Modifier.clip(RoundedCornerShape(8.dp))
-                .then(if (pickable) Modifier.clickable { open = true } else Modifier)
+                .then(if (pickable) Modifier.clickable(onClickLabel = "Choose conversation", role = Role.Button) { open = true } else Modifier)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Conversation", color = Ink, fontSize = 26.sp, fontWeight = FontWeight.Bold)
-                if (pickable) Text("  ▾", color = Faint, fontSize = 17.sp)
+                Text("Conversation", color = Ink, style = MaterialTheme.typography.headlineMedium)
+                if (pickable) Icon(Icons.Filled.ArrowDropDown, contentDescription = null, tint = Faint)
             }
             Text(
-                chosen?.name?.let { if (pickable) "$it · tap to switch" else it } ?: "—",
-                color = Faint, fontSize = 13.sp, fontFamily = MONO,
+                chosen?.let { (if (it.active) "${it.name} · active" else it.name) + if (pickable) " · tap to switch" else "" } ?: "—",
+                color = Faint, style = MaterialTheme.typography.labelMedium,
             )
         }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
@@ -473,9 +639,9 @@ private fun ConversationPicker(transcripts: List<Transcript>, chosen: Transcript
                 DropdownMenuItem(
                     text = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(Modifier.size(7.dp).clip(CircleShape)
-                                .background(if (t.active) hexColor("#5e9e72") else Faint))
-                            Text("  ${t.name}", color = if (key == selKey) Accent else Ink)
+                            Box(Modifier.size(7.dp).clip(CircleShape).background(if (t.active) LiveGreen else Faint))
+                            Text("  ${t.name}" + if (t.active) " (active)" else "",
+                                color = if (key == selKey) Accent else Ink)
                         }
                     },
                     onClick = { onSel(key); open = false },
@@ -486,142 +652,24 @@ private fun ConversationPicker(transcripts: List<Transcript>, chosen: Transcript
 }
 
 @Composable
-private fun MsgBubble(m: Msg) {
-    val user = m.role == "user"
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start) {
-        Column(
-            Modifier.fillMaxWidth(0.88f).clip(RoundedCornerShape(12.dp))
-                .background(if (user) Accent.copy(alpha = 0.16f) else Panel).padding(12.dp),
-        ) {
-            Text(if (user) "You" else "Claude", color = if (user) Accent else Dim,
-                fontSize = 11.sp, fontWeight = FontWeight.SemiBold, fontFamily = MONO)
-            Spacer(Modifier.height(4.dp))
-            MarkdownText(m.text, Ink)
+private fun HistoryPage(s: Snap) {
+    PageScroll {
+        PageTitle("History", null)
+        s.history?.let { h ->
+            Spacer(Modifier.height(16.dp))
+            Card {
+                SectionLabel("RECENT USAGE")
+                Spacer(Modifier.height(10.dp))
+                Sparkline(h)
+            }
         }
-    }
-}
-
-/** Minimal, dependency-free Markdown renderer for the mirrored conversation. Claude's replies are
- *  Markdown; without this the bubbles showed raw "**bold**", "# heading", "- item", `code`. Covers
- *  the common subset — fenced code blocks, ATX headings, bullet/numbered lists, blockquotes, and
- *  inline **bold** / *italic* / `code` / [links]. Anything unrecognized stays literal. */
-@Composable
-private fun MarkdownText(text: String, color: Color) {
-    val lines = text.split("\n")
-    Column(Modifier.fillMaxWidth()) {
-        var i = 0
-        while (i < lines.size) {
-            val raw = lines[i]
-            val line = raw.trimStart()
-            if (line.startsWith("```")) {
-                val code = StringBuilder()
-                i++
-                while (i < lines.size && !lines[i].trimStart().startsWith("```")) {
-                    code.append(lines[i]).append('\n'); i++
-                }
-                i++  // consume the closing fence
-                CodeBlock(code.toString().trimEnd('\n'))
-                continue
-            }
-            val ordered = ORDERED.find(line)
-            when {
-                line.startsWith("### ") -> MdLine(inlineMd(line.removePrefix("### ")), color, 15.sp, FontWeight.SemiBold)
-                line.startsWith("## ") -> MdLine(inlineMd(line.removePrefix("## ")), color, 17.sp, FontWeight.Bold)
-                line.startsWith("# ") -> MdLine(inlineMd(line.removePrefix("# ")), color, 19.sp, FontWeight.Bold)
-                line.startsWith("> ") -> MdLine(inlineMd(line.removePrefix("> ")), Dim, 14.sp)
-                line.startsWith("- ") || line.startsWith("* ") || line.startsWith("+ ") ->
-                    BulletLine("•", inlineMd(line.drop(2)), color)
-                ordered != null ->
-                    BulletLine(ordered.groupValues[1] + ".", inlineMd(line.removePrefix(ordered.value)), color)
-                raw.isBlank() -> Spacer(Modifier.height(6.dp))
-                else -> MdLine(inlineMd(raw), color, 14.sp)
-            }
-            i++
-        }
-    }
-}
-
-private val ORDERED = Regex("^(\\d+)\\. ")
-
-@Composable
-private fun MdLine(text: AnnotatedString, color: Color, size: TextUnit, weight: FontWeight? = null) {
-    Text(text, color = color, fontSize = size, fontWeight = weight, lineHeight = 20.sp,
-        modifier = Modifier.padding(vertical = 1.dp))
-}
-
-@Composable
-private fun BulletLine(marker: String, text: AnnotatedString, color: Color) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
-        Text("$marker ", color = Dim, fontSize = 14.sp, fontFamily = MONO)
-        Text(text, color = color, fontSize = 14.sp, lineHeight = 20.sp, modifier = Modifier.weight(1f))
-    }
-}
-
-@Composable
-private fun CodeBlock(code: String) {
-    Text(
-        code, color = Ink, fontSize = 13.sp, fontFamily = MONO, lineHeight = 18.sp,
-        modifier = Modifier.padding(vertical = 4.dp).fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp)).background(Bg).padding(10.dp),
-    )
-}
-
-/** Inline Markdown → styled text: **bold**, *italic*, `code`, [text](url). Underscores are left
- *  literal on purpose so snake_case / file_names aren't mangled. Unbalanced markers stay literal. */
-private fun inlineMd(src: String): AnnotatedString = buildAnnotatedString {
-    var i = 0
-    while (i < src.length) {
-        val c = src[i]
-        when {
-            c == '*' && i + 1 < src.length && src[i + 1] == '*' -> {
-                val end = src.indexOf("**", i + 2)
-                if (end > i + 1) {
-                    withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(src.substring(i + 2, end)) }
-                    i = end + 2
-                } else { append(c); i++ }
-            }
-            c == '*' -> {
-                val end = src.indexOf('*', i + 1)
-                if (end > i) {
-                    withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(src.substring(i + 1, end)) }
-                    i = end + 1
-                } else { append(c); i++ }
-            }
-            c == '`' -> {
-                val end = src.indexOf('`', i + 1)
-                if (end > i) {
-                    withStyle(SpanStyle(fontFamily = MONO, background = Panel2, color = Ink)) {
-                        append(" " + src.substring(i + 1, end) + " ")
-                    }
-                    i = end + 1
-                } else { append(c); i++ }
-            }
-            c == '[' -> {
-                val close = src.indexOf(']', i + 1)
-                if (close > i && close + 1 < src.length && src[close + 1] == '(') {
-                    val urlEnd = src.indexOf(')', close + 2)
-                    if (urlEnd > close) {
-                        withStyle(SpanStyle(color = Accent, textDecoration = TextDecoration.Underline)) {
-                            append(src.substring(i + 1, close))
-                        }
-                        i = urlEnd + 1
-                    } else { append(c); i++ }
-                } else { append(c); i++ }
-            }
-            else -> { append(c); i++ }
-        }
-    }
-}
-
-@Composable
-private fun StatsPage(s: Snap, inner: PaddingValues) {
-    PageScroll(inner) {
-        PageTitle("All-time", null)
         Spacer(Modifier.height(20.dp))
-        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(s.atTokens?.let { Snap.fmtTokens(it) } ?: "—", color = Accent,
-                fontSize = 46.sp, fontWeight = FontWeight.Bold, fontFamily = MONO)
-            Text("TOTAL TOKENS", color = Faint, fontSize = 12.sp, letterSpacing = 1.5.sp)
+        Column(
+            Modifier.fillMaxWidth().semantics(mergeDescendants = true) {},
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(s.atTokens?.let { Snap.fmtTokens(it) } ?: "—", color = Accent, style = MaterialTheme.typography.displayMedium)
+            Text("ALL-TIME TOKENS", color = Faint, style = MaterialTheme.typography.labelSmall)
         }
         Spacer(Modifier.height(24.dp))
         val tiles = listOf(
@@ -643,37 +691,64 @@ private fun StatsPage(s: Snap, inner: PaddingValues) {
 
 @Composable
 private fun SettingsPage(
-    s: Snap, pairing: Pairing?, now: Long, inner: PaddingValues,
+    s: Snap, pairing: Pairing?, now: Long, lastOkAt: Long,
     accounts: List<Prefs.Account>, activeId: String?,
-    onSwitch: (String) -> Unit, onAddAccount: () -> Unit, onRemove: (String) -> Unit,
+    onAddAccount: () -> Unit, onRemove: (String) -> Unit, onUnpairAll: () -> Unit,
     onRefresh: () -> Unit,
 ) {
     val ctx = LocalContext.current
     var lockOn by remember { mutableStateOf(WidgetData.lockscreen(ctx)) }
-    PageScroll(inner) {
+    var lockDenied by remember { mutableStateOf(false) }
+    val canPost = Notifications.canPost(ctx)
+    val permLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        lockOn = granted
+        lockDenied = !granted
+        WidgetData.setLockscreen(ctx, granted)
+        updateLockNotification(ctx)
+    }
+    val openNotifSettings = {
+        ctx.startActivity(
+            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                .putExtra(Settings.EXTRA_APP_PACKAGE, ctx.packageName)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }
+    PageScroll {
         PageTitle("Settings", null)
         Spacer(Modifier.height(16.dp))
         Card {
-            SectionLabel("ACCOUNTS")
+            SectionLabel("PAIRED DESKTOPS")
             Spacer(Modifier.height(4.dp))
             accounts.forEach { acc ->
                 val id = acc.pairing.accountId
                 val lbl = acc.label?.ifBlank { null } ?: id.take(8)
-                Row(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
-                        .clickable { onSwitch(id) }.padding(vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Box(Modifier.size(8.dp).clip(CircleShape)
-                        .background(if (id == activeId) hexColor("#5e9e72") else Faint))
-                    Text(lbl, color = if (id == activeId) Ink else Dim, fontSize = 14.sp, maxLines = 1,
-                        modifier = Modifier.padding(start = 10.dp).weight(1f))
-                    TextButton(onClick = { onRemove(id) }) {
-                        Text("Remove", color = hexColor("#d4694f"), fontSize = 12.sp)
+                val isActive = id == activeId
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(lbl, color = Ink, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                        if (isActive) Text("showing now", color = Faint, style = MaterialTheme.typography.labelMedium)
+                    }
+                    TextButton(
+                        onClick = { onRemove(id) },
+                        modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = "Remove $lbl" },
+                    ) {
+                        Text("Remove", color = Danger, style = MaterialTheme.typography.labelLarge)
                     }
                 }
             }
-            TextButton(onClick = onAddAccount) { Text("+ Add account", color = Accent) }
+            Row {
+                TextButton(onClick = onAddAccount, modifier = Modifier.heightIn(min = 48.dp)) {
+                    Text("+ Add account", color = Accent, style = MaterialTheme.typography.labelLarge)
+                }
+                if (accounts.size > 1) {
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = onUnpairAll, modifier = Modifier.heightIn(min = 48.dp)) {
+                        Text("Unpair all", color = Danger, style = MaterialTheme.typography.labelLarge)
+                    }
+                }
+            }
+            Text("Switch accounts from the name at the top of Home.", color = Faint,
+                style = MaterialTheme.typography.labelMedium)
         }
         Spacer(Modifier.height(14.dp))
         Card {
@@ -682,78 +757,87 @@ private fun SettingsPage(
             KV("Organization", s.org.ifBlank { "—" })
             KV("Email", s.email.ifBlank { "—" })
             KV("Plan", s.subscription.ifBlank { "—" })
+            if (s.loginExpired) KV("Desktop login", "expired", Danger)
         }
         Spacer(Modifier.height(14.dp))
         Card {
             SectionLabel("SYNC")
             Spacer(Modifier.height(4.dp))
-            KV("State", if (s.ok) "live" else "stale")
-            KV("Last synced", syncedAgo(s.updatedAt, now))
+            val stale = ageSeconds(s.updatedAt, now) > STALE_AFTER_S
+            KV("Desktop", when {
+                stale -> "stale"
+                s.ok -> "live"
+                else -> "idle / error"
+            }, if (stale) Warn else Ink)
+            KV("Last snapshot", syncedAgo(s.updatedAt, now).removePrefix("synced "), if (stale) Warn else Ink)
+            KV("Last checked", if (lastOkAt > 0) ago(((now - lastOkAt) / 1000).coerceAtLeast(0)) else "—")
             KV("Relay", pairing?.url?.substringAfter("://")?.substringBefore("/") ?: "—")
-            s.statusWord?.let { KV("Anthropic", s.statusDesc ?: it) }
+            s.statusWord?.let { KV("Claude status", s.statusDesc ?: it) }
         }
         Spacer(Modifier.height(14.dp))
         Card {
-            SectionLabel("LOCK SCREEN")
+            SectionLabel("NOTIFICATIONS")
             Spacer(Modifier.height(8.dp))
+            KV("Usage alerts", if (canPost) "on" else "off", if (canPost) Ink else Warn)
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Show usage on the lock screen", color = Ink, fontSize = 14.sp)
-                    Text("Ongoing notification · 5h / weekly / context", color = Faint, fontSize = 12.sp)
+                    Text("Show usage on the lock screen", color = Ink, style = MaterialTheme.typography.bodyMedium)
+                    Text("Ongoing notification · 5h / weekly / context", color = Faint,
+                        style = MaterialTheme.typography.labelMedium)
                 }
                 Switch(
-                    checked = lockOn,
-                    onCheckedChange = {
-                        lockOn = it
-                        WidgetData.setLockscreen(ctx, it)
-                        updateLockNotification(ctx)
+                    checked = lockOn && canPost,
+                    onCheckedChange = { on ->
+                        when {
+                            !on -> {
+                                lockOn = false; lockDenied = false
+                                WidgetData.setLockscreen(ctx, false); updateLockNotification(ctx)
+                            }
+                            Notifications.canPost(ctx) -> {
+                                lockOn = true; lockDenied = false
+                                WidgetData.setLockscreen(ctx, true); updateLockNotification(ctx)
+                            }
+                            Notifications.needsRuntimePermission(ctx) ->
+                                permLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            else -> lockDenied = true          // switched off in system settings
+                        }
                     },
                     colors = SwitchDefaults.colors(checkedTrackColor = Accent, checkedThumbColor = Ink),
+                    modifier = Modifier.semantics { contentDescription = "Show usage on the lock screen" },
                 )
+            }
+            if (!canPost && (lockDenied || lockOn)) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Notifications are blocked for this app, so alerts and the lock-screen card can't show.",
+                    color = Warn, style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = openNotifSettings, modifier = Modifier.heightIn(min = 48.dp)) {
+                    Text("Open notification settings", color = Accent)
+                }
             }
         }
         Spacer(Modifier.height(18.dp))
-        TextButton(onClick = onRefresh) { Text("Refresh now", color = Accent) }
+        TextButton(onClick = onRefresh, modifier = Modifier.heightIn(min = 48.dp)) { Text("Refresh now", color = Accent) }
         Spacer(Modifier.height(18.dp))
         Text(
             "Unofficial · not affiliated with Anthropic. \"Claude\" and \"Claude Code\" " +
                 "are trademarks of Anthropic.",
-            color = Faint, fontSize = 11.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth(),
+            color = Faint, style = MaterialTheme.typography.bodySmall,
+            textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth(),
         )
     }
 }
 
-// ---- shared layout --------------------------------------------------------
-
-/** A page body: insets for the system bars + bottom nav, scrolls, with consistent padding. */
+/** Extra-usage card for the Home bento. */
 @Composable
-private fun PageScroll(inner: PaddingValues, content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
-    Column(
-        Modifier.fillMaxSize().padding(inner).verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp).padding(top = 12.dp, bottom = 28.dp),
-        content = content,
-    )
-}
-
-@Composable
-private fun PageTitle(title: String, sub: String?) {
-    Text(title, color = Ink, fontSize = 26.sp, fontWeight = FontWeight.Bold)
-    if (sub != null) Text(sub, color = Faint, fontSize = 13.sp, fontFamily = MONO)
-}
-
-@Composable
-private fun Card(content: @Composable () -> Unit) {
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(CardBg).padding(16.dp)) { content() }
-}
-
-/** Extra-usage € card for the Home bento. */
-@Composable
-private fun ExtraCard(e: com.claudeusage.tracker.ExtraUsage) {
+private fun ExtraCard(e: ExtraUsage) {
     Card {
         SectionLabel("EXTRA USAGE · THIS MONTH")
         Spacer(Modifier.height(8.dp))
-        val cur = e.currency.ifBlank { "" }
+        val cur = e.currency
         val pre = if (cur.isNotBlank()) "$cur " else ""
+        val dim = Dim
         Text(
             buildAnnotatedString {
                 append(pre)
@@ -761,227 +845,43 @@ private fun ExtraCard(e: com.claudeusage.tracker.ExtraUsage) {
                     append(e.used?.let { String.format("%.2f", it) } ?: "—")
                 }
                 e.limit?.let {
-                    withStyle(SpanStyle(color = Dim)) { append("  of $pre${String.format("%.2f", it)}") }
+                    withStyle(SpanStyle(color = dim)) { append("  of $pre${String.format("%.2f", it)}") }
                 }
             },
-            color = Ink, fontSize = 22.sp, fontFamily = MONO,
+            color = Ink, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Normal, fontFamily = MONO,
         )
         e.pct?.let { p ->
             Spacer(Modifier.height(10.dp))
             Bar(p, usageColor(p), Modifier.fillMaxWidth())
             Spacer(Modifier.height(6.dp))
-            Text("${p.toInt()}% of monthly cap", color = Faint, fontSize = 12.sp, fontFamily = MONO)
-        }
-    }
-}
-
-// ---- components -----------------------------------------------------------
-
-/** A circular 270° gauge with a big centred percentage; `big` bumps the type for the hero. */
-@Composable
-private fun GaugeStat(label: String, pct: Double?, color: Color, sub: String?, dim: Dp, big: Boolean) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Box(Modifier.size(dim), contentAlignment = Alignment.Center) {
-            Canvas(Modifier.fillMaxSize()) {
-                val sw = size.minDimension * 0.09f
-                val tl = Offset(sw / 2f, sw / 2f)
-                val arc = Size(size.width - sw, size.height - sw)
-                drawArc(Panel2, 135f, 270f, false, tl, arc, style = Stroke(sw, cap = StrokeCap.Round))
-                val p = (pct ?: 0.0).coerceIn(0.0, 100.0).toFloat()
-                if (p > 0f) drawArc(color, 135f, 270f * p / 100f, false, tl, arc, style = Stroke(sw, cap = StrokeCap.Round))
-            }
-            Row(verticalAlignment = Alignment.Bottom) {
-                Text(if (pct != null) "${pct.toInt()}" else "–", color = color,
-                    fontSize = if (big) 50.sp else 32.sp, fontWeight = FontWeight.Bold, fontFamily = MONO)
-                Text("%", color = Dim, fontSize = if (big) 18.sp else 13.sp, fontFamily = MONO,
-                    modifier = Modifier.padding(start = 2.dp, bottom = if (big) 6.dp else 4.dp))
-            }
-        }
-        Spacer(Modifier.height(10.dp))
-        Text(label, color = Ink, fontSize = if (big) 15.sp else 13.sp, fontWeight = FontWeight.Medium)
-        if (sub != null) Text(sub, color = Faint, fontSize = 12.sp, fontFamily = MONO)
-    }
-}
-
-/** Context gauge whose source session is user-selectable — tap to pick which Claude Code
- *  session's context window the gauge tracks (defaults to the active one). */
-@Composable
-private fun ContextGauge(s: Snap, ctxSel: String?, onSel: (String?) -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    val chosen = ctxSel?.let { sel -> s.sessions.firstOrNull { it.name == sel } }
-    val pct = chosen?.pct ?: s.ctxPct
-    val sub = chosen?.name ?: (s.ctxTokens?.let { "${Snap.fmtTokens(it)} tok" } ?: "active")
-    val pickable = s.sessions.isNotEmpty()
-    Box {
-        Box(
-            Modifier.clip(RoundedCornerShape(12.dp))
-                .then(if (pickable) Modifier.clickable { open = true } else Modifier)
-        ) {
-            GaugeStat(if (pickable) "Context  ▾" else "Context", pct, bandColor(pct ?: 0.0), sub, 128.dp, false)
-        }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            DropdownMenuItem(
-                text = { Text("Active session", color = if (ctxSel == null) Accent else Ink) },
-                onClick = { onSel(null); open = false },
-            )
-            s.sessions.forEach { sess ->
-                DropdownMenuItem(
-                    text = {
-                        Text("${sess.name} · ${sess.pct.toInt()}%",
-                            color = if (ctxSel == sess.name) Accent else Ink)
-                    },
-                    onClick = { onSel(sess.name); open = false },
-                )
-            }
+            Text("${p.toInt()}% of monthly cap", color = Faint, style = MaterialTheme.typography.labelMedium)
         }
     }
 }
 
 @Composable
-private fun SessionCard(s: Sess) {
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Panel).padding(14.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-            Box(Modifier.size(8.dp).clip(CircleShape).background(if (s.active) hexColor("#5e9e72") else Faint))
-            Text(s.name, color = Ink, fontSize = 16.sp, fontWeight = FontWeight.Medium, maxLines = 1,
-                modifier = Modifier.padding(start = 10.dp).weight(1f))
-            Text("${s.pct.toInt()}%", color = bandColor(s.pct), fontSize = 22.sp,
-                fontWeight = FontWeight.Bold, fontFamily = MONO)
-        }
-        Spacer(Modifier.height(10.dp))
-        Bar(s.pct, bandColor(s.pct), Modifier.fillMaxWidth())
-        Spacer(Modifier.height(8.dp))
-        Text("${Snap.fmtTokens(s.tokens)} tokens · ${if (s.active) "active" else "idle"}",
-            color = Faint, fontSize = 12.sp, fontFamily = MONO)
-    }
-}
-
-@Composable
-private fun StatTile(label: String, value: String, modifier: Modifier = Modifier) {
-    Column(modifier.clip(RoundedCornerShape(12.dp)).background(Panel).padding(16.dp)) {
-        Text(value, color = Ink, fontSize = 24.sp, fontWeight = FontWeight.Bold, fontFamily = MONO, maxLines = 1)
-        Spacer(Modifier.height(4.dp))
-        Text(label, color = Faint, fontSize = 12.sp)
-    }
-}
-
-@Composable
-private fun SectionLabel(t: String) =
-    Text(t, color = Faint, fontSize = 11.sp, fontFamily = MONO, letterSpacing = 1.sp)
-
-@Composable
-private fun KV(k: String, v: String) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(k, color = Dim, fontSize = 13.sp, modifier = Modifier.weight(1f))
-        Text(v, color = Ink, fontSize = 13.sp, fontFamily = MONO, textAlign = TextAlign.End)
-    }
-}
-
-@Composable
-private fun Bar(pct: Double, color: Color, modifier: Modifier = Modifier) {
-    Box(modifier.height(8.dp).clip(RoundedCornerShape(4.dp)).background(Panel2)) {
-        Box(
-            Modifier.fillMaxHeight().fillMaxWidth((pct.coerceIn(0.0, 100.0) / 100.0).toFloat())
-                .clip(RoundedCornerShape(4.dp)).background(color)
-        )
-    }
-}
-
-@Composable
-private fun VerdictBanner(text: String, color: Color) {
-    Box(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-            .background(color.copy(alpha = 0.14f)).padding(horizontal = 16.dp, vertical = 12.dp)
-    ) {
-        Text(text.uppercase(), color = color, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.5.sp)
-    }
-}
-
-@Composable
-private fun StatusChip(word: String, color: Color) {
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(end = 4.dp)) {
-        Box(Modifier.size(8.dp).clip(CircleShape).background(color))
-        Text(word, color = color, fontSize = 12.sp, fontFamily = MONO, modifier = Modifier.padding(start = 5.dp))
-    }
-}
-
-@Composable
-private fun WaitingForSync() {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("Waiting for your desktop", color = Ink, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(10.dp))
-        Text(
-            "Syncing for the first time. Keep the desktop app open with Remote (phone) " +
-                "enabled — this usually takes a few seconds.",
-            color = Dim, fontSize = 13.sp, textAlign = TextAlign.Center,
-        )
-        Spacer(Modifier.height(24.dp))
-        LinearProgressIndicator(
-            modifier = Modifier.fillMaxWidth(0.62f).height(5.dp).clip(RoundedCornerShape(3.dp)),
-            color = Accent, trackColor = Panel2,
-        )
-    }
-}
-
-@Composable
-private fun ErrorState(msg: String, onRetry: () -> Unit) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(msg, color = hexColor("#d4694f"), fontSize = 15.sp, textAlign = TextAlign.Center)
-        Spacer(Modifier.height(14.dp))
-        TextButton(onClick = onRetry) { Text("Try again", color = Accent) }
-    }
-}
-
-@Composable
-private fun BottomNav(hasTeam: Boolean, selected: String, onSelect: (String) -> Unit) {
+private fun BottomNav(tabs: List<String>, selected: String, onSelect: (String) -> Unit) {
     NavigationBar(containerColor = Panel, tonalElevation = 0.dp) {
-        // Admins get a Team destination (replacing Sessions, which is previewed on Home);
-        // everyone else keeps Sessions. Stats is labelled History.
-        val items = buildList {
-            add(Triple("Home", Icons.Filled.Speed, "home"))
-            if (hasTeam) add(Triple("Team", Icons.Filled.Groups, "team"))
-            else add(Triple("Sessions", Icons.AutoMirrored.Filled.ViewList, "sessions"))
-            add(Triple("Chat", Icons.Filled.Forum, "chat"))
-            add(Triple("History", Icons.Filled.Insights, "history"))
-            add(Triple("Settings", Icons.Filled.Settings, "settings"))
-        }
         val colors = NavigationBarItemDefaults.colors(
             selectedIconColor = Accent, selectedTextColor = Accent, indicatorColor = Panel2,
             unselectedIconColor = Dim, unselectedTextColor = Faint,
         )
-        items.forEach { (label, icon, key) ->
+        tabs.forEach { key ->
+            val (label, icon) = when (key) {
+                "home" -> "Home" to Icons.Filled.Speed
+                "team" -> "Team" to Icons.Filled.Groups
+                "sessions" -> "Sessions" to Icons.AutoMirrored.Filled.ViewList
+                "conversation" -> "Convo" to Icons.Filled.Forum
+                "history" -> "History" to Icons.Filled.Insights
+                else -> "Settings" to Icons.Filled.Settings
+            }
             NavigationBarItem(
                 selected = selected == key,
                 onClick = { onSelect(key) },
-                icon = { Icon(icon, contentDescription = label) },
-                label = { Text(label, fontSize = 11.sp) },
+                icon = { Icon(icon, contentDescription = null) },   // the label is announced
+                label = { Text(label, maxLines = 1) },
                 colors = colors,
             )
         }
-    }
-}
-
-// ---- helpers --------------------------------------------------------------
-
-private fun fmtCountdown(resetsAt: Long?, now: Long): String {
-    if (resetsAt == null) return "—"
-    var s = (resetsAt - now) / 1000
-    if (s < 0) s = 0
-    val d = s / 86400; val h = (s % 86400) / 3600; val m = (s % 3600) / 60
-    return when {
-        d > 0 -> "resets in ${d}d ${h}h"
-        h > 0 -> "resets in ${h}h ${m}m"
-        else -> "resets in ${m}m"
-    }
-}
-
-private fun syncedAgo(updatedAtSec: Long, now: Long): String {
-    if (updatedAtSec <= 0) return "—"
-    val s = now / 1000 - updatedAtSec
-    return when {
-        s < 5 -> "synced just now"
-        s < 60 -> "synced ${s}s ago"
-        s < 3600 -> "synced ${s / 60}m ago"
-        s < 86400 -> "synced ${s / 3600}h ago"
-        else -> "synced ${s / 86400}d ago"
     }
 }

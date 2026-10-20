@@ -25,7 +25,7 @@ jobs:
           python -m pip install . pyinstaller
 
       - name: Generate icon
-        run: python -c "import claude_usage_tracker as m; m.make_app_icon(256).save('app.ico', sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+        run: python -c "from ctu.tray import make_app_icon; make_app_icon(256).save('app.ico', sizes=[(16,16),(20,20),(24,24),(32,32),(40,40),(48,48),(64,64),(128,128),(256,256)])"
 
       # --onedir + --noupx: UPX-packed and onefile binaries are the two biggest
       # antivirus / SmartScreen false-positive triggers for PyInstaller apps.
@@ -39,7 +39,21 @@ jobs:
           --collect-all nacl --collect-all qrcode
           --hidden-import _cffi_backend
           --hidden-import pystray._win32
+          --collect-submodules ctu
+          --add-data "ctu/ui;ctu/ui"
           claude_usage_tracker.py
+
+      # The windowed exe still sets its exit code: build state from fixtures, serve the API,
+      # SSE and the bundled UI files, render the tray icons — no network, no user data.
+      - name: Smoke test the bundle (--version, --selftest)
+        shell: pwsh
+        run: |
+          $exe = "dist\ClaudeUsageTracker\ClaudeUsageTracker.exe"
+          foreach ($a in @("--version", "--selftest")) {
+            $p = Start-Process -FilePath $exe -ArgumentList $a -Wait -PassThru -NoNewWindow
+            if ($p.ExitCode -ne 0) { throw "$a exited with $($p.ExitCode)" }
+          }
+          if (-not (Test-Path "dist\ClaudeUsageTracker\_internal\ctu\ui\dashboard.html")) { throw "ctu/ui missing from the bundle" }
 
       - name: Resolve version
         id: ver

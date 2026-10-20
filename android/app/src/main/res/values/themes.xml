@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.ClaudeUsage" parent="android:Theme.Material.NoActionBar">
+    <!-- Light by default; values-night/themes.xml switches the parent for dark mode. System bar
+         colours/icons are handled by enableEdgeToEdge() in MainActivity. -->
+    <style name="Theme.ClaudeUsage" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@color/bg</item>
-        <item name="android:statusBarColor">@color/bg</item>
-        <item name="android:navigationBarColor">@color/bg</item>
         <item name="android:colorPrimary">@color/accent</item>
     </style>
 </resources>

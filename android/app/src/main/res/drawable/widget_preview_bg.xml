@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Background of the static picker preview (layout/widget_preview.xml). Android 12+ uses
+     drawable-v31/ with the launcher's own widget corner radius. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="@color/widget_preview_bg" />
+    <corners android:radius="16dp" />
+</shape>

@@ -1,0 +1,313 @@
+/* Claude Usage Tracker v2: design tokens (spec §6).
+ *
+ * Light values sit on :root. Dark values are declared twice: once for the OS
+ * setting (prefers-color-scheme) unless the page is forced light, and once for
+ * an explicit [data-theme="dark"]. The accent comes from Python at runtime
+ * (theme.js sets --accent / --accent-text / --on-accent inline on <html>).
+ * Every state colour is paired with an icon and a word in the markup.
+ */
+
+:root {
+  color-scheme: light;
+
+  --font-text: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+
+  /* Neutrals */
+  --bg: #F3F3F3;
+  --layer: #F9F9F9;
+  --card: #FFFFFF;
+  --stroke: #E5E5E5;
+  --stroke-control: #D1D1D1;
+  --stroke-strong: #8A8A8A;
+  --text: #1B1B1B;
+  --text-2: #5C5C5C;
+  --text-3: #6B6B6B;
+  --track: #E6E6E6;
+  --neutral-fill: #6B6B6B;
+  --subtle-fill: rgba(0, 0, 0, 0.04);
+  --subtle-fill-2: rgba(0, 0, 0, 0.065);
+  --overlay-bg: rgba(249, 249, 249, 0.96);
+  --scrim: rgba(0, 0, 0, 0.3);
+  --shadow-1: 0 2px 4px rgba(0, 0, 0, 0.08);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.16);
+
+  /* Accent (default; overridden at runtime from state.app.accent) */
+  --accent: #005FB8;
+  --accent-text: #005FB8;
+  --accent-hover: #0A6CC4;
+  --accent-pressed: #2A7FCC;
+  --on-accent: #FFFFFF;
+  --accent-soft: #E1EEF9;
+
+  /* Focus */
+  --focus-outer: #1B1B1B;
+  --focus-inner: #FFFFFF;
+
+  /* State: ok */
+  --ok: #0072B2;
+  --ok-text: #005A8F;
+  --ok-hatch-a: #8FC0DF;
+  --ok-hatch-b: #CFE4F2;
+  --ok-bg: #FFFFFF;
+  --ok-border: #E5E5E5;
+
+  /* State: watch */
+  --watch: #E69F00;
+  --watch-text: #8A5A00;
+  --watch-hatch-a: #F0C766;
+  --watch-hatch-b: #F9E6BC;
+  --watch-bg: #FDF6E6;
+  --watch-edge: #A87300; /* 1px edge so the amber fill clears 3:1 on light surfaces */
+  --watch-border: #F1DBA6;
+
+  /* State: will hit */
+  --hit: #C4470A;
+  --hit-text: #A9400A;
+  --hit-hatch-a: #F2B79A;
+  --hit-hatch-b: #F9DCCD;
+  --hit-bg: #FDF1EA;
+  --hit-border: #F1CDB8;
+
+  /* State: limited (same hue, solid surface) */
+  --limited-bg: #C4470A;
+  --limited-border: #A33A08;
+  --on-limited: #FFFFFF;
+  --on-limited-2: #FFE9DE;
+
+  /* State: stale */
+  --stale: #8A8A8A;
+  --stale-text: #6B6B6B;
+  --stale-bg: #F2F2F2;
+  --stale-border: #DADADA;
+
+  /* Service */
+  --svc-ok: #0F7B0F;
+  --svc-minor: #E69F00;
+  --svc-major: #C4470A;
+
+  /* Glyph drawn on top of a filled status shape */
+  --on-status: #FFFFFF;
+
+  /* Bullet bar */
+  --tick: #1B1B1B;
+
+  /* Categorical series (validated: dataviz validator, light on #FFFFFF) */
+  --series-1: #2A78D6;
+  --series-2: #139A6A;
+
+  /* Sequential heatmap (one hue, light to dark) */
+  --heat-0: #EBEBEB;
+  --heat-1: #C6DCF5;
+  --heat-2: #8DBBEB;
+  --heat-3: #4F93DC;
+  --heat-4: #1F5FAF;
+
+  /* Shape */
+  --r-control: 4px;
+  --r-card: 8px;
+}
+
+/* ---- Dark (OS setting, unless forced light) ---- */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #202020;
+    --layer: #272727;
+    --card: #2B2B2B;
+    --stroke: #3A3A3A;
+    --stroke-control: #4C4C4C;
+    --stroke-strong: #8A8A8A;
+    --text: #FFFFFF;
+    --text-2: #C5C5C5;
+    --text-3: #A8A8A8;
+    --track: #3D3D3D;
+    --neutral-fill: #A0A0A0;
+    --subtle-fill: rgba(255, 255, 255, 0.055);
+    --subtle-fill-2: rgba(255, 255, 255, 0.085);
+    --overlay-bg: rgba(39, 39, 39, 0.96);
+    --scrim: rgba(0, 0, 0, 0.5);
+    --shadow-1: 0 2px 4px rgba(0, 0, 0, 0.3);
+    --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.45);
+
+    --accent: #60CDFF;
+    --accent-text: #60CDFF;
+    --accent-hover: #5BBDEB;
+    --accent-pressed: #56ACD6;
+    --on-accent: #000000;
+    --accent-soft: #24394A;
+
+    --focus-outer: #FFFFFF;
+    --focus-inner: #000000;
+
+    --ok: #4FA8E0;
+    --ok-text: #4FA8E0;
+    --ok-hatch-a: #3D7298;
+    --ok-hatch-b: #2E4C62;
+    --ok-bg: #2B2B2B;
+    --ok-border: #3A3A3A;
+
+    --watch: #F2B544;
+    --watch-text: #F2B544;
+    --watch-hatch-a: #8C6B2C;
+    --watch-hatch-b: #5A4826;
+    --watch-bg: #383024;
+    --watch-edge: transparent;
+    --watch-border: #5C4A27;
+
+    --hit: #F07B3F;
+    --hit-text: #F49B6E;
+    --hit-hatch-a: #9A5232;
+    --hit-hatch-b: #5E3829;
+    --hit-bg: #3D2A22;
+    --hit-border: #6A3B26;
+
+    --limited-bg: #F07B3F;
+    --limited-border: #F49B6E;
+    --on-limited: #1B1B1B;
+    --on-limited-2: #2B1A12;
+
+    --stale: #8A8A8A;
+    --stale-text: #A8A8A8;
+    --stale-bg: #2E2E2E;
+    --stale-border: #444444;
+
+    --svc-ok: #6CCB5F;
+    --svc-minor: #F2B544;
+    --svc-major: #F07B3F;
+
+    --on-status: #1B1B1B;
+    --tick: #FFFFFF;
+
+    --series-1: #3987E5;
+    --series-2: #199E70;
+
+    --heat-0: #363636;
+    --heat-1: #1F3A5A;
+    --heat-2: #24578F;
+    --heat-3: #3B82CF;
+    --heat-4: #7DB6F2;
+  }
+}
+
+/* ---- Dark (explicit) ---- */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #202020;
+  --layer: #272727;
+  --card: #2B2B2B;
+  --stroke: #3A3A3A;
+  --stroke-control: #4C4C4C;
+  --stroke-strong: #8A8A8A;
+  --text: #FFFFFF;
+  --text-2: #C5C5C5;
+  --text-3: #A8A8A8;
+  --track: #3D3D3D;
+  --neutral-fill: #A0A0A0;
+  --subtle-fill: rgba(255, 255, 255, 0.055);
+  --subtle-fill-2: rgba(255, 255, 255, 0.085);
+  --overlay-bg: rgba(39, 39, 39, 0.96);
+  --scrim: rgba(0, 0, 0, 0.5);
+  --shadow-1: 0 2px 4px rgba(0, 0, 0, 0.3);
+  --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.45);
+
+  --accent: #60CDFF;
+  --accent-text: #60CDFF;
+  --accent-hover: #5BBDEB;
+  --accent-pressed: #56ACD6;
+  --on-accent: #000000;
+  --accent-soft: #24394A;
+
+  --focus-outer: #FFFFFF;
+  --focus-inner: #000000;
+
+  --ok: #4FA8E0;
+  --ok-text: #4FA8E0;
+  --ok-hatch-a: #3D7298;
+  --ok-hatch-b: #2E4C62;
+  --ok-bg: #2B2B2B;
+  --ok-border: #3A3A3A;
+
+  --watch: #F2B544;
+  --watch-text: #F2B544;
+  --watch-hatch-a: #8C6B2C;
+  --watch-hatch-b: #5A4826;
+  --watch-bg: #383024;
+  --watch-edge: transparent;
+  --watch-border: #5C4A27;
+
+  --hit: #F07B3F;
+  --hit-text: #F49B6E;
+  --hit-hatch-a: #9A5232;
+  --hit-hatch-b: #5E3829;
+  --hit-bg: #3D2A22;
+  --hit-border: #6A3B26;
+
+  --limited-bg: #F07B3F;
+  --limited-border: #F49B6E;
+  --on-limited: #1B1B1B;
+  --on-limited-2: #2B1A12;
+
+  --stale: #8A8A8A;
+  --stale-text: #A8A8A8;
+  --stale-bg: #2E2E2E;
+  --stale-border: #444444;
+
+  --svc-ok: #6CCB5F;
+  --svc-minor: #F2B544;
+  --svc-major: #F07B3F;
+
+  --on-status: #1B1B1B;
+  --tick: #FFFFFF;
+
+  --series-1: #3987E5;
+  --series-2: #199E70;
+
+  --heat-0: #363636;
+  --heat-1: #1F3A5A;
+  --heat-2: #24578F;
+  --heat-3: #3B82CF;
+  --heat-4: #7DB6F2;
+}
+
+/* ---- Windows High Contrast / forced colours ----
+ * Status is carried by icon + word, so every state colour collapses to system
+ * colours. Meters and charts opt out of forced adjustment and use the system
+ * palette explicitly (see base.css / runway styles). */
+@media (forced-colors: active) {
+  :root {
+    --bg: Canvas;
+    --layer: Canvas;
+    --card: Canvas;
+    --stroke: CanvasText;
+    --stroke-control: ButtonText;
+    --stroke-strong: CanvasText;
+    --text: CanvasText;
+    --text-2: CanvasText;
+    --text-3: GrayText;
+    --track: Canvas;
+    --neutral-fill: CanvasText;
+    --subtle-fill: transparent;
+    --subtle-fill-2: transparent;
+    --overlay-bg: Canvas;
+    --accent: Highlight;
+    --accent-text: LinkText;
+    --accent-hover: Highlight;
+    --accent-pressed: Highlight;
+    --on-accent: HighlightText;
+    --accent-soft: Canvas;
+    --focus-outer: Highlight;
+    --focus-inner: Canvas;
+    --ok: CanvasText; --ok-text: CanvasText; --ok-hatch-a: CanvasText; --ok-hatch-b: Canvas; --ok-bg: Canvas; --ok-border: CanvasText;
+    --watch: CanvasText; --watch-text: CanvasText; --watch-hatch-a: CanvasText; --watch-hatch-b: Canvas; --watch-bg: Canvas; --watch-border: CanvasText;
+    --hit: CanvasText; --hit-text: CanvasText; --hit-hatch-a: CanvasText; --hit-hatch-b: Canvas; --hit-bg: Canvas; --hit-border: CanvasText;
+    --limited-bg: Canvas; --limited-border: CanvasText; --on-limited: CanvasText; --on-limited-2: CanvasText;
+    --stale: GrayText; --stale-text: GrayText; --stale-bg: Canvas; --stale-border: GrayText;
+    --svc-ok: CanvasText; --svc-minor: CanvasText; --svc-major: CanvasText;
+    --on-status: Canvas;
+    --tick: CanvasText;
+    --series-1: Highlight;
+    --series-2: CanvasText;
+    --heat-0: Canvas; --heat-1: GrayText; --heat-2: GrayText; --heat-3: CanvasText; --heat-4: Highlight;
+  }
+}

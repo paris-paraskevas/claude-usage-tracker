@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Static picker preview background with the system widget corner radius (Android 12+). -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="@color/widget_preview_bg" />
+    <corners android:radius="@android:dimen/system_app_widget_background_radius" />
+</shape>
